@@ -1,11 +1,12 @@
 package rip
 
 import (
+	"path"
+
 	"github.com/leslieleung/reaper/internal/config"
 	"github.com/leslieleung/reaper/internal/scm/github"
 	"github.com/leslieleung/reaper/internal/typedef"
 	"github.com/leslieleung/reaper/internal/ui"
-	"path"
 )
 
 func GetRepositories(name string) []typedef.Repository {
@@ -43,12 +44,14 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 		}
 		for _, r := range repos {
 			ret = append(ret, typedef.Repository{
-				Name:     path.Base(r),
-				URL:      r,
-				Cron:     repo.Cron,
-				Storage:  repo.Storage,
-				UseCache: repo.UseCache,
-				Type:     typedef.TypeRepo,
+				Name:        path.Base(r),
+				URL:         r,
+				Cron:        repo.Cron,
+				Storage:     repo.Storage,
+				UseCache:    repo.UseCache,
+				Type:        typedef.TypeRepo,
+				AllBranches: repo.AllBranches,
+				Depth:       repo.Depth,
 			})
 		}
 	default:

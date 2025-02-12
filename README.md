@@ -46,6 +46,8 @@ repository:
       - localFile
       - backblaze
     useCache: True
+    allBranches: True
+    depth: 0
 
 storage:
   - name: localFile

@@ -3,7 +3,6 @@ package rip
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"path"
 
@@ -21,6 +20,9 @@ import (
 
 func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
+	depth := repo.Depth
+	allBranches := repo.AllBranches
+	isUpdated := false
 	// get current directory
 	currentDir, _ := os.Getwd()
 
@@ -55,9 +57,11 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	var gitRepo *git.Repository
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
+		isUpdated = true
 		_, err = git.PlainClone(gitDir, false, &git.CloneOptions{
 			URL:      "https://" + repo.URL,
 			Progress: os.Stdout,
+			Depth:    depth,
 		})
 
 		if err != nil {
@@ -76,7 +80,10 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	// fetch all remote branches
 	err = gitRepo.Fetch(&git.FetchOptions{
 		RemoteName: "origin",
-		RefSpecs:   []config.RefSpec{config.RefSpec("+refs/heads/*:refs/remotes/origin/*")},
+		RefSpecs: []config.RefSpec{
+			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
+		},
+		Force: true,
 	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		ui.Errorf("Error fetching remote branches, %s", err)
@@ -97,11 +104,36 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		return err
 	}
 
+	// get remote default branch
+	var remoteDefaultBranchName string
+	var remoteDefaultBranchRef plumbing.ReferenceName
+
+	remote, err := gitRepo.Remote("origin")
+	if err != nil {
+		ui.Errorf("Error get remote, %s", err)
+		return err
+	}
+	remoteRefs, err := remote.List(&git.ListOptions{})
+	if err != nil {
+		ui.Errorf("Error get remote references, %s", err)
+	}
+	for _, ref := range remoteRefs {
+		if ref.Name() == "HEAD" {
+			remoteDefaultBranchRef = ref.Target()
+			remoteDefaultBranchName = remoteDefaultBranchRef.Short()
+		}
+	}
+
 	// find all remote branches
 	refs.ForEach(func(ref *plumbing.Reference) error {
 		if ref.Name().IsRemote() {
 			// get remote branch name
 			remoteBranchName := ref.Name().Short()
+
+			// if not pull all branches and this branch is not default then skip
+			if !allBranches && (remoteDefaultBranchName != remoteBranchName) {
+				return nil
+			}
 
 			// set local branch name
 			localBranchName := remoteBranchName[len("origin/"):]
@@ -114,6 +146,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 			// if local branch not exist
 			if err == plumbing.ErrReferenceNotFound {
+				isUpdated = true
 				// create local branch and switch to the new local branch
 				err = w.Checkout(&git.CheckoutOptions{
 					Branch: branchRef,
@@ -128,7 +161,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 					ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
 					return err
 				}
-				fmt.Printf("local branch %s has been checked out. \n", localBranchName)
+				ui.Printf("local branch %s has been checked out. \n", localBranchName)
 
 				// set upstream branch of local branch to avoid the local branch
 				//   without a tracking remote branch
@@ -142,12 +175,12 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 					return err
 				}
 
-				fmt.Printf("local branch %s has been set to track remote branch %s. \n", localBranchName, remoteBranchName)
+				ui.Printf("local branch %s has been set to track remote branch %s. \n", localBranchName, remoteBranchName)
 			} else if err != nil {
 				ui.Errorf("Error checking local branch %s existing, %s", localBranchName, err)
 				return err
 			} else {
-				fmt.Printf("local branch %s exists, skip creating. \n", localBranchName)
+				ui.Printf("local branch %s exists, skip creating. \n", localBranchName)
 			}
 
 			// switch to local branch, only after that we can do pull
@@ -166,61 +199,79 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				RemoteName:    "origin",
 				ReferenceName: branchRef,
 				// pull all commits, not only the latest
-				Depth: 0,
+				Depth: depth,
 			})
 			if err == git.NoErrAlreadyUpToDate {
-				fmt.Printf("local branch %s already up to date. \n", localBranchName)
+				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
+			} else {
+				isUpdated = true
 			}
 
-			fmt.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
+			ui.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
 		}
 		return nil
 	})
 
-	// change directory to the parent directory of the repo
-	err = os.Chdir(workingDir)
-	if err != nil {
-		ui.Errorf("Error changing directory, %s", err)
-	}
-
-	files, err := archiver.FilesFromDisk(nil, map[string]string{
-		repoName: repo.Name,
+	// switch to default branch
+	err = w.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName(remoteDefaultBranchName),
+		// abandon the modify of local
+		Force: true,
 	})
 	if err != nil {
-		ui.Errorf("Error reading files, %s", err)
+		ui.Errorf("Error checkout default branch %s, %s", remoteDefaultBranchRef, err)
 		return err
 	}
 
-	now := time.Now().Format("20060102150405")
-	base := repo.Name + "-" + now + ".tar.gz"
-	// TODO store to a temporary file first if greater than certain size
-	archive := &bytes.Buffer{}
-
-	format := archiver.CompressedArchive{
-		Compression: archiver.Gz{},
-		Archival:    archiver.Tar{},
-	}
-	err = format.Archive(context.Background(), archive, files)
-	if err != nil {
-		ui.Errorf("Error creating archive, %s", err)
-		return err
-	}
-
-	// handle storages
-	for _, s := range storages {
-		backend, err := storage.GetStorage(s)
+	if isUpdated {
+		// change directory to the parent directory of the repo
+		err = os.Chdir(workingDir)
 		if err != nil {
-			ui.Errorf("Error getting backend, %s", err)
+			ui.Errorf("Error changing directory, %s", err)
+		}
+
+		files, err := archiver.FilesFromDisk(nil, map[string]string{
+			repoName: repo.Name,
+		})
+		if err != nil {
+			ui.Errorf("Error reading files, %s", err)
 			return err
 		}
-		err = backend.PutObject(path.Join(s.Path, base), archive.Bytes())
+
+		now := time.Now().Format("20060102150405")
+		base := repo.Name + "-" + now + ".tar.gz"
+		// TODO store to a temporary file first if greater than certain size,
+		//      we can use isUpdated to support this feature temporality
+		archive := &bytes.Buffer{}
+
+		format := archiver.CompressedArchive{
+			Compression: archiver.Gz{},
+			Archival:    archiver.Tar{},
+		}
+		err = format.Archive(context.Background(), archive, files)
 		if err != nil {
-			ui.Errorf("Error storing file, %s", err)
+			ui.Errorf("Error creating archive, %s", err)
 			return err
 		}
-		ui.Printf("File %s stored", path.Join(s.Path, base))
+
+		// handle storages
+		for _, s := range storages {
+			backend, err := storage.GetStorage(s)
+			if err != nil {
+				ui.Errorf("Error getting backend, %s", err)
+				return err
+			}
+			err = backend.PutObject(path.Join(s.Path, base), archive.Bytes())
+			if err != nil {
+				ui.Errorf("Error storing file, %s", err)
+				return err
+			}
+			ui.Printf("File %s stored", path.Join(s.Path, base))
+		}
+	} else {
+		ui.Printf("All is uptodate, no need to restore")
 	}
 
 	// cleanup
