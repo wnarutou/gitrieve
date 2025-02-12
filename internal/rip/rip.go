@@ -3,13 +3,12 @@ package rip
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/uuid"
 	"github.com/leslieleung/reaper/internal/storage"
@@ -56,7 +55,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	var gitRepo *git.Repository
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
-		gitRepo, err = git.PlainClone(gitDir, false, &git.CloneOptions{
+		_, err = git.PlainClone(gitDir, false, &git.CloneOptions{
 			URL:      "https://" + repo.URL,
 			Progress: os.Stdout,
 		})
@@ -65,66 +64,120 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			ui.Errorf("Error cloning repository, %s", err)
 			return err
 		}
-		// 获取所有远程分支
-		remote, err := gitRepo.Remote("origin")
-		if err != nil {
-			log.Fatalf("Failed to get remote: %v", err)
-		}
+	}
 
-		refs, err := remote.List(&git.ListOptions{})
-		if err != nil {
-			log.Fatalf("Failed to list references: %v", err)
-		}
+	// open local repo
+	gitRepo, err = git.PlainOpen(gitDir)
+	if err != nil {
+		ui.Errorf("Error opening repository, %s", err)
+		return err
+	}
 
-		// 遍历所有分支并检出
-		for _, ref := range refs {
-			if ref.Name().IsBranch() {
-				branchName := ref.Name().Short()
-				fmt.Printf("Checking out branch: %s\n", branchName)
+	// fetch all remote branches
+	err = gitRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec("+refs/heads/*:refs/remotes/origin/*")},
+	})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		ui.Errorf("Error fetching remote branches, %s", err)
+		return err
+	}
 
-				wt, err := gitRepo.Worktree()
-				if err != nil {
-					log.Fatalf("Failed to get worktree: %v", err)
-				}
+	// get remote references
+	refs, err := gitRepo.References()
+	if err != nil {
+		ui.Errorf("Error get remote references, %s", err)
+		return err
+	}
 
-				err = wt.Checkout(&git.CheckoutOptions{
-					Branch: plumbing.ReferenceName(fmt.Sprintf("refs/remotes/origin/%s", branchName)),
+	// get worktree
+	w, err := gitRepo.Worktree()
+	if err != nil {
+		ui.Errorf("Error get worktree, %s", err)
+		return err
+	}
+
+	// find all remote branches
+	refs.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Name().IsRemote() {
+			// get remote branch name
+			remoteBranchName := ref.Name().Short()
+
+			// set local branch name
+			localBranchName := remoteBranchName[len("origin/"):]
+
+			// create local branch reference
+			branchRef := plumbing.NewBranchReferenceName(localBranchName)
+
+			// check local branch exist or not
+			_, err := gitRepo.Reference(branchRef, false)
+
+			// if local branch not exist
+			if err == plumbing.ErrReferenceNotFound {
+				// create local branch and switch to the new local branch
+				err = w.Checkout(&git.CheckoutOptions{
+					Branch: branchRef,
+					Create: true,
 					Force:  true,
+					// create local branch basing on ref.Hash(), that means head of remote branch,
+					//   to avoid content of this new branch is a copy of last local branch,
+					//   which will cause non-fast-forward update.
+					Hash: ref.Hash(),
 				})
 				if err != nil {
-					log.Printf("Failed to checkout branch %s: %v", branchName, err)
+					ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
+					return err
 				}
-			}
-		}
+				fmt.Printf("local branch %s has been checked out. \n", localBranchName)
 
-		fmt.Println("All branches have been checked out.")
+				// set upstream branch of local branch to avoid the local branch
+				//   without a tracking remote branch
+				err = gitRepo.CreateBranch(&config.Branch{
+					Name:   localBranchName,
+					Remote: "origin",
+					Merge:  branchRef,
+				})
+				if err != nil {
+					ui.Errorf("Error setting %s's upstream branch , %s", localBranchName, err)
+					return err
+				}
 
-		ui.Printf("Repository %s cloned", repo.Name)
-	} else {
-		r, err := git.PlainOpen(gitDir)
-		if err != nil {
-			ui.Errorf("Error opening repository, %s", err)
-			return err
-		}
-		w, err := r.Worktree()
-		if err != nil {
-			ui.Errorf("Error getting worktree, %s", err)
-			return err
-		}
-		err = w.Pull(&git.PullOptions{
-			RemoteName: "origin",
-			Progress:   os.Stdout,
-		})
-		if err != nil {
-			if errors.Is(err, git.NoErrAlreadyUpToDate) {
-				ui.Printf("Repository %s already up to date", repo.Name)
-				return nil
+				fmt.Printf("local branch %s has been set to track remote branch %s. \n", localBranchName, remoteBranchName)
+			} else if err != nil {
+				ui.Errorf("Error checking local branch %s existing, %s", localBranchName, err)
+				return err
+			} else {
+				fmt.Printf("local branch %s exists, skip creating. \n", localBranchName)
 			}
-			ui.Errorf("Error pulling repository, %s", err)
-			return err
+
+			// switch to local branch, only after that we can do pull
+			err = w.Checkout(&git.CheckoutOptions{
+				Branch: branchRef,
+				// abandon the modify of local
+				Force: true,
+			})
+			if err != nil {
+				ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
+				return err
+			}
+
+			// pull from upstream branch
+			err = w.Pull(&git.PullOptions{
+				RemoteName:    "origin",
+				ReferenceName: branchRef,
+				// pull all commits, not only the latest
+				Depth: 0,
+			})
+			if err == git.NoErrAlreadyUpToDate {
+				fmt.Printf("local branch %s already up to date. \n", localBranchName)
+			} else if err != nil {
+				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
+			}
+
+			fmt.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
 		}
-		ui.Printf("Repository %s pulled", repo.Name)
-	}
+		return nil
+	})
 
 	// change directory to the parent directory of the repo
 	err = os.Chdir(workingDir)
