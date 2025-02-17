@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	Repository  []typedef.Repository   `yaml:"repository"`
-	Storage     []typedef.MultiStorage `yaml:"storage"`
-	GitHubToken string                 `yaml:"githubToken"`
+	Repository     []typedef.Repository   `yaml:"repository"`
+	Storage        []typedef.MultiStorage `yaml:"storage"`
+	GitHubToken    string                 `yaml:"githubToken"`
+	ConcurrencyNum uint                   `yaml:"cocurrencyNum"`
 }
 
 var Path string
@@ -40,4 +41,8 @@ func GetStorageMap() map[string]typedef.MultiStorage {
 		storageMap[storage.Name] = storage
 	}
 	return storageMap
+}
+
+func GetConcurrencyNum() uint {
+	return ins.ConcurrencyNum
 }

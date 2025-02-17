@@ -1,13 +1,14 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/go-co-op/gocron/v2"
 	"github.com/leslieleung/reaper/internal/config"
 	"github.com/leslieleung/reaper/internal/rip"
 	"github.com/leslieleung/reaper/internal/typedef"
 	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
-	"time"
 )
 
 var Cmd = &cobra.Command{
@@ -18,10 +19,11 @@ var Cmd = &cobra.Command{
 
 func runDaemon(cmd *cobra.Command, args []string) {
 	storageMap := config.GetStorageMap()
+	concurrencyNum := config.GetConcurrencyNum()
 
 	s, err := gocron.NewScheduler(
 		gocron.WithLocation(time.Local),
-		gocron.WithLimitConcurrentJobs(3, gocron.LimitModeWait),
+		gocron.WithLimitConcurrentJobs(concurrencyNum, gocron.LimitModeWait),
 	)
 	if err != nil {
 		ui.ErrorfExit("Error creating scheduler, %s", err)
