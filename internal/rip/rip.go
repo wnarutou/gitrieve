@@ -10,12 +10,11 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/uuid"
+	"github.com/leslieleung/reaper/internal/scm"
 	"github.com/leslieleung/reaper/internal/storage"
 	"github.com/leslieleung/reaper/internal/typedef"
 	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/mholt/archiver/v4"
-
-	"time"
 )
 
 func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
@@ -42,13 +41,17 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	}
 
 	// get the repo name from the URL
-	repoName := path.Base(repo.URL)
+	r, err := scm.NewRepository(repo.URL)
+	if err != nil {
+		return err
+	}
+	repoName := r.Name
 	// check if repo name is valid
 	if repoName == "." || repo.Name == "/" {
 		ui.Errorf("Invalid repository name")
 		return err
 	}
-	gitDir := path.Join(workingDir, repoName)
+	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName)
 	var exist bool
 	// check if the repo already exists
 	if _, err := os.Stat(path.Join(gitDir, ".git")); err == nil {
@@ -227,7 +230,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 	if isUpdated {
 		// change directory to the parent directory of the repo
-		err = os.Chdir(workingDir)
+		err = os.Chdir(path.Dir(gitDir))
 		if err != nil {
 			ui.Errorf("Error changing directory, %s", err)
 		}
@@ -240,8 +243,11 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			return err
 		}
 
-		now := time.Now().Format("20060102150405")
-		base := repo.Name + "-" + now + ".tar.gz"
+		// For codes, there is no need to save the history.
+		// The latest one is the full version and already contains all the history,
+		// so it can be replaced directly.
+		// now := time.Now().Format("20060102150405")
+		base := r.Name + ".tar.gz"
 		// TODO store to a temporary file first if greater than certain size,
 		//      we can use isUpdated to support this feature temporality
 		archive := &bytes.Buffer{}
@@ -256,6 +262,12 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			return err
 		}
 
+		// change to current dir
+		err = os.Chdir(currentDir)
+		if err != nil {
+			ui.Errorf("Error changing directory, %s", err)
+		}
+
 		// handle storages
 		for _, s := range storages {
 			backend, err := storage.GetStorage(s)
@@ -263,12 +275,12 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				ui.Errorf("Error getting backend, %s", err)
 				return err
 			}
-			err = backend.PutObject(path.Join(s.Path, base), archive.Bytes())
+			err = backend.PutObject(path.Join(s.Path, r.Host, r.Name, base), archive.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
 				return err
 			}
-			ui.Printf("File %s stored", path.Join(s.Path, base))
+			ui.Printf("File %s stored", path.Join(s.Path, r.Host, r.Name, base))
 		}
 	} else {
 		ui.Printf("All is uptodate, no need to restore")
