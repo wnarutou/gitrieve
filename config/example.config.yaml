@@ -13,6 +13,10 @@ repository:
     type: user
     storage:
       - localFile
+    useCache: True
+    allBranches: True
+    depth: 0
+
 
 storage:
   - name: localFile
@@ -27,3 +31,6 @@ storage:
     secretAccessKey: your-secret-access-key
 
 githubToken: xxx
+cocurrencyNum: 6
+releaseSizeLimit: 300000000
+releaseNumLimit: 3

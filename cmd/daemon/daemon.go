@@ -20,13 +20,7 @@ var Cmd = &cobra.Command{
 func runDaemon(cmd *cobra.Command, args []string) {
 	storageMap := config.GetStorageMap()
 
-	// Retrieve the concurrency number from configuration. This determines the maximum number
-	// of concurrent jobs the scheduler will run. If not configured (i.e., zero),
-	// default to 3 concurrent jobs to ensure stable performance.
 	concurrencyNum := config.GetConcurrencyNum()
-	if concurrencyNum == 0 {
-		concurrencyNum = 3
-	}
 
 	s, err := gocron.NewScheduler(
 		gocron.WithLocation(time.Local),

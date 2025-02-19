@@ -2,13 +2,14 @@ package github
 
 import (
 	"context"
-	"github.com/google/go-github/v56/github"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/typedef"
 	"io"
 	"net/http"
 	"net/url"
 	"sync"
+
+	"github.com/google/go-github/v56/github"
+	"github.com/leslieleung/reaper/internal/config"
+	"github.com/leslieleung/reaper/internal/typedef"
 )
 
 type Client struct {

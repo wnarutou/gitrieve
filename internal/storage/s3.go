@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+
 	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -38,6 +39,11 @@ func New(endpoint, bucket, region, accessKeyID, secretAccessKey string) (*S3, er
 	}
 	s3.client = client
 	return s3, nil
+}
+
+func (s S3) ListObjectMetaInfo(prefix string) ([]ObjectMetaInfo, error) {
+	// TODO implement me
+	panic("implement me")
 }
 
 func (s S3) ListObject(prefix string) ([]Object, error) {
