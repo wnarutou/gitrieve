@@ -8,6 +8,7 @@ repository:
     useCache: True
     allBranches: True
     depth: 0
+    downloadReleases: True
   - name: me
     orgName: LeslieLeung
     type: user
@@ -16,6 +17,7 @@ repository:
     useCache: True
     allBranches: True
     depth: 0
+    downloadReleases: True
 
 
 storage:

@@ -48,6 +48,7 @@ repository:
     useCache: True
     allBranches: True
     depth: 0
+    downloadReleases: True
 
 storage:
   - name: localFile
