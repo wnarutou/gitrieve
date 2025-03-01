@@ -11,6 +11,7 @@ type Repository struct {
 	AllBranches      bool     `yaml:"allBranches"`      // pull all branches or not (default: false)
 	Depth            int      `yaml:"depth"`            // pull depth: 0, 1, ... (default: 0, means all commit logs)
 	DownloadReleases bool     `yaml:"downloadReleases"` // download releases or not (default: false)
+	DownloadIssues   bool     `yaml:"downloadIssues"`   // download issues or not (default: false)
 }
 
 func (r *Repository) GetType() string {

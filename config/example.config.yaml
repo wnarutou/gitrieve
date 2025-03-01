@@ -9,6 +9,7 @@ repository:
     allBranches: True
     depth: 0
     downloadReleases: True
+    downloadIssues: True
   - name: me
     orgName: LeslieLeung
     type: user
@@ -18,6 +19,7 @@ repository:
     allBranches: True
     depth: 0
     downloadReleases: True
+    downloadIssues: Tr
 
 
 storage:

@@ -51,7 +51,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		ui.Errorf("Invalid repository name")
 		return err
 	}
-	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName)
+	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "code")
 	var exist bool
 	// check if the repo already exists
 	if _, err := os.Stat(path.Join(gitDir, ".git")); err == nil {
@@ -275,12 +275,12 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				ui.Errorf("Error getting backend, %s", err)
 				return err
 			}
-			err = backend.PutObject(path.Join(s.Path, r.Host, r.Name, base), archive.Bytes())
+			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), archive.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
 				return err
 			}
-			ui.Printf("File %s stored", path.Join(s.Path, r.Host, r.Name, base))
+			ui.Printf("File %s stored", path.Join(s.Path, r.Host, r.Owner, r.Name, base))
 		}
 	} else {
 		ui.Printf("All is uptodate, no need to restore")
@@ -288,7 +288,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 	// cleanup
 	if !useCache {
-		err = os.RemoveAll(workingDir)
+		err = os.RemoveAll(gitDir)
 		if err != nil {
 			ui.Errorf("Error cleaning up working directory, %s", err)
 			return err
