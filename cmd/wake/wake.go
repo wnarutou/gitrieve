@@ -37,7 +37,6 @@ func runWake(cmd *cobra.Command, args []string) {
 	}
 
 	for _, repo := range rip.GetRepositories(repoName) {
-		storages := make([]typedef.MultiStorage, 0)
 		for _, storage := range repo.Storage {
 			if s, ok := storageMap[storage]; !ok {
 				ui.Errorf("Storage %s not found in config", storage)

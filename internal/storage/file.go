@@ -61,67 +61,25 @@ func (f File) ListObjectMetaInfo(prefix string) ([]ObjectMetaInfo, error) {
 }
 
 func (f File) ListObject(prefix string) ([]Object, error) {
-	if prefix == "" {
-		return nil, errors.New("invalid prefix: prefix cannot be empty")
-	}
-
-	// Clean the prefix to handle any relative or special path characters
-	cleanedPrefix := filepath.Clean(prefix)
-
-	// Check if the prefix is a directory
-	info, err := os.Stat(cleanedPrefix)
+	// Get metadata info first
+	metaInfos, err := f.ListObjectMetaInfo(prefix)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("invalid prefix: does not exist")
-		}
 		return nil, err
 	}
 
 	var objects []Object
-	if info.IsDir() {
-		// Read the directory contents
-		entries, err := os.ReadDir(cleanedPrefix)
+	for _, meta := range metaInfos {
+		data, err := os.ReadFile(filepath.Clean(meta.Path))
 		if err != nil {
 			return nil, err
 		}
 
-		for _, entry := range entries {
-			filePath := filepath.Join(cleanedPrefix, entry.Name())
-			fileInfo, err := os.Stat(filePath)
-			if err != nil {
-				return nil, err
-			}
-
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, err
-			}
-
-			objects = append(objects, Object{
-				Content: data,
-				MetaInfo: ObjectMetaInfo{
-					Path:         filepath.Join(prefix, entry.Name()),
-					Size:         fileInfo.Size(),
-					LastModified: fileInfo.ModTime(),
-				},
-			})
-
-		}
-	} else {
-		// Read the directory contents
-		data, err := os.ReadFile(cleanedPrefix)
-		if err != nil {
-			return nil, err
-		}
 		objects = append(objects, Object{
-			Content: data,
-			MetaInfo: ObjectMetaInfo{
-				Path:         filepath.Join(prefix, info.Name()),
-				Size:         info.Size(),
-				LastModified: info.ModTime(),
-			},
+			Content:  data,
+			MetaInfo: meta,
 		})
 	}
+
 	return objects, nil
 }
 
