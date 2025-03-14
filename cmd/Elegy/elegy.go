@@ -2,10 +2,10 @@ package elegy
 
 import (
 	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/issue"
 	"github.com/leslieleung/reaper/internal/rip"
 	"github.com/leslieleung/reaper/internal/typedef"
 	"github.com/leslieleung/reaper/internal/ui"
+	"github.com/leslieleung/reaper/internal/wiki"
 	"github.com/spf13/cobra"
 )
 
@@ -46,7 +46,7 @@ func runElegy(cmd *cobra.Command, args []string) {
 			}
 		}
 		ui.Printf("Running %s", repo.Name)
-		if err := issue.Sync(repo, storages); err != nil {
+		if err := wiki.Sync(repo, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}

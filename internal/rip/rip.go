@@ -17,7 +17,7 @@ import (
 	"github.com/mholt/archiver/v4"
 )
 
-func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
+func Rip(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
 	depth := repo.Depth
 	allBranches := repo.AllBranches
@@ -51,10 +51,21 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		ui.Errorf("Invalid repository name")
 		return err
 	}
-	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "code")
+	var gitDir string
+	var gitSuffix string
+	var gitUrl string
+	if iswiki {
+		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "wiki")
+		gitSuffix = ".wiki.git"
+		gitUrl = repo.URL + ".wiki"
+	} else {
+		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "code")
+		gitSuffix = ".git"
+		gitUrl = repo.URL
+	}
 	var exist bool
 	// check if the repo already exists
-	if _, err := os.Stat(path.Join(gitDir, ".git")); err == nil {
+	if _, err := os.Stat(path.Join(gitDir, gitSuffix)); err == nil {
 		exist = true
 	}
 	var gitRepo *git.Repository
@@ -62,7 +73,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if !exist {
 		isUpdated = true
 		_, err = git.PlainClone(gitDir, false, &git.CloneOptions{
-			URL:      "https://" + repo.URL,
+			URL:      "https://" + gitUrl,
 			Progress: os.Stdout,
 			Depth:    depth,
 		})
@@ -235,8 +246,17 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			ui.Errorf("Error changing directory, %s", err)
 		}
 
+		var sourceDir string
+		var targetDir string
+		if iswiki {
+			sourceDir = "wiki"
+			targetDir = r.Name + "_wiki"
+		} else {
+			sourceDir = "code"
+			targetDir = r.Name
+		}
 		files, err := archiver.FilesFromDisk(nil, map[string]string{
-			repoName: repo.Name,
+			sourceDir: targetDir,
 		})
 		if err != nil {
 			ui.Errorf("Error reading files, %s", err)
@@ -247,7 +267,7 @@ func Rip(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		// The latest one is the full version and already contains all the history,
 		// so it can be replaced directly.
 		// now := time.Now().Format("20060102150405")
-		base := r.Name + ".tar.gz"
+		base := targetDir + ".tar.gz"
 		// TODO store to a temporary file first if greater than certain size,
 		//      we can use isUpdated to support this feature temporality
 		archive := &bytes.Buffer{}

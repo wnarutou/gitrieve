@@ -54,6 +54,7 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 				Depth:            repo.Depth,
 				DownloadReleases: repo.DownloadReleases,
 				DownloadIssues:   repo.DownloadIssues,
+				DownloadWiki:     repo.DownloadWiki,
 			})
 		}
 	default:

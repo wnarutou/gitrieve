@@ -30,7 +30,7 @@ func runRip(cmd *cobra.Command, args []string) {
 			}
 		}
 		ui.Printf("Running %s", repo.Name)
-		if err := rip.Rip(repo, storages); err != nil {
+		if err := rip.Rip(repo, false, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}
