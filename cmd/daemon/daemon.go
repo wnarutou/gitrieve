@@ -10,6 +10,7 @@ import (
 	"github.com/leslieleung/reaper/internal/rip"
 	"github.com/leslieleung/reaper/internal/typedef"
 	"github.com/leslieleung/reaper/internal/ui"
+	"github.com/leslieleung/reaper/internal/wiki"
 	"github.com/spf13/cobra"
 )
 
@@ -67,6 +68,16 @@ func runDaemon(cmd *cobra.Command, args []string) {
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download issues of %s, %s", repo.Name, err)
+			}
+		}
+		ui.Printf("Scheduled %s, cron: %s", repo.Name, repo.Cron)
+		if repo.DownloadWiki {
+			_, err = s.NewJob(
+				gocron.CronJob(repo.Cron, false),
+				gocron.NewTask(wiki.Sync, repo, storages),
+			)
+			if err != nil {
+				ui.Errorf("Error scheduling download wiki of %s, %s", repo.Name, err)
 			}
 		}
 		ui.Printf("Scheduled %s, cron: %s", repo.Name, repo.Cron)

@@ -11,6 +11,18 @@ repository:
     downloadReleases: True
     downloadIssues: True
     downloadWiki: True
+  - name: docmost
+    url: github.com/docmost/docmost
+    cron: "0 * * * *"
+    storage:
+      - localFile
+    useCache: True
+    allBranches: True
+    depth: 0
+    downloadReleases: True
+    downloadIssues: True
+    downloadWiki: True
+
   - name: me
     orgName: LeslieLeung
     type: user

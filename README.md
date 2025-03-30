@@ -50,6 +50,7 @@ repository:
     depth: 0
     downloadReleases: True
     downloadIssues: True
+    downloadWiki: True
 
 storage:
   - name: localFile

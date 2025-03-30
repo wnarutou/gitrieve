@@ -156,7 +156,11 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 			// Generate markdown content
 			var content string
-			content += fmt.Sprintf("# Issue #%d: %s\n\n", issue.GetNumber(), issue.GetTitle())
+			if issue.IsPullRequest() {
+				content += fmt.Sprintf("# PullRequest #%d: %s\n\n", issue.GetNumber(), issue.GetTitle())
+			} else {
+				content += fmt.Sprintf("# Issue #%d: %s\n\n", issue.GetNumber(), issue.GetTitle())
+			}
 			content += "## Basic Information\n\n"
 			content += fmt.Sprintf("- Created Time: %s\n", issue.GetCreatedAt().Format("2006-01-02 15:04:05"))
 			content += fmt.Sprintf("- Updated Time: %s\n", issue.GetUpdatedAt().Format("2006-01-02 15:04:05"))
@@ -165,17 +169,20 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			content += fmt.Sprintf("- Comment Count: %d\n\n", len(allComments))
 
 			content += "## Content\n\n"
+			content += "```\n\n"
 			content += issue.GetBody() + "\n\n"
+			content += "```\n\n"
 
 			if len(allComments) > 0 {
 				content += "## Comments\n\n"
 				for _, comment := range allComments {
 					content += fmt.Sprintf("### Comment #%d\n\n", comment.GetID())
+					content += "```\n\n"
+					content += comment.GetBody() + "\n\n"
+					content += "```\n\n"
 					content += fmt.Sprintf("- Author: %s\n", comment.GetUser().GetLogin())
 					content += fmt.Sprintf("- Created Time: %s\n", comment.GetCreatedAt().Format("2006-01-02 15:04:05"))
 					content += fmt.Sprintf("- Updated Time: %s\n\n", comment.GetUpdatedAt().Format("2006-01-02 15:04:05"))
-					content += fmt.Sprintf("- Content: \n\n")
-					content += comment.GetBody() + "\n\n"
 					content += "---\n\n"
 				}
 			}

@@ -1,6 +1,8 @@
 module github.com/leslieleung/reaper
 
-go 1.21
+go 1.23.0
+
+toolchain go1.23.6
 
 require (
 	github.com/go-co-op/gocron/v2 v2.11.0
@@ -13,6 +15,8 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
 )
+
+require github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -63,6 +67,7 @@ require (
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
+	github.com/shurcooL/githubv4 v0.0.0-20240727222349-48295856cce7
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/skeema/knownhosts v1.2.2 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
@@ -81,6 +86,7 @@ require (
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
 	golang.org/x/mod v0.18.0 // indirect
 	golang.org/x/net v0.28.0 // indirect
+	golang.org/x/oauth2 v0.28.0
 	golang.org/x/sync v0.8.0 // indirect
 	golang.org/x/sys v0.24.0 // indirect
 	golang.org/x/text v0.17.0 // indirect

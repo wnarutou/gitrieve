@@ -6,6 +6,7 @@ import (
 	"github.com/leslieleung/reaper/cmd/bury"
 	"github.com/leslieleung/reaper/cmd/daemon"
 	"github.com/leslieleung/reaper/cmd/elegy"
+	"github.com/leslieleung/reaper/cmd/miss"
 	"github.com/leslieleung/reaper/cmd/rip"
 	"github.com/leslieleung/reaper/cmd/run"
 	"github.com/leslieleung/reaper/cmd/wake"
@@ -34,6 +35,7 @@ func init() {
 	rootCmd.AddCommand(bury.Cmd)
 	rootCmd.AddCommand(wake.Cmd)
 	rootCmd.AddCommand(elegy.Cmd)
+	rootCmd.AddCommand(miss.Cmd)
 	// flags
 	rootCmd.PersistentFlags().StringVarP(&config.Path, "config", "c", "config.yaml", "config file path")
 }
