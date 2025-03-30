@@ -20,7 +20,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// 定义存储查询结果的结构体
+// Define structures for storing query results
 type ReplyData struct {
 	DatabaseId int64 `json:"databaseId"`
 	Author     struct {
@@ -63,7 +63,8 @@ type RepositoryData struct {
 	Discussions []DiscussionData `json:"discussions"`
 }
 
-type discussionCommentsRepliesQuery struct {
+// Discussion list query
+type discussionsQuery struct {
 	Repository struct {
 		Discussions struct {
 			Nodes []struct {
@@ -78,38 +79,6 @@ type discussionCommentsRepliesQuery struct {
 				Category  struct {
 					Name string
 				}
-				Comments struct {
-					Nodes []struct {
-						DatabaseId int64
-						Author     struct {
-							Login string
-						}
-						Body         string
-						CreatedAt    time.Time
-						LastEditedAt time.Time
-						IsAnswer     bool
-						Replies      struct {
-							Nodes []struct {
-								DatabaseId int64
-								Author     struct {
-									Login string
-								}
-								Body         string
-								CreatedAt    time.Time
-								LastEditedAt time.Time
-								IsAnswer     bool
-							}
-							PageInfo struct {
-								HasNextPage bool
-								EndCursor   githubv4.String
-							}
-						} `graphql:"replies(first: $replyCount, after: $replyCursor)"`
-					}
-					PageInfo struct {
-						HasNextPage bool
-						EndCursor   githubv4.String
-					}
-				} `graphql:"comments(first: $commentCount, after: $commentCursor)"`
 			}
 			PageInfo struct {
 				HasNextPage bool
@@ -119,10 +88,63 @@ type discussionCommentsRepliesQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
+// Comment query
+type commentsQuery struct {
+	Repository struct {
+		Discussion struct {
+			Comments struct {
+				Nodes []struct {
+					DatabaseId int64
+					Author     struct {
+						Login string
+					}
+					Body         string
+					CreatedAt    time.Time
+					LastEditedAt time.Time
+					IsAnswer     bool
+				}
+				PageInfo struct {
+					HasNextPage bool
+					EndCursor   githubv4.String
+				}
+			} `graphql:"comments(first: $commentCount, after: $commentCursor)"`
+		} `graphql:"discussion(number: $number)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
+// Reply query
+type repliesQuery struct {
+	Repository struct {
+		Discussion struct {
+			Comments struct {
+				Nodes []struct {
+					DatabaseId int64
+					Replies    struct {
+						Nodes []struct {
+							DatabaseId int64
+							Author     struct {
+								Login string
+							}
+							Body         string
+							CreatedAt    time.Time
+							LastEditedAt time.Time
+							IsAnswer     bool
+						}
+						PageInfo struct {
+							HasNextPage bool
+							EndCursor   githubv4.String
+						}
+					} `graphql:"replies(first: $replyCount, after: $replyCursor)"`
+				}
+			} `graphql:"comments(first: $commentCount, after: $commentCursor)"`
+		} `graphql:"discussion(number: $number)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
 func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	isUpdated := false
 	useCache := repo.UseCache
-	currentDir, err := os.Getwd() // 修复：处理 os.Getwd() 错误
+	currentDir, err := os.Getwd() // Fix: Handle os.Getwd() error
 	if err != nil {
 		ui.Errorf("Error getting current directory: %s", err)
 		return err
@@ -209,20 +231,18 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	httpClient := oauth2.NewClient(context.Background(), src)
 	client := githubv4.NewClient(httpClient)
 
-	variables := map[string]interface{}{
+	// Initialize variables for discussion list query
+	discussionVariables := map[string]interface{}{
 		"owner":            githubv4.String(r.Owner),
 		"name":             githubv4.String(r.Name),
-		"discussionCount":  githubv4.Int(10),        // 每次查询 10 个 discussions
-		"discussionCursor": (*githubv4.String)(nil), // 初始游标
-		"commentCount":     githubv4.Int(10),        // 每次查询 10 个 comments
-		"commentCursor":    (*githubv4.String)(nil), // 初始游标
-		"replyCount":       githubv4.Int(10),        // 每次查询 10 个 replies
-		"replyCursor":      (*githubv4.String)(nil), // 初始游标
+		"discussionCount":  githubv4.Int(50),
+		"discussionCursor": (*githubv4.String)(nil),
 	}
 
+	// Fetch discussion list
 	for {
-		var query discussionCommentsRepliesQuery
-		err := client.Query(context.Background(), &query, variables)
+		var query discussionsQuery
+		err := client.Query(context.Background(), &query, discussionVariables)
 		if err != nil {
 			ui.Errorf("Error fetching discussions: %s", err)
 			return err
@@ -234,36 +254,128 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			}
 			isUpdated = true
 
-			for {
-				for _, comment := range discussion.Comments.Nodes {
-					for {
-						comment.Replies.Nodes = append(comment.Replies.Nodes, comment.Replies.Nodes...)
+			// Initialize variables for comment query
+			commentVariables := map[string]interface{}{
+				"owner":         githubv4.String(r.Owner),
+				"name":          githubv4.String(r.Name),
+				"number":        githubv4.Int(discussion.Number),
+				"commentCount":  githubv4.Int(50),
+				"commentCursor": (*githubv4.String)(nil),
+			}
 
-						if !comment.Replies.PageInfo.HasNextPage {
-							break
-						}
-						variables["replyCursor"] = comment.Replies.PageInfo.EndCursor
-						err := client.Query(context.Background(), &query, variables)
-						if err != nil {
-							ui.Errorf("Error fetching discussions: %s", err)
-							return err
-						}
+			var allComments []struct {
+				DatabaseId int64
+				Author     struct {
+					Login string
+				}
+				Body         string
+				CreatedAt    time.Time
+				LastEditedAt time.Time
+				IsAnswer     bool
+				Replies      []struct {
+					DatabaseId int64
+					Author     struct {
+						Login string
 					}
-					discussion.Comments.Nodes = append(discussion.Comments.Nodes, comment)
+					Body         string
+					CreatedAt    time.Time
+					LastEditedAt time.Time
+					IsAnswer     bool
 				}
+			}
 
-				if !discussion.Comments.PageInfo.HasNextPage {
-					break
-				}
-				variables["commentCursor"] = discussion.Comments.PageInfo.EndCursor
-				err := client.Query(context.Background(), &query, variables)
+			// Fetch comments
+			for {
+				var commentsQuery commentsQuery
+				err := client.Query(context.Background(), &commentsQuery, commentVariables)
 				if err != nil {
-					ui.Errorf("Error fetching discussions: %s", err)
+					ui.Errorf("Error fetching comments for discussion %d: %s", discussion.Number, err)
 					return err
 				}
 
+				for _, comment := range commentsQuery.Repository.Discussion.Comments.Nodes {
+					// Initialize variables for reply query
+					replyVariables := map[string]interface{}{
+						"owner":         githubv4.String(r.Owner),
+						"name":          githubv4.String(r.Name),
+						"number":        githubv4.Int(discussion.Number),
+						"commentCount":  githubv4.Int(50),
+						"commentCursor": (*githubv4.String)(nil),
+						"replyCount":    githubv4.Int(50),
+						"replyCursor":   (*githubv4.String)(nil),
+					}
+
+					var allReplies []struct {
+						DatabaseId int64
+						Author     struct {
+							Login string
+						}
+						Body         string
+						CreatedAt    time.Time
+						LastEditedAt time.Time
+						IsAnswer     bool
+					}
+
+					// Fetch replies
+					for {
+						var repliesQuery repliesQuery
+						err := client.Query(context.Background(), &repliesQuery, replyVariables)
+						if err != nil {
+							ui.Errorf("Error fetching replies for comment %d: %s", comment.DatabaseId, err)
+							return err
+						}
+
+						// Find matching comment
+						for _, c := range repliesQuery.Repository.Discussion.Comments.Nodes {
+							if c.DatabaseId == comment.DatabaseId {
+								allReplies = append(allReplies, c.Replies.Nodes...)
+								if !c.Replies.PageInfo.HasNextPage {
+									break
+								}
+								replyVariables["replyCursor"] = c.Replies.PageInfo.EndCursor
+								break
+							}
+						}
+						break
+					}
+
+					allComments = append(allComments, struct {
+						DatabaseId int64
+						Author     struct {
+							Login string
+						}
+						Body         string
+						CreatedAt    time.Time
+						LastEditedAt time.Time
+						IsAnswer     bool
+						Replies      []struct {
+							DatabaseId int64
+							Author     struct {
+								Login string
+							}
+							Body         string
+							CreatedAt    time.Time
+							LastEditedAt time.Time
+							IsAnswer     bool
+						}
+					}{
+						DatabaseId:   comment.DatabaseId,
+						Author:       comment.Author,
+						Body:         comment.Body,
+						CreatedAt:    comment.CreatedAt,
+						LastEditedAt: comment.LastEditedAt,
+						IsAnswer:     comment.IsAnswer,
+						Replies:      allReplies,
+					})
+				}
+
+				if !commentsQuery.Repository.Discussion.Comments.PageInfo.HasNextPage {
+					break
+				}
+				commentVariables["commentCursor"] = commentsQuery.Repository.Discussion.Comments.PageInfo.EndCursor
 			}
 
+			// Write to file
 			discussionFileName := fmt.Sprintf("%d.md", discussion.Number)
 			discussionFilePath := path.Join(gitDir, discussionFileName)
 
@@ -274,29 +386,29 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			content += fmt.Sprintf("- Updated Time: %s\n", discussion.UpdatedAt.Format("2006-01-02 15:04:05"))
 			content += fmt.Sprintf("- Category: %s\n", discussion.Category.Name)
 			content += fmt.Sprintf("- Author: %s\n", discussion.Author.Login)
-			content += fmt.Sprintf("- Comment Count: %d\n\n", len(discussion.Comments.Nodes))
+			content += fmt.Sprintf("- Comment Count: %d\n\n", len(allComments))
 
 			content += "## Content\n\n"
-			content += "```\n\n"
-			content += discussion.Body + "\n\n"
+			content += "```\n"
+			content += discussion.Body + "\n"
 			content += "```\n\n"
 
-			if len(discussion.Comments.Nodes) > 0 {
+			if len(allComments) > 0 {
 				content += "## Comments\n\n"
-				for _, comment := range discussion.Comments.Nodes {
+				for _, comment := range allComments {
 					content += fmt.Sprintf("### Comment #%d\n\n", comment.DatabaseId)
-					content += "```\n\n"
-					content += comment.Body + "\n\n"
+					content += "```\n"
+					content += comment.Body + "\n"
 					content += "```\n\n"
 					content += fmt.Sprintf("- Author: %s\n", comment.Author.Login)
 					content += fmt.Sprintf("- Created Time: %s\n", comment.CreatedAt.Format("2006-01-02 15:04:05"))
 					content += fmt.Sprintf("- Updated Time: %s\n\n", comment.LastEditedAt.Format("2006-01-02 15:04:05"))
 					content += "---\n\n"
 
-					for _, reply := range comment.Replies.Nodes {
+					for _, reply := range comment.Replies {
 						content += fmt.Sprintf("#### Reply #%d\n\n", reply.DatabaseId)
-						content += "```\n\n"
-						content += reply.Body + "\n\n"
+						content += "```\n"
+						content += reply.Body + "\n"
 						content += "```\n\n"
 						content += fmt.Sprintf("- Author: %s\n", reply.Author.Login)
 						content += fmt.Sprintf("- Created Time: %s\n", reply.CreatedAt.Format("2006-01-02 15:04:05"))
@@ -317,12 +429,7 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		if !query.Repository.Discussions.PageInfo.HasNextPage {
 			break
 		}
-		variables["discussionCursor"] = query.Repository.Discussions.PageInfo.EndCursor
-		err = client.Query(context.Background(), &query, variables)
-		if err != nil {
-			ui.Errorf("Error fetching discussions: %s", err)
-			return err
-		}
+		discussionVariables["discussionCursor"] = query.Repository.Discussions.PageInfo.EndCursor
 	}
 
 	if isUpdated {
