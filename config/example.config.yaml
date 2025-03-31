@@ -11,6 +11,7 @@ repository:
     downloadReleases: True
     downloadIssues: True
     downloadWiki: True
+    downloadDiscussion: True
   - name: docmost
     url: github.com/docmost/docmost
     cron: "0 * * * *"
@@ -22,6 +23,19 @@ repository:
     downloadReleases: True
     downloadIssues: True
     downloadWiki: True
+    downloadDiscussion: True
+  - name: wn
+    url: github.com/wnarutou/reaper
+    cron: "0 * * * *"
+    storage:
+      - localFile
+    useCache: True
+    allBranches: True
+    depth: 0
+    downloadReleases: True
+    downloadIssues: True
+    downloadWiki: True
+    downloadDiscussion: True
 
   - name: me
     orgName: LeslieLeung
@@ -34,6 +48,7 @@ repository:
     downloadReleases: True
     downloadIssues: True
     downloadWiki: True
+    downloadDiscussion: True
 
 storage:
   - name: localFile

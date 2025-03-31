@@ -51,6 +51,7 @@ repository:
     downloadReleases: True
     downloadIssues: True
     downloadWiki: True
+    downloadDiscussion: True
 
 storage:
   - name: localFile

@@ -249,7 +249,7 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		}
 
 		for _, discussion := range query.Repository.Discussions.Nodes {
-			if discussion.UpdatedAt.Before(lastUpdate) {
+			if discussion.UpdatedAt.Before(lastUpdate) || discussion.UpdatedAt.Equal(lastUpdate) {
 				continue
 			}
 			isUpdated = true

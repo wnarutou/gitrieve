@@ -44,17 +44,18 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 		}
 		for _, r := range repos {
 			ret = append(ret, typedef.Repository{
-				Name:             path.Base(r),
-				URL:              r,
-				Cron:             repo.Cron,
-				Storage:          repo.Storage,
-				UseCache:         repo.UseCache,
-				Type:             typedef.TypeRepo,
-				AllBranches:      repo.AllBranches,
-				Depth:            repo.Depth,
-				DownloadReleases: repo.DownloadReleases,
-				DownloadIssues:   repo.DownloadIssues,
-				DownloadWiki:     repo.DownloadWiki,
+				Name:               path.Base(r),
+				URL:                r,
+				Cron:               repo.Cron,
+				Storage:            repo.Storage,
+				UseCache:           repo.UseCache,
+				Type:               typedef.TypeRepo,
+				AllBranches:        repo.AllBranches,
+				Depth:              repo.Depth,
+				DownloadReleases:   repo.DownloadReleases,
+				DownloadIssues:     repo.DownloadIssues,
+				DownloadWiki:       repo.DownloadWiki,
+				DownloadDiscussion: repo.DownloadDiscussion,
 			})
 		}
 	default:

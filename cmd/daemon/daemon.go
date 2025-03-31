@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 	"github.com/leslieleung/reaper/internal/config"
+	"github.com/leslieleung/reaper/internal/discussion"
 	"github.com/leslieleung/reaper/internal/issue"
 	"github.com/leslieleung/reaper/internal/release"
 	"github.com/leslieleung/reaper/internal/rip"
@@ -70,7 +71,6 @@ func runDaemon(cmd *cobra.Command, args []string) {
 				ui.Errorf("Error scheduling download issues of %s, %s", repo.Name, err)
 			}
 		}
-		ui.Printf("Scheduled %s, cron: %s", repo.Name, repo.Cron)
 		if repo.DownloadWiki {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
@@ -78,6 +78,15 @@ func runDaemon(cmd *cobra.Command, args []string) {
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download wiki of %s, %s", repo.Name, err)
+			}
+		}
+		if repo.DownloadDiscussion {
+			_, err = s.NewJob(
+				gocron.CronJob(repo.Cron, false),
+				gocron.NewTask(discussion.Sync, repo, storages),
+			)
+			if err != nil {
+				ui.Errorf("Error scheduling download discussion of %s, %s", repo.Name, err)
 			}
 		}
 		ui.Printf("Scheduled %s, cron: %s", repo.Name, repo.Cron)
