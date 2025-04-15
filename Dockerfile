@@ -13,7 +13,7 @@ COPY --from=alpine \
     /usr/share/zoneinfo \
     /usr/share/zoneinfo
 
-COPY reaper /
+COPY gitrieve /
 
-ENTRYPOINT ["/reaper"]
+ENTRYPOINT ["/gitrieve"]
 CMD ["run"]

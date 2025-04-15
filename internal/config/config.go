@@ -1,9 +1,9 @@
 package config
 
 import (
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/viper"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 type Config struct {

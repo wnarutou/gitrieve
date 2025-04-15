@@ -1,4 +1,4 @@
-project_name: reaper
+project_name: gitrieve
 before:
   hooks:
     - go mod tidy
@@ -16,8 +16,8 @@ archives:
         format: zip
 dockers:
   - image_templates:
-      - leslieleung/reaper:{{ .Tag }}
-      - leslieleung/reaper:latest
+      - wnarutou/gitrieve:{{ .Tag }}
+      - wnarutou/gitrieve:latest
 checksum:
   name_template: 'checksums.txt'
 snapshot:

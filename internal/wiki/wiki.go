@@ -4,11 +4,11 @@ import (
 	"context"
 
 	gh "github.com/google/go-github/v56/github"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/scm"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/scm"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
@@ -37,7 +37,7 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	}
 
 	ui.Printf("Running %s's wiki", repo.Name)
-	if err := rip.Rip(repo, true, storages); err != nil {
+	if err := repository.Sync(repo, true, storages); err != nil {
 		ui.Errorf("Error running %s's wiki, %s", repo.Name, err)
 		return err
 	}

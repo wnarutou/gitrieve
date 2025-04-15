@@ -1,16 +1,16 @@
-# REAPER
+# gitrieve
 
 [English](README.md) | 简体中文
 
-REpository ArchivER（REAPER）是一个用于从任何Git服务器归档 Git 仓库的工具。
+Git Retrieve（gitrieve）是一个用于从任何Git服务器归档 Git 仓库的工具。
 
 - [功能](#功能)
 - [安装](#安装)
 - [使用方法](#使用方法)
-  - [rip](#rip)
+  - [repository](#repository)
   - [run](#run)
   - [daemon](#daemon)
-  - [bury](#bury)
+  - [release](#release)
 - [配置](#配置)
 - [存储](#存储)
 - [使用 Docker 运行](#使用-docker-运行)
@@ -20,7 +20,7 @@ REpository ArchivER（REAPER）是一个用于从任何Git服务器归档 Git �
 ## 功能
 
 - 从任何Git服务器归档 Git 仓库
-- 归档用户/组织的仓库（见 [配置](https://github.com/LeslieLeung/reaper/wiki/Configuration#repository))
+- 归档用户/组织的仓库（见 [配置](https://github.com/wnarutou/gitrieve/wiki/Configuration#repository))
 - 定时任务
 - 多种存储类型（见 [存储](#存储)）
 - Docker 支持（见 [使用 Docker 运行](#使用-docker-运行)）
@@ -28,19 +28,19 @@ REpository ArchivER（REAPER）是一个用于从任何Git服务器归档 Git �
 ## 安装
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/LeslieLeung/reaper/main/install.sh | sh -s -- -b /usr/local/bin
+curl -sSfL https://raw.githubusercontent.com/wnarutou/gitrieve/main/install.sh | sh -s -- -b /usr/local/bin
 ```
 
-或从 [Release](https://github.com/LeslieLeung/reaper/releases) 获取。
+或从 [Release](https://github.com/wnarutou/gitrieve/releases) 获取。
 
 ## 使用方法
 
-你需要创建一个配置文件来使用REAPER。
+你需要创建一个配置文件来使用gitrieve。
 
 ```yaml
 repository:
-  - name: reaper
-    url: github.com/leslieleung/reaper
+  - name: gitrieve
+    url: github.com/wnarutou/gitrieve
     cron: "0 * * * *"
     storage:
       - localFile
@@ -66,20 +66,20 @@ storage:
     secretAccessKey: your-secret-access-key
 ```
 
-然后，你可以使用配置文件运行REAPER。
+然后，你可以使用配置文件运行gitrieve。
 
 ```bash
-reaper -c config.yaml
-# 或者如果你的配置文件名为config.yaml，只需调用reaper
-reaper
+gitrieve -c config.yaml
+# 或者如果你的配置文件名为config.yaml，只需调用gitrieve
+gitrieve
 ```
 
-### rip
+### repository
 
-`rip`命令会归档在配置中定义的单个 Git 仓库。
+`repository`命令会归档在配置中定义的单个 Git 仓库。
 
 ```bash
-reaper rip reaper
+gitrieve repository gitrieve
 ```
 
 ### run
@@ -87,17 +87,17 @@ reaper rip reaper
 `run`命令会归档在配置中定义的所有 Git 仓库。
 
 ```bash
-reaper run
+gitrieve run
 ```
 
 结合cron，你可以定期归档 Git 仓库。
 
-### bury
+### release
 
-`bury`命令会归档指定 Git 仓库的所有发布产物。
+`release`命令会归档指定 Git 仓库的所有发布产物。
 
 ```bash
-reaper bury reaper
+gitrieve release gitrieve
 ```
 
 ### daemon
@@ -105,20 +105,20 @@ reaper bury reaper
 `daemon`命令会启动一个守护进程，它会在后台运行，归档在配置中定义的所有 Git 仓库。
 
 ```bash
-reaper daemon
+gitrieve daemon
 # 使用 nohup 后台运行
-nohup reaper daemon &
+nohup gitrieve daemon &
 ```
 
 ## 配置
 
 有关配置，你可以查看此[示例](config/example.config.yaml)。
 
-更多细节，可查看[配置文档](https://github.com/LeslieLeung/reaper/wiki/Configuration)。
+更多细节，可查看[配置文档](https://github.com/wnarutou/gitrieve/wiki/Configuration)。
 
 ## 存储
 
-REAPER支持多种存储类型。
+gitrieve支持多种存储类型。
 
 - [x] 文件
 - [x] AWS S3
@@ -135,7 +135,7 @@ REAPER支持多种存储类型。
 docker run --rm \
     -v ${pwd}/config/example.config.yaml:/config.yaml \
     -v ${pwd}/repo:/repo \
-    leslieleung/reaper:latest \
+    wnarutou/gitrieve:latest \
     run
 ```
 
@@ -144,14 +144,14 @@ docker run --rm \
 示例Compose配置，见 [docker-compose.yml](docker-compose.yml)。
 
 ```bash
-git clone https://github.com/leslieleung/reaper.git
+git clone https://github.com/wnarutou/gitrieve.git
 docker compose up -d
 ```
 
 ## 常见问题
 
-见 [FAQ](https://github.com/LeslieLeung/reaper/wiki/FAQ)。
+见 [FAQ](https://github.com/wnarutou/gitrieve/wiki/FAQ)。
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/LeslieLeung/reaper.svg)](https://starchart.cc/LeslieLeung/reaper)
+[![Stargazers over time](https://starchart.cc/wnarutou/gitrieve.svg)](https://starchart.cc/wnarutou/gitrieve)

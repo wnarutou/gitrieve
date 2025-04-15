@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var _ Storage = (*S3)(nil)

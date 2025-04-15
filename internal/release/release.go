@@ -9,12 +9,12 @@ import (
 	"sort"
 
 	gh "github.com/google/go-github/v56/github"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/scm"
-	"github.com/leslieleung/reaper/internal/scm/github"
-	"github.com/leslieleung/reaper/internal/storage"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/scm"
+	"github.com/wnarutou/gitrieve/internal/scm/github"
+	"github.com/wnarutou/gitrieve/internal/storage"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 // Define a slice

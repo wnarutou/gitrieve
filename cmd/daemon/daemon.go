@@ -4,15 +4,15 @@ import (
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/discussion"
-	"github.com/leslieleung/reaper/internal/issue"
-	"github.com/leslieleung/reaper/internal/release"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
-	"github.com/leslieleung/reaper/internal/wiki"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/discussion"
+	"github.com/wnarutou/gitrieve/internal/issue"
+	"github.com/wnarutou/gitrieve/internal/release"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
+	"github.com/wnarutou/gitrieve/internal/wiki"
 )
 
 var Cmd = &cobra.Command{
@@ -34,7 +34,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		ui.ErrorfExit("Error creating scheduler, %s", err)
 	}
 
-	for _, repo := range rip.GetRepositories("") {
+	for _, repo := range repository.GetRepositories("") {
 		if repo.Cron == "" {
 			continue
 		}
@@ -48,7 +48,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		}
 		_, err := s.NewJob(
 			gocron.CronJob(repo.Cron, false),
-			gocron.NewTask(rip.Rip, repo, storages),
+			gocron.NewTask(repository.Sync, repo, storages),
 		)
 		if err != nil {
 			ui.Errorf("Error scheduling download codes of %s, %s", repo.Name, err)

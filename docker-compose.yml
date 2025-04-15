@@ -1,8 +1,8 @@
 version: "3"
 
 services:
-  reaper:
-    image: leslieleung/reaper:v0.1.2
+  gitrieve:
+    image: wnarutou/gitrieve:v0.1.2
     environment:
       # set the timezone to be used by cron schedule
       # see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -16,6 +16,6 @@ services:
     # by default archives all repositories defined in configuration.
     command: ["run"]
     # or just archives a single repository defined in configuration.
-    # command: ["rip", "reaper"]
+    # command: ["repository", "gitrieve"]
     # run as daemon
     # command: ["daemon"]

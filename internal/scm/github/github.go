@@ -8,8 +8,8 @@ import (
 	"sync"
 
 	"github.com/google/go-github/v56/github"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
 type Client struct {

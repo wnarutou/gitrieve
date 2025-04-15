@@ -1,25 +1,25 @@
-package rip
+package repository
 
 import (
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var Cmd = &cobra.Command{
-	Use:   "rip",
-	Short: "rip immediately runs a job",
-	Run:   runRip,
+	Use:   "repository",
+	Short: "repository immediately runs a repository sync",
+	Run:   runRepository,
 	Args:  cobra.ExactArgs(1),
 }
 
-func runRip(cmd *cobra.Command, args []string) {
+func runRepository(cmd *cobra.Command, args []string) {
 	repoName := args[0]
 	storageMap := config.GetStorageMap()
 	// find repo in config
-	for _, repo := range rip.GetRepositories(repoName) {
+	for _, repo := range repository.GetRepositories(repoName) {
 		storages := make([]typedef.MultiStorage, 0)
 		for _, storage := range repo.Storage {
 			if s, ok := storageMap[storage]; !ok {
@@ -30,7 +30,7 @@ func runRip(cmd *cobra.Command, args []string) {
 			}
 		}
 		ui.Printf("Running %s", repo.Name)
-		if err := rip.Rip(repo, false, storages); err != nil {
+		if err := repository.Sync(repo, false, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/leslieleung/reaper/cmd"
+	"github.com/wnarutou/gitrieve/cmd"
 )
 
 func main() {

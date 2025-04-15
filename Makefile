@@ -1,4 +1,4 @@
 .PHONY:dry-build
 dry-build:
-	go build -o reaper main.go
-	rm -r reaper
+	go build -o gitrieve main.go
+	rm -r gitrieve

@@ -1,6 +1,6 @@
 repository:
   - name: reaper
-    url: github.com/leslieleung/reaper
+    url: github.com/wnarutou/gitrieve
     cron: "0 * * * *"
     storage:
       - localFile
@@ -38,7 +38,7 @@ repository:
     downloadDiscussion: True
 
   - name: me
-    orgName: LeslieLeung
+    orgName: wnarutou
     type: user
     storage:
       - localFile

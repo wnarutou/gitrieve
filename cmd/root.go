@@ -3,21 +3,21 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/leslieleung/reaper/cmd/bury"
-	"github.com/leslieleung/reaper/cmd/daemon"
-	"github.com/leslieleung/reaper/cmd/elegy"
-	"github.com/leslieleung/reaper/cmd/miss"
-	"github.com/leslieleung/reaper/cmd/rip"
-	"github.com/leslieleung/reaper/cmd/run"
-	"github.com/leslieleung/reaper/cmd/wake"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/cmd/daemon"
+	"github.com/wnarutou/gitrieve/cmd/discussion"
+	"github.com/wnarutou/gitrieve/cmd/issue"
+	"github.com/wnarutou/gitrieve/cmd/release"
+	"github.com/wnarutou/gitrieve/cmd/repository"
+	"github.com/wnarutou/gitrieve/cmd/run"
+	"github.com/wnarutou/gitrieve/cmd/wiki"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "reaper",
-	Short: "Reaper is a tool to backup git repositories.",
+	Use:   "gitrieve",
+	Short: "gitrieve is a tool to backup git repositories.",
 }
 
 func Execute() {
@@ -29,13 +29,13 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(config.Init)
 	// commands
-	rootCmd.AddCommand(rip.Cmd)
+	rootCmd.AddCommand(repository.Cmd)
 	rootCmd.AddCommand(run.Cmd)
 	rootCmd.AddCommand(daemon.Cmd)
-	rootCmd.AddCommand(bury.Cmd)
-	rootCmd.AddCommand(wake.Cmd)
-	rootCmd.AddCommand(elegy.Cmd)
-	rootCmd.AddCommand(miss.Cmd)
+	rootCmd.AddCommand(release.Cmd)
+	rootCmd.AddCommand(issue.Cmd)
+	rootCmd.AddCommand(wiki.Cmd)
+	rootCmd.AddCommand(discussion.Cmd)
 	// flags
 	rootCmd.PersistentFlags().StringVarP(&config.Path, "config", "c", "config.yaml", "config file path")
 }

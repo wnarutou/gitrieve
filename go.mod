@@ -1,4 +1,4 @@
-module github.com/leslieleung/reaper
+module github.com/wnarutou/gitrieve
 
 go 1.23.0
 

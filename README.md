@@ -1,15 +1,15 @@
-# REAPER
+# gitrieve
 
 English | [简体中文](README_zh.md)
 
-REpository ArchivER(REAPER) is a tool to archive repositories from any Git servers.
+Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
 
 - [Features](#features)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [rip](#rip)
+  - [repository](#repository)
   - [run](#run)
-  - [bury](#bury)
+  - [release](#release)
   - [daemon](#daemon)
 - [Configuration](#configuration)
 - [Storage](#storage)
@@ -20,7 +20,7 @@ REpository ArchivER(REAPER) is a tool to archive repositories from any Git serve
 ## Features
 
 - Archive repositories from any Git servers
-- Archive repositories of a user/an organization (see [Configuration](https://github.com/LeslieLeung/reaper/wiki/Configuration#repository))
+- Archive repositories of a user/an organization (see [Configuration](https://github.com/wnarutou/gitrieve/wiki/Configuration#repository))
 - Cron support
 - Multiple storage types (see [Storage](#storage))
 - Docker support (see [Run as docker container](#run-as-docker-container))
@@ -28,19 +28,19 @@ REpository ArchivER(REAPER) is a tool to archive repositories from any Git serve
 ## Installation
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/LeslieLeung/reaper/main/install.sh | sh -s -- -b /usr/local/bin
+curl -sSfL https://raw.githubusercontent.com/wnarutou/gitrieve/main/install.sh | sh -s -- -b /usr/local/bin
 ```
 
-Or get from [Release](https://github.com/LeslieLeung/reaper/releases).
+Or get from [Release](https://github.com/wnarutou/gitrieve/releases).
 
 ## Usage
 
-You have to create a configuration file to use REAPER.
+You have to create a configuration file to use gitrieve.
 
 ```yaml
 repository:
-  - name: reaper
-    url: github.com/leslieleung/reaper
+  - name: gitrieve
+    url: github.com/wnarutou/gitrieve
     cron: "0 * * * *"
     storage:
       - localFile
@@ -66,20 +66,20 @@ storage:
     secretAccessKey: your-secret-access-key
 ```
 
-Then you can run REAPER with the configuration file.
+Then you can run gitrieve with the configuration file.
 
 ```bash
-reaper -c config.yaml
-# or simply call reaper if your configuration file is named config.yaml
-reaper
+gitrieve -c config.yaml
+# or simply call gitrieve if your configuration file is named config.yaml
+gitrieve
 ```
 
-### rip
+### repository
 
-`rip` archives a single repository defined in configuration.
+`repository` archives a single repository defined in configuration.
 
 ```bash
-reaper rip reaper
+gitrieve repository gitrieve
 ```
 
 ### run
@@ -87,38 +87,38 @@ reaper rip reaper
 `run` archives all repositories defined in configuration.
 
 ```bash
-reaper run
+gitrieve run
 ```
 
 Combined with cron, you can archive repositories periodically.
 
-### bury
+### release
 
-`bury` archives all release assets of a repository.
+`release` archives all release assets of a repository.
 
 ```bash
-reaper bury reaper
+gitrieve release gitrieve
 ```
 
 ### daemon
 
-`daemon` runs REAPER as a daemon. It will archive all repositories defined in configuration periodically.
+`daemon` runs gitrieve as a daemon. It will archive all repositories defined in configuration periodically.
 
 ```bash
-reaper daemon
+gitrieve daemon
 # You might want to run it with something like nohup
-nohup reaper daemon &
+nohup gitrieve daemon &
 ```
 
 ## Configuration
 
 For configuration, you can check out this [example](config/example.config.yaml).
 
-For more details, see [Configuration](https://github.com/LeslieLeung/reaper/wiki/Configuration) in wiki.
+For more details, see [Configuration](https://github.com/wnarutou/gitrieve/wiki/Configuration) in wiki.
 
 ## Storage
 
-REAPER supports multiple storage types.
+gitrieve supports multiple storage types.
 
 - [x] File
 - [x] AWS S3
@@ -135,7 +135,7 @@ One-off run.
 docker run --rm \
     -v ${pwd}/config/example.config.yaml:/config.yaml \
     -v ${pwd}/repo:/repo \
-    leslieleung/reaper:latest \
+    wnarutou/gitrieve:latest \
     run
 ```
 
@@ -149,9 +149,9 @@ docker compose up -d
 
 ## FAQ
 
-See [FAQ](https://github.com/LeslieLeung/reaper/wiki/FAQ).
+See [FAQ](https://github.com/wnarutou/gitrieve/wiki/FAQ).
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/LeslieLeung/reaper.svg)](https://starchart.cc/LeslieLeung/reaper)
+[![Stargazers over time](https://starchart.cc/wnarutou/gitrieve.svg)](https://starchart.cc/wnarutou/gitrieve)
 

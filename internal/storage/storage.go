@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/leslieleung/reaper/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
 const (

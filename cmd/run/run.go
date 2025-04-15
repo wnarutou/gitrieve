@@ -1,11 +1,11 @@
 package run
 
 import (
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var Cmd = &cobra.Command{
@@ -17,7 +17,7 @@ var Cmd = &cobra.Command{
 func runRun(cmd *cobra.Command, args []string) {
 	storageMap := config.GetStorageMap()
 
-	for _, repo := range rip.GetRepositories("") {
+	for _, repo := range repository.GetRepositories("") {
 		storages := make([]typedef.MultiStorage, 0)
 		for _, storage := range repo.Storage {
 			if s, ok := storageMap[storage]; !ok {
@@ -28,7 +28,7 @@ func runRun(cmd *cobra.Command, args []string) {
 			}
 		}
 		ui.Printf("Running %s", repo.Name)
-		if err := rip.Rip(repo, false, storages); err != nil {
+		if err := repository.Sync(repo, false, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}

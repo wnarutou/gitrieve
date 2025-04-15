@@ -11,12 +11,12 @@ import (
 
 	gh "github.com/google/go-github/v56/github"
 	"github.com/google/uuid"
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/scm"
-	"github.com/leslieleung/reaper/internal/storage"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/mholt/archiver/v4"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/scm"
+	"github.com/wnarutou/gitrieve/internal/storage"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
@@ -27,10 +27,10 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 	var workingDir string
 	if useCache {
-		workingDir = path.Join(currentDir, ".reaper")
+		workingDir = path.Join(currentDir, ".gitrieve")
 	} else {
 		id := uuid.New().String()
-		workingDir = path.Join(currentDir, ".reaper", id)
+		workingDir = path.Join(currentDir, ".gitrieve", id)
 	}
 
 	// create a working directory if not exist

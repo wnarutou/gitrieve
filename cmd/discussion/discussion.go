@@ -1,24 +1,24 @@
-package miss
+package discussion
 
 import (
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/discussion"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/discussion"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var Cmd = &cobra.Command{
-	Use:   "miss",
-	Short: "Miss immediately downloads all discussions of a repo",
-	Run:   runMiss,
+	Use:   "discussion",
+	Short: "discussion immediately downloads all discussions of a repo",
+	Run:   runDiscussion,
 	Args:  cobra.ExactArgs(1),
 }
 
 var storageName string
 
-func runMiss(cmd *cobra.Command, args []string) {
+func runDiscussion(cmd *cobra.Command, args []string) {
 	repoName := args[0]
 
 	storageMap := config.GetStorageMap()
@@ -36,7 +36,7 @@ func runMiss(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	for _, repo := range rip.GetRepositories(repoName) {
+	for _, repo := range repository.GetRepositories(repoName) {
 		ui.Printf("Running %s", repo.Name)
 		if err := discussion.Sync(repo, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)

@@ -1,24 +1,24 @@
-package wake
+package issue
 
 import (
-	"github.com/leslieleung/reaper/internal/config"
-	"github.com/leslieleung/reaper/internal/issue"
-	"github.com/leslieleung/reaper/internal/rip"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/issue"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 var Cmd = &cobra.Command{
-	Use:   "wake",
-	Short: "wake immediately downloads all issues of a repo",
-	Run:   runWake,
+	Use:   "issue",
+	Short: "issue immediately downloads all issues of a repo",
+	Run:   runIssue,
 	Args:  cobra.ExactArgs(1),
 }
 
 var storageName string
 
-func runWake(cmd *cobra.Command, args []string) {
+func runIssue(cmd *cobra.Command, args []string) {
 	repoName := args[0]
 
 	storageMap := config.GetStorageMap()
@@ -36,7 +36,7 @@ func runWake(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	for _, repo := range rip.GetRepositories(repoName) {
+	for _, repo := range repository.GetRepositories(repoName) {
 		ui.Printf("Running %s", repo.Name)
 		if err := issue.Sync(repo, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)

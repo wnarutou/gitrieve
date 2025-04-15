@@ -1,4 +1,4 @@
-package rip
+package repository
 
 import (
 	"bytes"
@@ -10,14 +10,71 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/uuid"
-	"github.com/leslieleung/reaper/internal/scm"
-	"github.com/leslieleung/reaper/internal/storage"
-	"github.com/leslieleung/reaper/internal/typedef"
-	"github.com/leslieleung/reaper/internal/ui"
 	"github.com/mholt/archiver/v4"
+	internalconfig "github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/scm"
+	"github.com/wnarutou/gitrieve/internal/scm/github"
+	"github.com/wnarutou/gitrieve/internal/storage"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
-func Rip(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
+func GetRepositories(name string) []typedef.Repository {
+	repositories := make([]typedef.Repository, 0)
+	if name != "" {
+		// find repo in config
+		for _, repository := range internalconfig.GetIns().Repository {
+			if repository.Name == name {
+				repositories = addRepo(repository, repositories)
+			}
+		}
+		return repositories
+	}
+	for _, repository := range internalconfig.GetIns().Repository {
+		repositories = addRepo(repository, repositories)
+	}
+	return repositories
+}
+
+func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Repository {
+	switch repo.GetType() {
+	case typedef.TypeRepo:
+		ret = append(ret, repo)
+	case typedef.TypeUser, typedef.TypeOrg:
+		// get repos
+		client, err := github.New()
+		if err != nil {
+			ui.Errorf("Error creating github client, %s", err)
+			return ret
+		}
+		repos, err := client.GetRepos(repo.OrgName, repo.Type)
+		if err != nil {
+			ui.Errorf("Error getting user repos, %s", err)
+			return ret
+		}
+		for _, r := range repos {
+			ret = append(ret, typedef.Repository{
+				Name:               path.Base(r),
+				URL:                r,
+				Cron:               repo.Cron,
+				Storage:            repo.Storage,
+				UseCache:           repo.UseCache,
+				Type:               typedef.TypeRepo,
+				AllBranches:        repo.AllBranches,
+				Depth:              repo.Depth,
+				DownloadReleases:   repo.DownloadReleases,
+				DownloadIssues:     repo.DownloadIssues,
+				DownloadWiki:       repo.DownloadWiki,
+				DownloadDiscussion: repo.DownloadDiscussion,
+			})
+		}
+	default:
+		ui.Errorf("Invalid repository type %s", repo.Type)
+	}
+	return ret
+}
+
+func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
 	depth := repo.Depth
 	allBranches := repo.AllBranches
@@ -27,10 +84,10 @@ func Rip(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) 
 
 	var workingDir string
 	if useCache {
-		workingDir = path.Join(currentDir, ".reaper")
+		workingDir = path.Join(currentDir, ".gitrieve")
 	} else {
 		id := uuid.New().String()
-		workingDir = path.Join(currentDir, ".reaper", id)
+		workingDir = path.Join(currentDir, ".gitrieve", id)
 	}
 
 	// create a working directory if not exist
