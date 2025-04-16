@@ -1,5 +1,5 @@
 repository:
-  - name: reaper
+  - name: gitrieve
     url: github.com/wnarutou/gitrieve
     cron: "0 * * * *"
     storage:
@@ -25,7 +25,7 @@ repository:
     downloadWiki: True
     downloadDiscussion: True
   - name: wn
-    url: github.com/wnarutou/reaper
+    url: github.com/wnarutou/gitrieve
     cron: "0 * * * *"
     storage:
       - localFile

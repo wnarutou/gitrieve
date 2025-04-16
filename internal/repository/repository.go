@@ -10,7 +10,7 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/uuid"
-	"github.com/mholt/archiver/v4"
+	"github.com/mholt/archives"
 	internalconfig "github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/scm/github"
@@ -312,7 +312,7 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 			sourceDir = "code"
 			targetDir = r.Name
 		}
-		files, err := archiver.FilesFromDisk(nil, map[string]string{
+		files, err := archives.FilesFromDisk(context.TODO(), &archives.FromDiskOptions{}, map[string]string{
 			sourceDir: targetDir,
 		})
 		if err != nil {
@@ -329,9 +329,9 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 		//      we can use isUpdated to support this feature temporality
 		archive := &bytes.Buffer{}
 
-		format := archiver.CompressedArchive{
-			Compression: archiver.Gz{},
-			Archival:    archiver.Tar{},
+		format := archives.CompressedArchive{
+			Compression: archives.Gz{},
+			Archival:    archives.Tar{},
 		}
 		err = format.Archive(context.Background(), archive, files)
 		if err != nil {

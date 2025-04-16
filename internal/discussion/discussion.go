@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mholt/archiver/v4"
+	"github.com/mholt/archives"
 	"github.com/shurcooL/githubv4"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/scm"
@@ -438,7 +438,7 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 			ui.Errorf("Error changing directory: %s", err)
 		}
 
-		files, err := archiver.FilesFromDisk(nil, map[string]string{
+		files, err := archives.FilesFromDisk(context.TODO(), &archives.FromDiskOptions{}, map[string]string{
 			"discussion": "discussion",
 		})
 		if err != nil {
@@ -449,9 +449,9 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		base := "discussions.tar.gz"
 		archive := &bytes.Buffer{}
 
-		format := archiver.CompressedArchive{
-			Compression: archiver.Gz{},
-			Archival:    archiver.Tar{},
+		format := archives.CompressedArchive{
+			Compression: archives.Gz{},
+			Archival:    archives.Tar{},
 		}
 		err = format.Archive(context.Background(), archive, files)
 		if err != nil {
