@@ -89,7 +89,9 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				if strings.HasPrefix(line, "- Updated Time: ") {
 					timeStr := strings.TrimPrefix(line, "- Updated Time: ")
 					timeStr = strings.TrimSpace(timeStr)
-					updateTime, err = time.Parse("2006-01-02 15:04:05", timeStr)
+					// use UTC time to avoid be affect by local time zone
+					loc, _ := time.LoadLocation("UTC")
+					updateTime, err = time.ParseInLocation("2006-01-02 15:04:05", timeStr, loc)
 					if err != nil {
 						continue
 					}
@@ -106,8 +108,12 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 
 	// Set query parameters to only get issues updated since the last sync
 	opt := &gh.IssueListByRepoOptions{
-		State:     "all",
-		Since:     lastUpdate.Add(time.Second), // Add 1 nanosecond to make it greater than instead of greater than or equal to
+		State: "all",
+		// Note: There's an inconsistency in how time formats are handled between time.Date() and time.Time.String():
+		// - When using lastUpdate.UTC(), go-github converts it to a string with 'Z' suffix (e.g. "1970-01-01T00:00:01Z")
+		// - When using time.Date(), it creates a new time object that may be formatted without 'Z' suffix (e.g. "1970-01-01T00:00:01")
+		// Both are valid ISO 8601 formats, but GitHub API may handle them differently.
+		Since:     time.Date(lastUpdate.Year(), lastUpdate.Month(), lastUpdate.Day(), lastUpdate.Hour(), lastUpdate.Minute(), lastUpdate.Second(), 0, time.UTC),
 		Sort:      "updated",
 		Direction: "asc", // Sort by update time in descending order
 		ListOptions: gh.ListOptions{
