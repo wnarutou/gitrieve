@@ -1,0 +1,21 @@
+{
+  "name": "Go Environment",
+  "image": "mcr.microsoft.com/devcontainers/go:1.23",
+  "mounts": [
+    "source=${localWorkspaceFolder}\\..\\.claude-code-router,target=/home/vscode/.claude-code-router,type=bind"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+  "postCreateCommand": "npm install -g @anthropic-ai/claude-code;npm install -g @musistudio/claude-code-router",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
