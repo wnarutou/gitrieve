@@ -3,4 +3,4 @@ build
 
 .gitrieve
 repo
-.devcontainer-lock.json
+.devcontainer/devcontainer-lock.json
