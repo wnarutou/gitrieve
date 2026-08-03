@@ -13,6 +13,7 @@ Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
   - [daemon](#daemon)
 - [Configuration](#configuration)
 - [Storage](#storage)
+- [Deletion-safe sync](#deletion-safe-sync)
 - [Run as docker container](#run-as-docker-container)
   - [Docker CLI](#docker-cli)
   - [Docker Compose](#docker-compose)
@@ -23,6 +24,7 @@ Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
 - Archive repositories of a user/an organization (see [Configuration](https://github.com/wnarutou/gitrieve/wiki/Configuration#repository))
 - Cron support
 - Multiple storage types (see [Storage](#storage))
+- **Deletion-safe sync** — local cached code and full history are never deleted by a sync, even when the upstream repo is taken down, DMCA-disabled, deleted, or replaced with a single README (see [Deletion-safe sync](#deletion-safe-sync))
 - Docker support (see [Run as docker container](#run-as-docker-container))
 
 ## Installation
@@ -122,6 +124,24 @@ gitrieve supports multiple storage types.
 
 - [x] File
 - [x] AWS S3
+
+## Deletion-safe sync
+
+A core design goal of gitrieve is **once code and history have been pulled locally, a sync must never delete them** — even if the upstream repository is taken down, DMCA-disabled, deleted, made private, or replaced with a single README. This makes gitrieve suitable as a true archive/backup tool rather than a mere mirror.
+
+How this is guaranteed by the sync logic:
+
+- **Remote unreachable → early exit, nothing touched.** If the upstream repo is deleted, disabled (e.g. DMCA), or made private without access, the `fetch` fails and the sync returns early. No archiving runs, no cleanup runs, and the local cache plus any previously archived snapshots are left untouched.
+- **Branches are only added, never deleted.** The sync iterates remote branches and creates/updates local branches accordingly; it never removes a local branch. Branches that the upstream deleted still live on locally.
+- **Pull, not reset.** Updates are applied via `git pull` (merge), never `git reset --hard origin`. A force-push that rewrites the upstream default branch only moves the `origin/*` tracking refs; your local branches and their old commit objects are not overwritten or discarded.
+- **Old commits are retained.** Because commits are immutable objects and the sync never force-moves local refs, the full history you have already pulled stays in the local `.git` object store. Any past commit can be recovered with `git checkout <old-hash>`.
+
+Recommended configuration for maximum recoverability:
+
+- `allBranches: true` — ensures every branch's commits are pulled into the local object store.
+- `useCache: true` — keeps the local cache directory (with its `.git`) across syncs as an extra on-disk safety net (without it the working dir is removed at the end of each sync).
+
+One caveat to be aware of: archiving writes to a fixed filename (e.g. `repo.tar.gz`) and overwrites any previous archive at the same path. So if an upstream is still reachable but its default branch has been rewritten to a single README, the *new* snapshot will replace the previous normal one at that path. Local cached code and history are still safe (see above), but to preserve distinct historical snapshots you should enable versioning on your object storage (S3/B2) or otherwise keep archives under versioned paths.
 
 ## Run as docker container
 
