@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
@@ -36,8 +38,10 @@ var Cmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.GetIns()
 		s := NewServer(cfg)
-		ui.Printf("Starting server on port 8080")
-		if err := http.ListenAndServe(":8080", s); err != nil {
+		serverCfg := server.GetServerConfig()
+		addr := fmt.Sprintf("%s:%s", serverCfg.Host, serverCfg.Port)
+		ui.Printf("Starting server on %s", addr)
+		if err := http.ListenAndServe(addr, s); err != nil {
 			ui.ErrorfExit("Server failed: %s", err)
 		}
 	},
