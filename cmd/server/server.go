@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
@@ -22,9 +23,31 @@ func NewServer(cfg *config.Config) *Server {
 	return s
 }
 
+func NewTestServer(db *db.DB) *Server {
+	s := &Server{
+		router: gin.Default(),
+	}
+	s.setupTestRoutes(db)
+	return s
+}
+
 func (s *Server) setupRoutes() {
+	// Static files
+	s.router.Static("/static", "./web/static")
+	s.router.LoadHTMLGlob("web/templates/*")
+
+	// Main page
 	s.router.GET("/", func(c *gin.Context) {
-		c.String(200, "Gitrieve Web UI")
+		c.HTML(200, "index.html", gin.H{
+			"title": "Gitrieve",
+		})
+	})
+}
+
+func (s *Server) setupTestRoutes(db *db.DB) {
+	s.router.GET("/api/jobs", func(c *gin.Context) {
+		api := server.NewAPI(&config.Config{}, db)
+		api.GetJobs(c)
 	})
 }
 
@@ -38,7 +61,8 @@ var Cmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.GetIns()
 		s := NewServer(cfg)
-		serverCfg := server.GetServerConfig()
+		// TODO: Implement server configuration
+	serverCfg := struct{ Host, Port string }{Host: "localhost", Port: "8080"}
 		addr := fmt.Sprintf("%s:%s", serverCfg.Host, serverCfg.Port)
 		ui.Printf("Starting server on %s", addr)
 		if err := http.ListenAndServe(addr, s); err != nil {
