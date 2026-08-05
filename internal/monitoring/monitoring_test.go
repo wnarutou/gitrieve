@@ -1,4 +1,4 @@
-package monitoring
+package monitoring_test
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	monitoringimpl "github.com/wnarutou/gitrieve/internal/monitoring"
+	"github.com/wnarutou/gitrieve/internal/monitoring"
 )
 
 func init() {
@@ -15,7 +15,7 @@ func init() {
 }
 
 func TestHealthCheck_Returns200AndStatusOK(t *testing.T) {
-	monitor := monitoringimpl.NewMonitor()
+	monitor := monitoring.NewMonitor()
 	r := gin.New()
 	r.GET("/health", monitor.HealthCheck)
 
@@ -51,7 +51,7 @@ func TestHealthCheck_Returns200AndStatusOK(t *testing.T) {
 }
 
 func TestGetMetrics_Returns200AndGoroutines(t *testing.T) {
-	monitor := monitoringimpl.NewMonitor()
+	monitor := monitoring.NewMonitor()
 	r := gin.New()
 	r.GET("/api/metrics", monitor.GetMetrics)
 

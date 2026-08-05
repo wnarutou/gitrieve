@@ -1,4 +1,4 @@
-package auth
+package auth_test
 
 import (
 	"net/http"
@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	authimpl "github.com/wnarutou/gitrieve/internal/auth"
+	"github.com/wnarutou/gitrieve/internal/auth"
 )
 
 func init() {
@@ -25,7 +25,7 @@ func newTestRouter(mw gin.HandlerFunc) *gin.Engine {
 }
 
 func TestAuthMiddleware_NoHeader_Returns401(t *testing.T) {
-	mw := authimpl.NewAuthMiddleware("secret-token").Middleware()
+	mw := auth.NewAuthMiddleware("secret-token").Middleware()
 	router := newTestRouter(mw)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -38,7 +38,7 @@ func TestAuthMiddleware_NoHeader_Returns401(t *testing.T) {
 }
 
 func TestAuthMiddleware_ValidToken_PassesThrough(t *testing.T) {
-	mw := authimpl.NewAuthMiddleware("secret-token").Middleware()
+	mw := auth.NewAuthMiddleware("secret-token").Middleware()
 	router := newTestRouter(mw)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -52,7 +52,7 @@ func TestAuthMiddleware_ValidToken_PassesThrough(t *testing.T) {
 }
 
 func TestAuthMiddleware_WrongToken_Returns401(t *testing.T) {
-	mw := authimpl.NewAuthMiddleware("secret-token").Middleware()
+	mw := auth.NewAuthMiddleware("secret-token").Middleware()
 	router := newTestRouter(mw)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -66,7 +66,7 @@ func TestAuthMiddleware_WrongToken_Returns401(t *testing.T) {
 }
 
 func TestAuthMiddleware_EmptyToken_IsPassThrough(t *testing.T) {
-	mw := authimpl.NewAuthMiddleware("").Middleware()
+	mw := auth.NewAuthMiddleware("").Middleware()
 	router := newTestRouter(mw)
 
 	// No Authorization header at all, but should still pass through.

@@ -20,9 +20,12 @@ services:
       # archive output directory — the in-container path must match the
       # `path:` configured under storage in config.yaml (e.g. /app/repo)
       - ./repo:/app/repo
-      # persistent volume for the SQLite database (gitrieve.db) so job history
-      # and logs survive container restarts
-      - gitrieve-data:/app/data
+      # persistent directory for the SQLite database (gitrieve.db), which also
+      # stores job history and logs. Bind-mounted to a local directory so the
+      # data is directly visible on the host for easy backup and migration
+      # (e.g. `tar -czf backup.tar.gz ./data`). The in-container path must
+      # match `server.dbPath` in config.yaml.
+      - ./data:/app/data
     # Run the server, reading config from the mounted path.
     # The web assets (templates/static) are baked into the image under /app/web.
     command: ["-c", "/root/config.yaml", "server"]
@@ -31,6 +34,3 @@ services:
     #   command: ["-c", "/root/config.yaml", "run"]
     #   run as daemon with cron schedules:
     #   command: ["-c", "/root/config.yaml", "daemon"]
-
-volumes:
-  gitrieve-data:

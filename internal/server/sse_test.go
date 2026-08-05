@@ -1,4 +1,4 @@
-package server
+package server_test
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
 	"github.com/wnarutou/gitrieve/internal/logger"
+	server "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -27,7 +28,6 @@ type closeNotifierRecorder struct {
 func (closeNotifierRecorder) CloseNotify() <-chan bool {
 	return make(chan bool)
 }
-
 
 func TestGetJobLogsSSE(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
@@ -46,7 +46,7 @@ func TestGetJobLogsSSE(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Insert a completed execution with logs
 	now := time.Now()
@@ -94,7 +94,7 @@ func TestGetJobLogsSSENotFound(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Request logs for a job that does not exist
 	req, _ := http.NewRequest("GET", "/api/jobs/non-existent/logs", nil)
@@ -125,7 +125,7 @@ func TestGetJobLogsSSEStreamingJob(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Insert a running execution with a single log
 	now := time.Now()

@@ -1,4 +1,4 @@
-package server
+package server_test
 
 import (
 	"bytes"
@@ -7,31 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
-	"github.com/wnarutou/gitrieve/internal/executor"
-	"github.com/wnarutou/gitrieve/internal/logger"
-	internalserver "github.com/wnarutou/gitrieve/internal/server"
+	server "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
-
-// newStorageTestServer builds a TestServer that only registers the storage
-// CRUD routes. It intentionally avoids the shared helper.go constructors so
-// concurrent edits to that file do not conflict.
-func newStorageTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
-	log := logger.NewLogger(testDB)
-	exec := executor.NewExecutor(log, testDB, cfg)
-	api := internalserver.NewAPI(cfg, testDB, exec)
-	s := &TestServer{router: gin.Default()}
-	s.router.GET("/api/storage", api.GetStorages)
-	s.router.POST("/api/storage", api.CreateStorage)
-	s.router.PUT("/api/storage/:id", api.UpdateStorage)
-	s.router.DELETE("/api/storage/:id", api.DeleteStorage)
-	return s
-}
 
 func storageResponseCode(t *testing.T, resp *httptest.ResponseRecorder) int {
 	t.Helper()
@@ -55,7 +37,7 @@ func TestGetStorages(t *testing.T) {
 		},
 	}
 
-	s := newStorageTestServer(cfg, testDB)
+	s := server.NewStorageTestServer(cfg, testDB)
 
 	req, _ := http.NewRequest("GET", "/api/storage", nil)
 	resp := httptest.NewRecorder()
@@ -64,8 +46,8 @@ func TestGetStorages(t *testing.T) {
 	assert.Equal(t, 200, resp.Code)
 
 	var response struct {
-		Code int                      `json:"code"`
-		Data []typedef.MultiStorage   `json:"data"`
+		Code int                    `json:"code"`
+		Data []typedef.MultiStorage `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 	assert.Equal(t, 200, response.Code)
@@ -86,7 +68,7 @@ func TestCreateStorage(t *testing.T) {
 		},
 	}
 
-	s := newStorageTestServer(cfg, testDB)
+	s := server.NewStorageTestServer(cfg, testDB)
 
 	t.Run("file_storage", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]interface{}{
@@ -101,8 +83,8 @@ func TestCreateStorage(t *testing.T) {
 
 		assert.Equal(t, 200, resp.Code)
 		var response struct {
-			Code int                    `json:"code"`
-			Data typedef.MultiStorage   `json:"data"`
+			Code int                  `json:"code"`
+			Data typedef.MultiStorage `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 		assert.Equal(t, 200, response.Code)
@@ -139,8 +121,8 @@ func TestCreateStorage(t *testing.T) {
 
 		assert.Equal(t, 200, resp.Code)
 		var response struct {
-			Code int                    `json:"code"`
-			Data typedef.MultiStorage   `json:"data"`
+			Code int                  `json:"code"`
+			Data typedef.MultiStorage `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 		assert.Equal(t, 200, response.Code)
@@ -209,7 +191,7 @@ func TestUpdateStorage(t *testing.T) {
 		},
 	}
 
-	s := newStorageTestServer(cfg, testDB)
+	s := server.NewStorageTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]interface{}{
@@ -222,8 +204,8 @@ func TestUpdateStorage(t *testing.T) {
 
 		assert.Equal(t, 200, resp.Code)
 		var response struct {
-			Code int                    `json:"code"`
-			Data typedef.MultiStorage   `json:"data"`
+			Code int                  `json:"code"`
+			Data typedef.MultiStorage `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 		assert.Equal(t, 200, response.Code)
@@ -258,7 +240,7 @@ func TestDeleteStorage(t *testing.T) {
 		},
 	}
 
-	s := newStorageTestServer(cfg, testDB)
+	s := server.NewStorageTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
 		req, _ := http.NewRequest("DELETE", "/api/storage/local", nil)

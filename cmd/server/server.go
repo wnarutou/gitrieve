@@ -2,7 +2,9 @@ package server
 
 import (
 	"fmt"
+	"html/template"
 	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/auth"
@@ -13,6 +15,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/monitoring"
 	internalserver "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/ui"
+	"github.com/wnarutou/gitrieve/web"
 )
 
 type Server struct {
@@ -36,8 +39,11 @@ func NewTestServer(db *db.DB) *Server {
 }
 
 func (s *Server) setupRoutes(cfg *config.Config) {
-	// Initialize database
-	database, err := db.Initialize("gitrieve.db")
+	// Initialize database — path is configurable via `server.dbPath` so the
+	// SQLite file (which also holds job history and logs) can be placed on a
+	// mounted volume for persistence, backup and migration.
+	serverCfg := internalserver.GetServerConfig()
+	database, err := db.Initialize(serverCfg.DbPath)
 	if err != nil {
 		ui.ErrorfExit("Failed to initialize database: %s", err)
 	}
@@ -51,9 +57,14 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	// Initialize API
 	api := internalserver.NewAPI(cfg, database, exec)
 
-	// Static files (public)
-	s.router.Static("/static", "./web/static")
-	s.router.LoadHTMLGlob("web/templates/*")
+	// Static files and templates are embedded in the binary (see package web),
+	// so the server works from any working directory.
+	tmpl, err := template.ParseFS(web.TemplatesFS, "templates/*")
+	if err != nil {
+		ui.ErrorfExit("Failed to load templates: %s", err)
+	}
+	s.router.SetHTMLTemplate(tmpl)
+	s.router.StaticFS("/static", http.FS(web.StaticFS))
 
 	// Main page (public)
 	s.router.GET("/", func(c *gin.Context) {
@@ -68,7 +79,6 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 
 	// API routes — protected by auth when enabled
 	var apiGroup *gin.RouterGroup
-	serverCfg := internalserver.GetServerConfig()
 	if serverCfg.AuthEnabled && serverCfg.AuthToken != "" {
 		authMW := auth.NewAuthMiddleware(serverCfg.AuthToken)
 		apiGroup = s.router.Group("/", authMW.Middleware())

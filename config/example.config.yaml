@@ -66,3 +66,16 @@ githubToken: xxx
 cocurrencyNum: 6
 releaseSizeLimit: 300000000
 releaseNumLimit: 3
+
+# Web server (UI + API) settings. Only used by the `server` subcommand.
+server:
+  host: 0.0.0.0
+  port: "8080"
+  # Path to the SQLite database. This file also stores job history and logs.
+  # In Docker, set this to a path under a mounted volume (e.g. /app/data) so
+  # the data persists across container rebuilds and can be backed up from the
+  # host. The default is gitrieve.db (relative to the working directory).
+  dbPath: /app/data/gitrieve.db
+  # Optional bearer-token auth for the API. Leave authEnabled false to disable.
+  authEnabled: false
+  authToken: ""

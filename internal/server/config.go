@@ -5,10 +5,11 @@ import (
 )
 
 type ServerConfig struct {
-	Port     string `mapstructure:"port"`
-	Host     string `mapstructure:"host"`
-	AuthEnabled bool `mapstructure:"authEnabled"`
-	AuthToken string `mapstructure:"authToken"`
+	Port        string `mapstructure:"port"`
+	Host        string `mapstructure:"host"`
+	AuthEnabled bool   `mapstructure:"authEnabled"`
+	AuthToken   string `mapstructure:"authToken"`
+	DbPath      string `mapstructure:"dbPath"`
 }
 
 func GetServerConfig() *ServerConfig {
@@ -17,6 +18,7 @@ func GetServerConfig() *ServerConfig {
 	viper.SetDefault("server.host", "localhost")
 	viper.SetDefault("server.authEnabled", false)
 	viper.SetDefault("server.authToken", "")
+	viper.SetDefault("server.dbPath", "gitrieve.db")
 
 	if err := viper.Unmarshal(cfg); err != nil {
 		panic(err)

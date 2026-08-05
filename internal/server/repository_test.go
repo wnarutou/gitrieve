@@ -1,4 +1,4 @@
-package server
+package server_test
 
 import (
 	"bytes"
@@ -7,31 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
-	"github.com/wnarutou/gitrieve/internal/executor"
-	"github.com/wnarutou/gitrieve/internal/logger"
-	internalserver "github.com/wnarutou/gitrieve/internal/server"
+	server "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
-
-// newRepoTestServer builds a TestServer that only registers the repository
-// CRUD routes. It intentionally avoids the shared helper.go constructors so
-// concurrent edits to that file do not conflict.
-func newRepoTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
-	log := logger.NewLogger(testDB)
-	exec := executor.NewExecutor(log, testDB, cfg)
-	api := internalserver.NewAPI(cfg, testDB, exec)
-	s := &TestServer{router: gin.Default()}
-	s.router.GET("/api/repositories", api.GetRepositories)
-	s.router.POST("/api/repositories", api.CreateRepository)
-	s.router.PUT("/api/repositories/:id", api.UpdateRepository)
-	s.router.DELETE("/api/repositories/:id", api.DeleteRepository)
-	return s
-}
 
 func repoResponseCode(t *testing.T, resp *httptest.ResponseRecorder) int {
 	t.Helper()
@@ -56,7 +38,7 @@ func TestGetRepositories(t *testing.T) {
 		},
 	}
 
-	s := newRepoTestServer(cfg, testDB)
+	s := server.NewRepoTestServer(cfg, testDB)
 
 	req, _ := http.NewRequest("GET", "/api/repositories", nil)
 	resp := httptest.NewRecorder()
@@ -65,8 +47,8 @@ func TestGetRepositories(t *testing.T) {
 	assert.Equal(t, 200, resp.Code)
 
 	var response struct {
-		Code int                    `json:"code"`
-		Data []typedef.Repository   `json:"data"`
+		Code int                  `json:"code"`
+		Data []typedef.Repository `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 	assert.Equal(t, 200, response.Code)
@@ -86,13 +68,13 @@ func TestCreateRepository(t *testing.T) {
 		},
 	}
 
-	s := newRepoTestServer(cfg, testDB)
+	s := server.NewRepoTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]interface{}{
-			"name":               "new-repo",
-			"url":                "github.com/new/repo",
-			"downloadReleases":   true,
+			"name":             "new-repo",
+			"url":              "github.com/new/repo",
+			"downloadReleases": true,
 		})
 		req, _ := http.NewRequest("POST", "/api/repositories", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -101,8 +83,8 @@ func TestCreateRepository(t *testing.T) {
 
 		assert.Equal(t, 200, resp.Code)
 		var response struct {
-			Code int                 `json:"code"`
-			Data typedef.Repository  `json:"data"`
+			Code int                `json:"code"`
+			Data typedef.Repository `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
 		assert.Equal(t, 200, response.Code)
@@ -161,7 +143,7 @@ func TestUpdateRepository(t *testing.T) {
 		},
 	}
 
-	s := newRepoTestServer(cfg, testDB)
+	s := server.NewRepoTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]interface{}{
@@ -211,7 +193,7 @@ func TestDeleteRepository(t *testing.T) {
 		},
 	}
 
-	s := newRepoTestServer(cfg, testDB)
+	s := server.NewRepoTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
 		req, _ := http.NewRequest("DELETE", "/api/repositories/delete-me", nil)
@@ -220,7 +202,7 @@ func TestDeleteRepository(t *testing.T) {
 
 		assert.Equal(t, 200, resp.Code)
 		var response struct {
-			Code int  `json:"code"`
+			Code int `json:"code"`
 			Data struct {
 				Success bool `json:"success"`
 			} `json:"data"`

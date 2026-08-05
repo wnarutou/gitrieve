@@ -1,4 +1,4 @@
-package server
+package server_test
 
 import (
 	"bytes"
@@ -7,12 +7,14 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
 	"github.com/wnarutou/gitrieve/internal/logger"
+	server "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -21,7 +23,7 @@ func TestGetJobsAPI(t *testing.T) {
 	require.NoError(t, err)
 	defer testDB.Close()
 
-	s := NewTestServer(testDB)
+	s := server.NewTestServer(testDB)
 	req, _ := http.NewRequest("GET", "/api/jobs", nil)
 	resp := httptest.NewRecorder()
 
@@ -49,7 +51,7 @@ func TestGetJobs(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Insert test data
 	now := time.Now()
@@ -195,7 +197,7 @@ func TestCreateJob(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Test invalid repository - this doesn't execute actual jobs
 	t.Run("invalid_repository", func(t *testing.T) {
@@ -257,7 +259,7 @@ func TestCancelJob(t *testing.T) {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 
-	s := NewTestServerWithExecutor(testDB, exec)
+	s := server.NewTestServerWithExecutor(testDB, exec)
 
 	// Test non-existent job
 	t.Run("non-existent_job", func(t *testing.T) {
