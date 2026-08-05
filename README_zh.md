@@ -11,6 +11,7 @@ Git Retrieve（gitrieve）是一个用于从任何Git服务器归档 Git 仓库�
   - [run](#run)
   - [daemon](#daemon)
   - [release](#release)
+- [Web UI](#web-ui)
 - [配置](#配置)
 - [存储](#存储)
 - [防删除同步](#防删除同步)
@@ -111,6 +112,19 @@ gitrieve daemon
 # 使用 nohup 后台运行
 nohup gitrieve daemon &
 ```
+
+## Web UI
+
+`server` 命令会启动一个 Web UI 和 HTTP API，让你可以通过浏览器管理归档任务和配置。
+
+```bash
+gitrieve server
+# 默认监听 http://localhost:8080
+```
+
+在 UI 中你可以触发归档任务、查看实时日志，并直接编辑仓库/存储配置而无需手动修改 `config.yaml`。服务器通过 `config.yaml` 中可选的 `server` 配置段进行配置（host、port 以及可选的 Bearer Token 认证）。
+
+详见 [Web UI 指南](docs/web-ui.md) 和 [API 文档](docs/api.md)。
 
 ## 配置
 

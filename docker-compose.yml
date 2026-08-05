@@ -1,21 +1,36 @@
-version: "3"
-
 services:
   gitrieve:
-    image: wnarutou/gitrieve:v0.1.2
+    # Built from the repo Dockerfile. To build locally run: make docker-build
+    # Or pull the released image: wnarutou/gitrieve:latest
+    image: wnarutou/gitrieve:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gitrieve
+    restart: unless-stopped
     environment:
       # set the timezone to be used by cron schedule
       # see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
       - TZ=Asia/Shanghai
+    ports:
+      - "8080:8080"
     volumes:
-      # config file path, modify it to yours
-      - ${pwd}/config/example.config.yaml:/config.yaml
-      # data path, to store downloaded repo, modify it to yours
-      # the in-container path need to be the same as defined in config file
-      - ${pwd}/repo:/repo
-    # by default archives all repositories defined in configuration.
-    command: ["run"]
-    # or just archives a single repository defined in configuration.
-    # command: ["repository", "gitrieve"]
-    # run as daemon
-    # command: ["daemon"]
+      # config file — modify the left side to point at your config.yaml
+      - ./config/example.config.yaml:/root/config.yaml
+      # archive output directory — the in-container path must match the
+      # `path:` configured under storage in config.yaml (e.g. /app/repo)
+      - ./repo:/app/repo
+      # persistent volume for the SQLite database (gitrieve.db) so job history
+      # and logs survive container restarts
+      - gitrieve-data:/app/data
+    # Run the server, reading config from the mounted path.
+    # The web assets (templates/static) are baked into the image under /app/web.
+    command: ["-c", "/root/config.yaml", "server"]
+    # Alternative commands:
+    #   archive all repositories defined in configuration:
+    #   command: ["-c", "/root/config.yaml", "run"]
+    #   run as daemon with cron schedules:
+    #   command: ["-c", "/root/config.yaml", "daemon"]
+
+volumes:
+  gitrieve-data:

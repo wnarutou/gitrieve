@@ -2,5 +2,8 @@
 build
 
 .gitrieve
+gitrieve
+gitrieve.db
+*.db
 repo
 .devcontainer/devcontainer-lock.json

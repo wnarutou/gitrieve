@@ -11,6 +11,7 @@ Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
   - [run](#run)
   - [release](#release)
   - [daemon](#daemon)
+- [Web UI](#web-ui)
 - [Configuration](#configuration)
 - [Storage](#storage)
 - [Deletion-safe sync](#deletion-safe-sync)
@@ -111,6 +112,19 @@ gitrieve daemon
 # You might want to run it with something like nohup
 nohup gitrieve daemon &
 ```
+
+## Web UI
+
+`server` starts a web UI and HTTP API for managing archive jobs and configuration through a browser.
+
+```bash
+gitrieve server
+# By default it listens on http://localhost:8080
+```
+
+From the UI you can trigger archive jobs, view real-time logs, and edit repository/storage configuration without touching `config.yaml` by hand. The server is configured via an optional `server` section in `config.yaml` (host, port, and optional bearer-token auth).
+
+See the [Web UI guide](docs/web-ui.md) and the [API reference](docs/api.md) for details.
 
 ## Configuration
 
