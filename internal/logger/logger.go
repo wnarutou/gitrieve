@@ -1,7 +1,7 @@
 package logger
 
 import (
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo required
 	"github.com/wnarutou/gitrieve/internal/db"
 )
 

@@ -1,0 +1,18 @@
+# GoReleaser uses this Dockerfile to build release images. It expects a pre-built
+# static binary from the goreleaser build step (CGO_ENABLED=0, pure Go). Web assets
+# (templates, static) are embedded in the binary, so no COPY of web/ needed.
+
+FROM alpine:latest
+
+# ca-certificates for HTTPS (git servers, S3), git for cloning repos
+RUN apk add --no-cache ca-certificates git
+
+WORKDIR /app
+
+# The binary and embedded web assets are baked in by goreleaser
+COPY gitrieve /app/gitrieve
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/gitrieve"]
+CMD ["server"]
