@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"github.com/spf13/viper"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
@@ -75,4 +76,19 @@ func GetConcurrencyNum() uint {
 		ins.ConcurrencyNum = 3
 	}
 	return ins.ConcurrencyNum
+}
+
+// Save persists the current in-memory config back to the config file via viper.
+func Save() error {
+	if vp == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	// Update the viper config with current ins values
+	vp.Set("repository", ins.Repository)
+	vp.Set("storage", ins.Storage)
+	vp.Set("githubToken", ins.GitHubToken)
+	vp.Set("cocurrencyNum", ins.ConcurrencyNum)
+	vp.Set("releaseSizeLimit", ins.ReleaseSizeLimit)
+	vp.Set("releaseNumLimit", ins.ReleaseNumLimit)
+	return vp.WriteConfig()
 }

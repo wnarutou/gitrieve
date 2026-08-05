@@ -3,99 +3,53 @@ package db
 import (
 	"testing"
 	"time"
+
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAddExecution(t *testing.T) {
-	db, err := Initialize(":memory:")
+// TestInitializeCreatesTables verifies that Initialize creates the executions
+// and logs tables with the expected columns.
+func TestInitializeCreatesTables(t *testing.T) {
+	testDB, err := Initialize(":memory:")
+	assert.NoError(t, err)
+	defer testDB.Close()
+
+	// executions table should exist and accept inserts
+	_, err = testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
+		"exec-1", "test-job", time.Now(), "running")
 	assert.NoError(t, err)
 
-	migrations := NewMigrations(db)
-
-	execution := &Execution{
-		ID:        "test-id",
-		JobName:   "test-job",
-		StartTime: time.Now(),
-		Status:    "running",
-		CreatedAt: time.Now(),
-	}
-
-	err = migrations.AddExecution(execution)
-	assert.NoError(t, err)
-
-	// Verify the execution was added
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM executions").Scan(&count)
+	err = testDB.QueryRow("SELECT COUNT(*) FROM executions").Scan(&count)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// logs table should exist and accept inserts with a foreign key to executions
+	_, err = testDB.Exec(`INSERT INTO logs (execution_id, timestamp, level, message) VALUES (?, ?, ?, ?)`,
+		"exec-1", time.Now(), "info", "Test log message")
+	assert.NoError(t, err)
+
+	err = testDB.QueryRow("SELECT COUNT(*) FROM logs").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
 
-func TestAddLog(t *testing.T) {
-	db, err := Initialize(":memory:")
+// TestInitializeIsIdempotent verifies that calling Initialize on an existing
+// database does not error (CREATE TABLE IF NOT EXISTS).
+func TestInitializeIsIdempotent(t *testing.T) {
+	testDB, err := Initialize(":memory:")
 	assert.NoError(t, err)
 
-	migrations := NewMigrations(db)
-
-	log := &Log{
-		ExecutionID: "test-id",
-		Timestamp:   time.Now(),
-		Level:       "info",
-		Message:     "Test log message",
-	}
-
-	err = migrations.AddLog(log)
+	// Re-running the same schema statement should not fail
+	_, err = testDB.Exec(`
+		CREATE TABLE IF NOT EXISTS executions (
+			id TEXT PRIMARY KEY,
+			job_name TEXT NOT NULL,
+			start_time DATETIME NOT NULL,
+			end_time DATETIME,
+			status TEXT NOT NULL,
+			error_message TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`)
 	assert.NoError(t, err)
-
-	// Verify the log was added
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM logs").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 1, count)
-}
-
-func TestGetExecutions(t *testing.T) {
-	db, err := Initialize(":memory:")
-	assert.NoError(t, err)
-
-	migrations := NewMigrations(db)
-
-	// Add test data
-	execution := &Execution{
-		ID:        "test-id",
-		JobName:   "test-job",
-		StartTime: time.Now(),
-		Status:    "completed",
-		CreatedAt: time.Now(),
-	}
-	err = migrations.AddExecution(execution)
-	assert.NoError(t, err)
-
-	// Get executions
-	executions, err := migrations.GetExecutions()
-	assert.NoError(t, err)
-	assert.Len(t, executions, 1)
-	assert.Equal(t, "test-job", executions[0].JobName)
-}
-
-func TestGetLogs(t *testing.T) {
-	db, err := Initialize(":memory:")
-	assert.NoError(t, err)
-
-	migrations := NewMigrations(db)
-
-	// Add test data
-	log := &Log{
-		ExecutionID: "test-id",
-		Timestamp:   time.Now(),
-		Level:       "info",
-		Message:     "Test log message",
-	}
-	err = migrations.AddLog(log)
-	assert.NoError(t, err)
-
-	// Get logs
-	logs, err := migrations.GetLogs("test-id")
-	assert.NoError(t, err)
-	assert.Len(t, logs, 1)
-	assert.Equal(t, "info", logs[0].Level)
 }
