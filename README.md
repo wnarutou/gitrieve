@@ -181,11 +181,4 @@ For example compose file, see [docker-compose.yml](docker-compose.yml).
 docker compose up -d
 ```
 
-## FAQ
-
-See [FAQ](https://github.com/wnarutou/gitrieve/wiki/FAQ).
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/wnarutou/gitrieve.svg)](https://starchart.cc/wnarutou/gitrieve)
 

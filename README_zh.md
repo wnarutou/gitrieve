@@ -181,11 +181,3 @@ docker run --rm \
 git clone https://github.com/wnarutou/gitrieve.git
 docker compose up -d
 ```
-
-## 常见问题
-
-见 [FAQ](https://github.com/wnarutou/gitrieve/wiki/FAQ)。
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/wnarutou/gitrieve.svg)](https://starchart.cc/wnarutou/gitrieve)
