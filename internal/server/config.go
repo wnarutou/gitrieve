@@ -28,7 +28,10 @@ func GetServerConfig() *ServerConfig {
 
 	// Defaults — set before UnmarshalKey so missing keys fall back to them.
 	v.SetDefault("server.port", "8080")
-	v.SetDefault("server.host", "localhost")
+	// Default to 0.0.0.0 so the web UI is reachable from outside the container
+	// even when no server section is configured. A localhost default would bind
+	// to loopback and silently break Docker port mappings.
+	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.authEnabled", false)
 	v.SetDefault("server.authToken", "")
 	v.SetDefault("server.dbPath", "gitrieve.db")

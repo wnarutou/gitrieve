@@ -54,13 +54,16 @@ func TestGetServerConfigReadsFromConfigFile(t *testing.T) {
 }
 
 // When the config file has no `server:` section, defaults must apply
-// (localhost:8080, gitrieve.db, auth disabled).
+// (0.0.0.0:8080, gitrieve.db, auth disabled). The default host is 0.0.0.0 so
+// the web UI is reachable from outside the container even when the user does
+// not configure a server section (localhost would silently bind to loopback
+// and break Docker port mapping).
 func TestGetServerConfigDefaultsWhenSectionMissing(t *testing.T) {
 	loadTempConfig(t, "")
 
 	cfg := server.GetServerConfig()
-	if cfg.Host != "localhost" {
-		t.Errorf("expected default host localhost, got %q", cfg.Host)
+	if cfg.Host != "0.0.0.0" {
+		t.Errorf("expected default host 0.0.0.0, got %q", cfg.Host)
 	}
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port 8080, got %q", cfg.Port)
