@@ -38,6 +38,15 @@ func GetIns() *Config {
 	return ins
 }
 
+// GetViper returns the viper instance that loaded the config file. It is nil
+// until Init has run (registered via cobra.OnInitialize, so it runs before any
+// command executes). Exposed so packages that read config sections outside the
+// top-level Config struct (e.g. the `server:` settings) read from the same
+// loaded instance rather than the empty global viper singleton.
+func GetViper() *viper.Viper {
+	return vp
+}
+
 func GetStorageMap() map[string]typedef.MultiStorage {
 	storageMap := make(map[string]typedef.MultiStorage)
 	for _, storage := range ins.Storage {
