@@ -181,3 +181,5 @@ docker run --rm \
 git clone https://github.com/wnarutou/gitrieve.git
 docker compose up -d
 ```
+
+发布的镜像是多架构 manifest，覆盖 `linux/amd64` 和 `linux/arm64`，在 x86_64 和 Apple Silicon 机器上均可使用。

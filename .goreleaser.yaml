@@ -13,6 +13,7 @@ builds:
     ldflags: -s -w
     goarch:
       - amd64
+      - arm64
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -20,9 +21,30 @@ archives:
         format: zip
 dockers:
   - image_templates:
-      - wnarutou/gitrieve:{{ .Tag }}
-      - wnarutou/gitrieve:latest
+      - wnarutou/gitrieve:{{ .Tag }}-amd64
     dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - --pull
+      - --platform=linux/amd64
+    goarch: amd64
+  - image_templates:
+      - wnarutou/gitrieve:{{ .Tag }}-arm64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - --pull
+      - --platform=linux/arm64
+    goarch: arm64
+docker_manifests:
+  - name_template: wnarutou/gitrieve:{{ .Tag }}
+    image_templates:
+      - wnarutou/gitrieve:{{ .Tag }}-amd64
+      - wnarutou/gitrieve:{{ .Tag }}-arm64
+  - name_template: wnarutou/gitrieve:latest
+    image_templates:
+      - wnarutou/gitrieve:{{ .Tag }}-amd64
+      - wnarutou/gitrieve:{{ .Tag }}-arm64
 checksum:
   name_template: 'checksums.txt'
 snapshot:

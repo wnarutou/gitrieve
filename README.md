@@ -181,4 +181,7 @@ For example compose file, see [docker-compose.yml](docker-compose.yml).
 docker compose up -d
 ```
 
+The released image is a multi-arch manifest covering `linux/amd64` and
+`linux/arm64`, so it works on both x86_64 and Apple Silicon machines.
+
 

@@ -24,6 +24,13 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Multi-arch (amd64 + arm64) images. QEMU lets buildx emulate arm64 on the
+      # amd64 runner; buildx builds and pushes each platform image that
+      # goreleaser combines into a single manifest.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
