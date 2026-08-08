@@ -75,6 +75,9 @@ func TestGetJobLogsSSE(t *testing.T) {
 	assert.True(t, strings.Contains(body, "data:"), "expected at least one data: line in SSE body, got: %s", body)
 	// Verify the log content appears
 	assert.Contains(t, body, "Starting job execution")
+	// Verify a terminal "done" event is emitted when the job is finished
+	assert.Contains(t, body, "event: done")
+	assert.Contains(t, body, `"status":"completed"`)
 }
 
 func TestGetJobLogsSSENotFound(t *testing.T) {

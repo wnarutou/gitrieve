@@ -277,6 +277,7 @@ func (a *API) GetJobLogs(c *gin.Context) {
 			if currentStatus == string(executor.StatusCompleted) ||
 				currentStatus == string(executor.StatusFailed) ||
 				currentStatus == string(executor.StatusCancelled) {
+				fmt.Fprintf(w, "event: done\ndata: {\"status\":\"%s\"}\n\n", currentStatus)
 				return false
 			}
 		}

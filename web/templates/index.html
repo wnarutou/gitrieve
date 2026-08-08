@@ -1,16 +1,123 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>{{.title}}</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gitrieve</title>
     <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body>
-    <div class="container">
-        <h1>Gitrieve Job List</h1>
-        <div id="jobs-list">
-            <!-- Jobs will be loaded here -->
+    <nav class="topbar">
+        <div class="brand">Gitrieve</div>
+        <div class="nav-links">
+            <a href="#/jobs" data-route="jobs" class="active">Jobs</a>
+            <a href="#/repositories" data-route="repositories">Repositories</a>
+            <a href="#/storage" data-route="storage">Storage</a>
+        </div>
+        <div class="nav-status">
+            <span id="server-status" class="status-dot" title="Server status"></span>
+            <span id="metrics" class="metrics"></span>
+        </div>
+    </nav>
+
+    <main id="app" class="app"></main>
+
+    <div id="log-modal" class="modal hidden">
+        <div class="modal-content log-modal">
+            <div class="modal-header">
+                <span id="log-modal-title" class="modal-title"></span>
+                <span id="log-modal-state" class="log-state"></span>
+                <button id="log-modal-close" class="btn btn-sm">Close</button>
+            </div>
+            <div class="log-console" id="log-console"></div>
         </div>
     </div>
+
+    <div id="repo-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span id="repo-modal-title" class="modal-title">Repository</span>
+                <button id="repo-modal-close" class="btn btn-sm">Close</button>
+            </div>
+            <form id="repo-form" class="form">
+                <input type="hidden" id="repo-original-name">
+                <div class="form-grid">
+                    <label class="field">Name *<input id="repo-name" required placeholder="e.g. gitrieve"></label>
+                    <label class="field">Type
+                        <select id="repo-type">
+                            <option value="repo">repo</option>
+                            <option value="user">user</option>
+                            <option value="org">org</option>
+                        </select>
+                    </label>
+                    <label class="field">URL<input id="repo-url" placeholder="github.com/owner/repo"></label>
+                    <label class="field">OrgName<input id="repo-org" placeholder="organization / user name"></label>
+                    <label class="field">Cron<input id="repo-cron" placeholder="0 2 * * *"></label>
+                    <label class="field">Depth<input id="repo-depth" type="number" min="0" value="0"></label>
+                    <div class="field field-full">Storage</div>
+                    <div id="repo-storage" class="checkboxes field-full"></div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-uses" type="checkbox"> useCache</label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-allbranches" type="checkbox"> allBranches</label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-releases" type="checkbox"> downloadReleases</label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-issues" type="checkbox"> downloadIssues</label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-wiki" type="checkbox"> downloadWiki</label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox"><input id="repo-discussion" type="checkbox"> downloadDiscussion</label>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" id="repo-form-cancel" class="btn btn-sm">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="storage-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span id="storage-modal-title" class="modal-title">Storage</span>
+                <button id="storage-modal-close" class="btn btn-sm">Close</button>
+            </div>
+            <form id="storage-form" class="form">
+                <input type="hidden" id="storage-original-name">
+                <div class="form-grid">
+                    <label class="field">Name *<input id="storage-name" required placeholder="e.g. localFile"></label>
+                    <label class="field">Type
+                        <select id="storage-type">
+                            <option value="file">file</option>
+                            <option value="s3">s3</option>
+                        </select>
+                    </label>
+                    <label class="field" id="storage-path-field">Path<input id="storage-path" placeholder="/app/repo"></label>
+                    <div class="s3-fields">
+                        <label class="field">Endpoint<input id="storage-endpoint" placeholder="s3.amazonaws.com"></label>
+                        <label class="field">Bucket<input id="storage-bucket"></label>
+                        <label class="field">Region<input id="storage-region"></label>
+                        <label class="field">AccessKeyID<input id="storage-akid"></label>
+                        <label class="field">SecretAccessKey<input id="storage-sk" type="password" autocomplete="new-password"></label>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" id="storage-form-cancel" class="btn btn-sm">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
     <script src="/static/js/main.js"></script>
 </body>
 </html>
