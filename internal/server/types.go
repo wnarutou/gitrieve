@@ -1,6 +1,10 @@
 package server
 
-import "time"
+import (
+	"time"
+
+	"github.com/wnarutou/gitrieve/internal/typedef"
+)
 
 type Response struct {
 	Code    int         `json:"code"`
@@ -9,13 +13,13 @@ type Response struct {
 }
 
 type Job struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	URL         string     `json:"url"`
-	Status      string     `json:"status"`
-	StartTime   *time.Time `json:"start_time"`
-	EndTime     *time.Time `json:"end_time"`
-	ErrorMessage string    `json:"error_message"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	URL          string     `json:"url"`
+	Status       string     `json:"status"`
+	StartTime    *time.Time `json:"start_time"`
+	EndTime      *time.Time `json:"end_time"`
+	ErrorMessage string     `json:"error_message"`
 }
 
 type CreateJobRequest struct {
@@ -60,3 +64,19 @@ const (
 	StatusFailed    ExecutionStatus = "failed"
 	StatusCancelled ExecutionStatus = "cancelled"
 )
+
+type RepositoryOverview struct {
+	typedef.Repository
+	LastRunTime *time.Time `json:"last_run_time"`
+	NextRunTime *time.Time `json:"next_run_time"`
+	TotalRuns   int64      `json:"total_runs"`
+	SuccessRuns int64      `json:"success_runs"`
+	FailedRuns  int64      `json:"failed_runs"`
+}
+
+type ListRepositoriesResponse struct {
+	Repositories []RepositoryOverview `json:"repositories"`
+	Total        int                  `json:"total"`
+	Page         int                  `json:"page"`
+	Limit        int                  `json:"limit"`
+}

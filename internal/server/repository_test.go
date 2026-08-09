@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,28 +34,94 @@ func TestGetRepositories(t *testing.T) {
 
 	cfg := &config.Config{
 		Repository: []typedef.Repository{
-			{Name: "repo-a", URL: "github.com/a/a"},
+			{Name: "repo-a", URL: "github.com/a/a", Cron: "0 2 * * *"},
 			{Name: "repo-b", URL: "github.com/b/b"},
+			{Name: "alpha", URL: "github.com/alpha/alpha"},
 		},
 	}
 
+	// Pre-insert executions for repo-a only: 2 runs, 1 completed, 1 failed.
+	now := time.Now()
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
+		"e1", "repo-a", now, now.Add(time.Minute), "completed", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
+		"e2", "repo-a", now, now.Add(time.Minute), "failed", "boom")
+
 	s := server.NewRepoTestServer(cfg, testDB)
 
-	req, _ := http.NewRequest("GET", "/api/repositories", nil)
-	resp := httptest.NewRecorder()
-	s.ServeHTTP(resp, req)
-
-	assert.Equal(t, 200, resp.Code)
-
-	var response struct {
-		Code int                  `json:"code"`
-		Data []typedef.Repository `json:"data"`
+	// Note: typedef.Repository fields marshal as PascalCase (no json tags),
+	// so the response key is "Name" — the tag here must match exactly.
+	type repoView struct {
+		Name        string     `json:"Name"`
+		LastRunTime *time.Time `json:"last_run_time"`
+		NextRunTime *time.Time `json:"next_run_time"`
+		TotalRuns   int64      `json:"total_runs"`
+		SuccessRuns int64      `json:"success_runs"`
+		FailedRuns  int64      `json:"failed_runs"`
 	}
-	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
-	assert.Equal(t, 200, response.Code)
-	assert.Len(t, response.Data, 2)
-	assert.Equal(t, "repo-a", response.Data[0].Name)
-	assert.Equal(t, "repo-b", response.Data[1].Name)
+	type listData struct {
+		Repositories []repoView `json:"repositories"`
+		Total        int        `json:"total"`
+		Page         int        `json:"page"`
+		Limit        int        `json:"limit"`
+	}
+	var getList func(query string) listData
+	getList = func(query string) listData {
+		req, _ := http.NewRequest("GET", "/api/repositories"+query, nil)
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+		assert.Equal(t, 200, resp.Code)
+		var response struct {
+			Code int      `json:"code"`
+			Data listData `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		assert.Equal(t, 200, response.Code)
+		return response.Data
+	}
+
+	t.Run("list all with stats", func(t *testing.T) {
+		d := getList("")
+		assert.Equal(t, 3, d.Total)
+		assert.Equal(t, 1, d.Page)
+		assert.Equal(t, 20, d.Limit)
+		assert.Len(t, d.Repositories, 3)
+
+		byName := map[string]repoView{}
+		for _, r := range d.Repositories {
+			byName[r.Name] = r
+		}
+		ra := byName["repo-a"]
+		assert.Equal(t, int64(2), ra.TotalRuns)
+		assert.Equal(t, int64(1), ra.SuccessRuns)
+		assert.Equal(t, int64(1), ra.FailedRuns)
+		require.NotNil(t, ra.LastRunTime, "repo-a has a last run")
+		require.NotNil(t, ra.NextRunTime, "repo-a has a cron expression")
+		rb := byName["repo-b"]
+		assert.Equal(t, int64(0), rb.TotalRuns)
+		assert.Nil(t, rb.LastRunTime)
+		assert.Nil(t, rb.NextRunTime, "repo-b has no cron")
+	})
+
+	t.Run("search filters by name", func(t *testing.T) {
+		d := getList("?search=repo")
+		assert.Equal(t, 2, d.Total)
+		names := map[string]bool{}
+		for _, r := range d.Repositories {
+			names[r.Name] = true
+		}
+		assert.True(t, names["repo-a"])
+		assert.True(t, names["repo-b"])
+		assert.False(t, names["alpha"])
+	})
+
+	t.Run("pagination", func(t *testing.T) {
+		d1 := getList("?page=1&limit=2")
+		assert.Equal(t, 3, d1.Total)
+		assert.Len(t, d1.Repositories, 2)
+		d2 := getList("?page=2&limit=2")
+		assert.Len(t, d2.Repositories, 1)
+	})
 }
 
 func TestCreateRepository(t *testing.T) {
@@ -97,11 +164,13 @@ func TestCreateRepository(t *testing.T) {
 		resp = httptest.NewRecorder()
 		s.ServeHTTP(resp, req)
 		var getResp struct {
-			Code int                  `json:"code"`
-			Data []typedef.Repository `json:"data"`
+			Code int `json:"code"`
+			Data struct {
+				Repositories []typedef.Repository `json:"repositories"`
+			} `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &getResp))
-		assert.Len(t, getResp.Data, 2)
+		assert.Len(t, getResp.Data.Repositories, 2)
 	})
 
 	t.Run("duplicate_name", func(t *testing.T) {
@@ -216,12 +285,14 @@ func TestDeleteRepository(t *testing.T) {
 		resp = httptest.NewRecorder()
 		s.ServeHTTP(resp, req)
 		var getResp struct {
-			Code int                  `json:"code"`
-			Data []typedef.Repository `json:"data"`
+			Code int `json:"code"`
+			Data struct {
+				Repositories []typedef.Repository `json:"repositories"`
+			} `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &getResp))
-		assert.Len(t, getResp.Data, 1)
-		assert.Equal(t, "keep-me", getResp.Data[0].Name)
+		assert.Len(t, getResp.Data.Repositories, 1)
+		assert.Equal(t, "keep-me", getResp.Data.Repositories[0].Name)
 	})
 
 	t.Run("not_found", func(t *testing.T) {

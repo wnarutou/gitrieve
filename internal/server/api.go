@@ -1,12 +1,15 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
@@ -299,12 +302,106 @@ func (a *API) GetJobLogs(c *gin.Context) {
 	})
 }
 
-// GetRepositories returns all repositories from the configuration.
+// GetRepositories returns repositories with per-repo execution stats, last/next
+// run times, search (fuzzy name match) and pagination.
 func (a *API) GetRepositories(c *gin.Context) {
-	c.JSON(http.StatusOK, Response{
-		Code: 200,
-		Data: a.config.Repository,
-	})
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	search := c.Query("search")
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	// Aggregate per-repository execution stats from the DB.
+	type agg struct {
+		LastRun *time.Time
+		Total   int64
+		Success int64
+		Failed  int64
+	}
+	stats := map[string]agg{}
+
+	// Note: we select the bare start_time column (constrained to the max by
+	// HAVING) rather than MAX(start_time). The modernc.org/sqlite driver only
+	// converts TEXT to time.Time for columns with a declared DATETIME type;
+	// aggregate expressions like MAX(start_time) have no declared type and come
+	// back as a raw string that database/sql cannot scan into *time.Time.
+	rows, err := a.db.Query(`
+		SELECT job_name,
+		       start_time AS last_run,
+		       COUNT(*)        AS total,
+		       COALESCE(SUM(status = 'completed'), 0) AS success,
+		       COALESCE(SUM(status = 'failed'), 0)    AS failed
+		FROM executions
+		GROUP BY job_name
+		HAVING start_time = MAX(start_time)`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query repository stats: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		var lastRun sql.NullTime
+		var a agg
+		if err := rows.Scan(&name, &lastRun, &a.Total, &a.Success, &a.Failed); err != nil {
+			c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to scan repository stats: " + err.Error()})
+			return
+		}
+		if lastRun.Valid {
+			a.LastRun = &lastRun.Time
+		}
+		stats[name] = a
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to iterate repository stats: " + err.Error()})
+		return
+	}
+
+	// Fuzzy name filter (in-memory equivalent of LIKE '%search%').
+	filtered := make([]typedef.Repository, 0, len(a.config.Repository))
+	for _, repo := range a.config.Repository {
+		if search != "" && !strings.Contains(repo.Name, search) {
+			continue
+		}
+		filtered = append(filtered, repo)
+	}
+
+	total := len(filtered)
+	start := (page - 1) * limit
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	now := time.Now()
+	overviews := make([]RepositoryOverview, 0, end-start)
+	for _, repo := range filtered[start:end] {
+		s := stats[repo.Name]
+		overviews = append(overviews, RepositoryOverview{
+			Repository:  repo,
+			LastRunTime: s.LastRun,
+			NextRunTime: nextRunTime(repo.Cron, now),
+			TotalRuns:   s.Total,
+			SuccessRuns: s.Success,
+			FailedRuns:  s.Failed,
+		})
+	}
+
+	c.JSON(http.StatusOK, Response{Code: 200, Data: ListRepositoriesResponse{
+		Repositories: overviews,
+		Total:        total,
+		Page:         page,
+		Limit:        limit,
+	}})
 }
 
 // CreateRepository adds a new repository to the configuration.
