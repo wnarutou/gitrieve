@@ -126,8 +126,8 @@ func (a *API) GetJobs(c *gin.Context) {
 	}
 
 	if repository != "" {
-		query += " AND job_name = ?"
-		args = append(args, repository)
+		query += " AND job_name LIKE ? ESCAPE '\\'"
+		args = append(args, "%"+escapeLike(repository)+"%")
 		argPos++
 	}
 

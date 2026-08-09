@@ -164,6 +164,46 @@ func TestGetJobs(t *testing.T) {
 				assert.Len(t, response.Data.Jobs, 2)
 			},
 		},
+		{
+			name:           "filter by repository fuzzy (partial name)",
+			queryParams:    "?repository=test",
+			expectedStatus: 200,
+			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
+				var response struct {
+					Code    int `json:"code"`
+					Message string `json:"message"`
+					Data    struct {
+						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
+						Total int64                               `json:"total"`
+					} `json:"data"`
+				}
+				err := json.Unmarshal(resp.Body.Bytes(), &response)
+				require.NoError(t, err)
+				assert.Equal(t, 200, response.Code)
+				assert.Equal(t, int64(3), response.Data.Total, "partial name 'test' should match job_name 'test-repo'")
+				assert.Len(t, response.Data.Jobs, 3)
+			},
+		},
+		{
+			name:           "filter by repository no match",
+			queryParams:    "?repository=nope",
+			expectedStatus: 200,
+			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
+				var response struct {
+					Code    int `json:"code"`
+					Message string `json:"message"`
+					Data    struct {
+						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
+						Total int64                               `json:"total"`
+					} `json:"data"`
+				}
+				err := json.Unmarshal(resp.Body.Bytes(), &response)
+				require.NoError(t, err)
+				assert.Equal(t, 200, response.Code)
+				assert.Equal(t, int64(0), response.Data.Total)
+				assert.Len(t, response.Data.Jobs, 0)
+			},
+		},
 	}
 
 	for _, tt := range tests {
