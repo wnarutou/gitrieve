@@ -26,6 +26,10 @@ services:
       # (e.g. `tar -czf backup.tar.gz ./data`). The in-container path must
       # match `server.dbPath` in config.yaml.
       - ./data:/app/data
+      # git clone cache directory — persists the local .git object store and
+      # working copy across container rebuilds (required when useCache: true).
+      # The in-container path resolves under the working directory /app.
+      - ./.gitrieve:/app/.gitrieve
     # Run the server, reading config from the mounted path.
     # The web assets (templates/static) are baked into the image under /app/web.
     command: ["-c", "/root/config.yaml", "server"]
