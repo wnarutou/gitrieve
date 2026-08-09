@@ -2,8 +2,10 @@ package executor
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/logger"
@@ -23,6 +25,35 @@ func newTestExecutor(t *testing.T) (*Executor, *db.DB) {
 		},
 	}
 	return NewExecutor(log, testDB, cfg), testDB
+}
+
+func TestExecuteJobWritesBoundLogs(t *testing.T) {
+	exec, testDB := newTestExecutor(t)
+
+	jobID, err := exec.ExecuteJob("test-repo")
+	require.NoError(t, err)
+
+	// executeAsync binds the goroutine and ui.Printf("Starting job execution")
+	// is forwarded to the DB logs for this execution.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var count int
+		err := testDB.QueryRow("SELECT COUNT(*) FROM logs WHERE execution_id = ?", jobID).Scan(&count)
+		require.NoError(t, err)
+		if count >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected at least one log row for execution %s, found none", jobID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The log content must be the unified ui output, scoped to this execution.
+	var message string
+	err = testDB.QueryRow("SELECT message FROM logs WHERE execution_id = ? ORDER BY id LIMIT 1", jobID).Scan(&message)
+	require.NoError(t, err)
+	assert.Equal(t, "Starting job execution", message)
 }
 
 func TestExecuteJobCreatesRecord(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/logger"
 	"github.com/wnarutou/gitrieve/internal/repository"
 	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 type ExecutionStatus string
@@ -29,7 +30,6 @@ type JobContext struct {
 }
 
 type Executor struct {
-	logger      *logger.Logger
 	db          *db.DB
 	cfg         *config.Config
 	runningJobs map[string]*JobContext
@@ -37,8 +37,10 @@ type Executor struct {
 }
 
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
+	if logger != nil {
+		ui.SetSink(logger)
+	}
 	return &Executor{
-		logger:      logger,
 		db:          db,
 		cfg:         cfg,
 		runningJobs: make(map[string]*JobContext),
@@ -88,11 +90,6 @@ func (e *Executor) ExecuteJob(jobName string) (string, error) {
 	// Update status to running
 	e.updateJobStatus(jobID, string(StatusRunning), "")
 
-	// Log start
-	if e.logger != nil {
-		e.logger.Log(jobID, jobName, "info", "Starting job execution")
-	}
-
 	// Execute async
 	go e.executeAsync(ctx, jobID, job)
 
@@ -100,15 +97,21 @@ func (e *Executor) ExecuteJob(jobName string) (string, error) {
 }
 
 func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository) {
+	unbind := ui.Bind(jobID, job.Name)
+	defer unbind()
+
 	defer func() {
 		e.mu.Lock()
 		delete(e.runningJobs, jobID)
 		e.mu.Unlock()
 	}()
 
+	ui.Printf("Starting job execution")
+
 	// Check if context is already cancelled
 	if ctx.Err() != nil {
 		e.updateJobStatus(jobID, string(StatusCancelled), "")
+		ui.Printf("Job was cancelled")
 		return
 	}
 
@@ -136,22 +139,16 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		// Check if cancelled
 		if ctx.Err() != nil {
 			e.updateJobStatus(jobID, string(StatusCancelled), "")
-			if e.logger != nil {
-				e.logger.Log(jobID, job.Name, "info", "Job was cancelled")
-			}
+			ui.Printf("Job was cancelled")
 		} else {
 			e.updateJobStatus(jobID, string(StatusFailed), err.Error())
-			if e.logger != nil {
-				e.logger.Log(jobID, job.Name, "error", fmt.Sprintf("Job failed: %v", err))
-			}
+			ui.Errorf("Job failed: %v", err)
 		}
 		return
 	}
 
 	e.updateJobStatus(jobID, string(StatusCompleted), "")
-	if e.logger != nil {
-		e.logger.Log(jobID, job.Name, "info", "Job completed successfully")
-	}
+	ui.Printf("Job completed successfully")
 }
 
 func (e *Executor) CancelJob(jobID string) error {
