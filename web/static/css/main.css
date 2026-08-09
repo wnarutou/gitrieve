@@ -97,6 +97,8 @@ body {
 
 .toolbar-group { display: flex; align-items: center; gap: 8px; }
 
+.toolbar input[type="text"] { min-width: 220px; }
+
 .toolbar-count { color: var(--muted); font-size: 13px; }
 
 .run-label { color: var(--muted); font-size: 13px; }

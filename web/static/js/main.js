@@ -42,9 +42,40 @@ async function api(path, opts) {
     return body ? body.data : null;
 }
 
+function debounce(fn, ms) {
+    let t;
+    return function (...args) {
+        clearTimeout(t);
+        t = setTimeout(() => fn.apply(this, args), ms);
+    };
+}
+
+function paginationHTML(page, pages, total, idPrefix) {
+    return `
+        <div class="pagination">
+            <button class="btn btn-sm" id="pg-prev-${idPrefix}" ${page > 1 ? '' : 'disabled'}>Prev</button>
+            <span class="pg-info">Page ${page} of ${pages} (${total} total)</span>
+            <button class="btn btn-sm" id="pg-next-${idPrefix}" ${page < pages ? '' : 'disabled'}>Next</button>
+        </div>`;
+}
+
+function optionsCell(r) {
+    const parts = [];
+    if (r.UseCache) parts.push('cache');
+    if (r.AllBranches) parts.push('allBranches');
+    if (r.DownloadReleases) parts.push('releases');
+    if (r.DownloadIssues) parts.push('issues');
+    if (r.DownloadWiki) parts.push('wiki');
+    if (r.DownloadDiscussion) parts.push('discussion');
+    return parts.length ? esc(parts.join(' ')) : '-';
+}
+
 const state = {
     jobsPage: 1,
     jobsStatus: '',
+    jobsRepo: '',
+    reposPage: 1,
+    reposSearch: '',
     es: null,
     logJob: null,
     logIds: {}
@@ -230,6 +261,20 @@ async function cancelJob(jobId) {
     }
 }
 
+async function runRepo(name, btn) {
+    if (!name) return;
+    btn.disabled = true;
+    try {
+        const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ repository: name }) });
+        toast('Job started (' + (data.job_id || '').slice(0, 8) + '…)');
+        openLogModal(data.job_id, name);
+        renderRepositories();
+    } catch (e) {
+        toast('Failed to start job: ' + e.message, true);
+        btn.disabled = false;
+    }
+}
+
 function openLogModal(jobId, jobName) {
     if (state.es) state.es.close();
     state.logJob = jobId;
@@ -250,7 +295,7 @@ function openLogModal(jobId, jobName) {
         $('#log-modal-state').textContent = 'finished';
         es.close();
         if (state.es === es) state.es = null;
-        if (state.logJob === jobId) renderJobs();
+        if (state.logJob === jobId) renderApp();
     });
 
     es.onmessage = (ev) => {
@@ -367,13 +412,20 @@ async function deleteRepo(name) {
 
 async function renderRepositories() {
     $('#app').innerHTML = '<div class="loading">Loading repositories\u2026</div>';
-    let repos = [];
+
+    const params = new URLSearchParams({ page: state.reposPage, limit: 20 });
+    if (state.reposSearch) params.set('search', state.reposSearch);
+
+    let data = null;
     try {
-        repos = (await api('/api/repositories')) || [];
+        data = await api('/api/repositories?' + params.toString());
     } catch (e) {
         $('#app').innerHTML = '<div class="empty error-text">Failed to load repositories: ' + esc(e.message) + '</div>';
         return;
     }
+    const repos = (data && data.repositories) || [];
+    const total = (data && data.total) || 0;
+    const pages = Math.max(1, Math.ceil(total / 20));
 
     const rows = repos.map(r => `
         <tr>
@@ -381,14 +433,13 @@ async function renderRepositories() {
             <td class="muted">${esc(r.URL || '-')}</td>
             <td>${esc(r.Type || 'repo')}</td>
             <td class="muted">${esc(r.Cron || '-')}</td>
+            <td class="muted">${fmtTime(r.next_run_time)}</td>
+            <td class="muted">${fmtTime(r.last_run_time)}</td>
+            <td class="muted">${r.total_runs} total \u00b7 ${r.success_runs} ok \u00b7 ${r.failed_runs} fail</td>
             <td class="muted">${esc((r.Storage || []).join(', ') || '-')}</td>
-            <td class="muted">
-                ${r.UseCache ? 'cache' : ''} ${r.AllBranches ? 'allBranches' : ''}
-                ${r.DownloadReleases ? 'releases' : ''} ${r.DownloadIssues ? 'issues' : ''}
-                ${r.DownloadWiki ? 'wiki' : ''} ${r.DownloadDiscussion ? 'discussion' : ''}
-                ${!r.UseCache && !r.AllBranches && !r.DownloadReleases && !r.DownloadIssues && !r.DownloadWiki && !r.DownloadDiscussion ? '-' : ''}
-            </td>
+            <td class="muted">${optionsCell(r)}</td>
             <td class="actions">
+                <button class="btn btn-sm btn-primary btn-run-repo" data-name="${esc(r.Name)}">Execute</button>
                 <button class="btn btn-sm btn-edit-repo" data-name="${esc(r.Name)}">Edit</button>
                 <button class="btn btn-sm btn-danger btn-del-repo" data-name="${esc(r.Name)}">Delete</button>
             </td>
@@ -397,15 +448,41 @@ async function renderRepositories() {
     $('#app').innerHTML = `
         <div class="page-header">
             <h2>Repositories</h2>
-            <button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
+            <div class="toolbar-group">
+                <input type="text" id="repos-search" placeholder="Filter by repository name\u2026" value="${esc(state.reposSearch)}">
+                <button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
+                <button id="btn-refresh-repos" class="btn">Refresh</button>
+            </div>
         </div>
         <div class="panel">
             ${repos.length
-                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>URL</th><th>Type</th><th>Cron</th><th>Storage</th><th>Options</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>URL</th><th>Type</th><th>Cron</th><th>Next Run</th><th>Last Run</th><th>Stats</th><th>Storage</th><th>Options</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
                 : '<div class="empty">No repositories configured. Click <strong>Add Repository</strong>.</div>'}
+            ${repos.length ? paginationHTML(state.reposPage, pages, total, 'repos') : ''}
         </div>`;
 
     $('#btn-add-repo').addEventListener('click', () => openRepoForm(null));
+    $('#btn-refresh-repos').addEventListener('click', () => renderRepositories());
+    $('#repos-search').addEventListener('input', debounce(() => {
+        state.reposSearch = $('#repos-search').value.trim();
+        state.reposPage = 1;
+        renderRepositories();
+    }, 300));
+    $('#repos-search').addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            state.reposSearch = $('#repos-search').value.trim();
+            state.reposPage = 1;
+            renderRepositories();
+        }
+    });
+
+    const prev = $('#pg-prev-repos');
+    const next = $('#pg-next-repos');
+    if (prev) prev.addEventListener('click', () => { if (state.reposPage > 1) { state.reposPage--; renderRepositories(); } });
+    if (next) next.addEventListener('click', () => { state.reposPage++; renderRepositories(); });
+
+    $$('.btn-run-repo').forEach(b => b.addEventListener('click', () => runRepo(b.dataset.name, b)));
     $$('.btn-edit-repo').forEach(b => b.addEventListener('click', () => {
         const r = repos.find(x => x.Name === b.dataset.name);
         if (r) openRepoForm(r);
