@@ -57,8 +57,8 @@ func TestGetJobs(t *testing.T) {
 	now := time.Now()
 	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
 		"job-1", "test-repo", now, now.Add(5*time.Minute), "completed", "")
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"job-2", "test-repo", now, time.Time{}, "running", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
+		"job-2", "test-repo", now, "running")
 	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
 		"job-3", "test-repo", now, now.Add(2*time.Minute), "failed", "some error")
 
@@ -129,6 +129,7 @@ func TestGetJobs(t *testing.T) {
 				assert.Equal(t, int64(1), response.Data.Total)
 				assert.Len(t, response.Data.Jobs, 1)
 				assert.Equal(t, "running", response.Data.Jobs[0].Status)
+				assert.Nil(t, response.Data.Jobs[0].EndTime, "end_time should be null for a running job")
 			},
 		},
 		{

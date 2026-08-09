@@ -160,10 +160,11 @@ func (a *API) GetJobs(c *gin.Context) {
 	jobs := make([]Job, 0)
 	for rows.Next() {
 		var job Job
-		var startTime, endTime time.Time
-		var endTimePtr *time.Time
+		var startTime time.Time
+		var endTime *time.Time
+		var errorMessage *string
 
-		err := rows.Scan(&job.ID, &job.Name, &startTime, &endTime, &job.Status, &job.ErrorMessage)
+		err := rows.Scan(&job.ID, &job.Name, &startTime, &endTime, &job.Status, &errorMessage)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, Response{
 				Code:    500,
@@ -172,12 +173,11 @@ func (a *API) GetJobs(c *gin.Context) {
 			return
 		}
 
-		if !endTime.IsZero() {
-			endTimePtr = &endTime
-		}
-
 		job.StartTime = &startTime
-		job.EndTime = endTimePtr
+		job.EndTime = endTime
+		if errorMessage != nil {
+			job.ErrorMessage = *errorMessage
+		}
 
 		// Get repository URL from config
 		for _, repo := range a.config.Repository {
