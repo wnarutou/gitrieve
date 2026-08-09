@@ -363,10 +363,12 @@ func (a *API) GetRepositories(c *gin.Context) {
 		return
 	}
 
-	// Fuzzy name filter (in-memory equivalent of LIKE '%search%').
+	// Fuzzy name filter (in-memory equivalent of LIKE '%search%'). SQL LIKE is
+	// case-insensitive for ASCII, so match that by folding both sides to lower
+	// case before the Contains check.
 	filtered := make([]typedef.Repository, 0, len(a.config.Repository))
 	for _, repo := range a.config.Repository {
-		if search != "" && !strings.Contains(repo.Name, search) {
+		if search != "" && !strings.Contains(strings.ToLower(repo.Name), strings.ToLower(search)) {
 			continue
 		}
 		filtered = append(filtered, repo)

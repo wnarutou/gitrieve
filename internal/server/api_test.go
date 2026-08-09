@@ -334,3 +334,71 @@ func TestCancelJob(t *testing.T) {
 		assert.Equal(t, 404, resp.Code)
 	})
 }
+
+func TestGetJobsRepositoryEscaping(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{
+				Name: "test-repo",
+				URL:  "github.com/test/repo",
+			},
+		},
+	}
+
+	log := logger.NewLogger(testDB)
+	exec := executor.NewExecutor(log, testDB, cfg)
+
+	s := server.NewTestServerWithExecutor(testDB, exec)
+
+	// Insert jobs whose names contain LIKE metacharacters. The repository filter
+	// escapes them, so "_" must not act as a single-char wildcard (which would
+	// otherwise match "foozbar" too) and "%" must not act as a wildcard run
+	// (which would otherwise match every row).
+	now := time.Now()
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
+		"esc-1", "foo_bar", now, "completed")
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
+		"esc-2", "foozbar", now, "completed")
+	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
+		"esc-3", "100%", now, "completed")
+
+	type listData struct {
+		Jobs []struct {
+			Name string `json:"name"`
+		} `json:"jobs"`
+		Total int64 `json:"total"`
+	}
+	getList := func(query string) (int, listData) {
+		req, _ := http.NewRequest("GET", "/api/jobs"+query, nil)
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+		var response struct {
+			Code int      `json:"code"`
+			Data listData `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		return resp.Code, response.Data
+	}
+
+	t.Run("underscore is escaped", func(t *testing.T) {
+		code, d := getList("?repository=foo_bar")
+		assert.Equal(t, 200, code)
+		assert.Equal(t, int64(1), d.Total, "an unescaped _ wildcard would also match foozbar")
+		require.Len(t, d.Jobs, 1)
+		assert.Equal(t, "foo_bar", d.Jobs[0].Name)
+	})
+
+	t.Run("percent is escaped", func(t *testing.T) {
+		// The literal % in the query string must be URL-encoded (%25) to reach
+		// the server as "100%".
+		code, d := getList("?repository=100%25")
+		assert.Equal(t, 200, code)
+		assert.Equal(t, int64(1), d.Total, "an unescaped % wildcard would match every job")
+		require.Len(t, d.Jobs, 1)
+		assert.Equal(t, "100%", d.Jobs[0].Name)
+	})
+}

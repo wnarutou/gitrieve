@@ -44,10 +44,14 @@ async function api(path, opts) {
 
 function debounce(fn, ms) {
     let t;
-    return function (...args) {
+    function wrapped(...args) {
         clearTimeout(t);
         t = setTimeout(() => fn.apply(this, args), ms);
-    };
+    }
+    // Cancel a pending invocation, e.g. before an Enter-key handler fires its
+    // own immediate render, so the debounced call does not double-fire.
+    wrapped.cancel = () => clearTimeout(t);
+    return wrapped;
 }
 
 function paginationHTML(page, pages, total, idPrefix) {
@@ -210,14 +214,16 @@ async function renderJobs() {
     });
 
     const filter = $('#jobs-repo-filter');
-    filter.addEventListener('input', debounce(() => {
+    const onFilterInput = debounce(() => {
         state.jobsRepo = filter.value.trim();
         state.jobsPage = 1;
         renderJobs();
-    }, 300));
+    }, 300);
+    filter.addEventListener('input', onFilterInput);
     filter.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {
             ev.preventDefault();
+            onFilterInput.cancel();
             state.jobsRepo = filter.value.trim();
             state.jobsPage = 1;
             renderJobs();
@@ -440,21 +446,26 @@ async function renderRepositories() {
         <div class="panel">
             ${repos.length
                 ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>URL</th><th>Type</th><th>Cron</th><th>Next Run</th><th>Last Run</th><th>Stats</th><th>Storage</th><th>Options</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-                : '<div class="empty">No repositories configured. Click <strong>Add Repository</strong>.</div>'}
+                : (state.reposSearch
+                    ? '<div class="empty">No repositories match your search.</div>'
+                    : '<div class="empty">No repositories configured. Click <strong>Add Repository</strong>.</div>')}
             ${repos.length ? paginationHTML(state.reposPage, pages, total, 'repos') : ''}
         </div>`;
 
     $('#btn-add-repo').addEventListener('click', () => openRepoForm(null));
     $('#btn-refresh-repos').addEventListener('click', () => renderRepositories());
-    $('#repos-search').addEventListener('input', debounce(() => {
-        state.reposSearch = $('#repos-search').value.trim();
+    const search = $('#repos-search');
+    const onSearchInput = debounce(() => {
+        state.reposSearch = search.value.trim();
         state.reposPage = 1;
         renderRepositories();
-    }, 300));
-    $('#repos-search').addEventListener('keydown', (ev) => {
+    }, 300);
+    search.addEventListener('input', onSearchInput);
+    search.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {
             ev.preventDefault();
-            state.reposSearch = $('#repos-search').value.trim();
+            onSearchInput.cancel();
+            state.reposSearch = search.value.trim();
             state.reposPage = 1;
             renderRepositories();
         }

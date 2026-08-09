@@ -41,11 +41,13 @@ func TestGetRepositories(t *testing.T) {
 	}
 
 	// Pre-insert executions for repo-a only: 2 runs, 1 completed, 1 failed.
+	// e2 starts LATER than e1, so the "list all" subtest below can assert the
+	// HAVING start_time = MAX(start_time) row selection returns e2's time.
 	now := time.Now()
 	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
 		"e1", "repo-a", now, now.Add(time.Minute), "completed", "")
 	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"e2", "repo-a", now, now.Add(time.Minute), "failed", "boom")
+		"e2", "repo-a", now.Add(2*time.Minute), now.Add(3*time.Minute), "failed", "boom")
 
 	s := server.NewRepoTestServer(cfg, testDB)
 
@@ -96,6 +98,12 @@ func TestGetRepositories(t *testing.T) {
 		assert.Equal(t, int64(1), ra.SuccessRuns)
 		assert.Equal(t, int64(1), ra.FailedRuns)
 		require.NotNil(t, ra.LastRunTime, "repo-a has a last run")
+		// The HAVING start_time = MAX(start_time) clause selects the row with the
+		// latest start_time — e2 was inserted at now.Add(2m), so that must win
+		// over e1's now. SQLite round-trips strip the monotonic clock component,
+		// so compare within a second (2m apart, well within the window).
+		assert.WithinDuration(t, now.Add(2*time.Minute), *ra.LastRunTime, time.Second,
+			"last_run_time must be the later of the two executions")
 		require.NotNil(t, ra.NextRunTime, "repo-a has a cron expression")
 		rb := byName["repo-b"]
 		assert.Equal(t, int64(0), rb.TotalRuns)
@@ -105,6 +113,20 @@ func TestGetRepositories(t *testing.T) {
 
 	t.Run("search filters by name", func(t *testing.T) {
 		d := getList("?search=repo")
+		assert.Equal(t, 2, d.Total)
+		names := map[string]bool{}
+		for _, r := range d.Repositories {
+			names[r.Name] = true
+		}
+		assert.True(t, names["repo-a"])
+		assert.True(t, names["repo-b"])
+		assert.False(t, names["alpha"])
+	})
+
+	t.Run("search is case-insensitive", func(t *testing.T) {
+		// SQL LIKE is case-insensitive for ASCII; the in-memory repos search
+		// must match that (search "REPO" should still find repo-a / repo-b).
+		d := getList("?search=REPO")
 		assert.Equal(t, 2, d.Total)
 		names := map[string]bool{}
 		for _, r := range d.Repositories {

@@ -37,6 +37,9 @@ type Executor struct {
 }
 
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
+	// Side effect: re-points the package-global ui sink so executor log output
+	// is persisted to the DB. Only the server process constructs an Executor;
+	// the CLI and daemon never do, so their stdout-only ui output is unchanged.
 	if logger != nil {
 		ui.SetSink(logger)
 	}
@@ -110,8 +113,11 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 
 	// Check if context is already cancelled
 	if ctx.Err() != nil {
-		e.updateJobStatus(jobID, string(StatusCancelled), "")
+		// Write the final log line BEFORE the terminal status update so the SSE
+		// log stream (which emits "done" as soon as it sees a terminal status)
+		// does not flush before this row is committed and drop it.
 		ui.Printf("Job was cancelled")
+		e.updateJobStatus(jobID, string(StatusCancelled), "")
 		return
 	}
 
@@ -138,17 +144,20 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 	if err != nil {
 		// Check if cancelled
 		if ctx.Err() != nil {
-			e.updateJobStatus(jobID, string(StatusCancelled), "")
+			// Final log line before the terminal status update (see note above).
 			ui.Printf("Job was cancelled")
+			e.updateJobStatus(jobID, string(StatusCancelled), "")
 		} else {
-			e.updateJobStatus(jobID, string(StatusFailed), err.Error())
+			// Final log line before the terminal status update (see note above).
 			ui.Errorf("Job failed: %v", err)
+			e.updateJobStatus(jobID, string(StatusFailed), err.Error())
 		}
 		return
 	}
 
-	e.updateJobStatus(jobID, string(StatusCompleted), "")
+	// Final log line before the terminal status update (see note above).
 	ui.Printf("Job completed successfully")
+	e.updateJobStatus(jobID, string(StatusCompleted), "")
 }
 
 func (e *Executor) CancelJob(jobID string) error {

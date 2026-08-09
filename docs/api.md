@@ -152,7 +152,7 @@ GET /api/jobs
 | `page` | int | `1` | Page number (1-based) |
 | `limit` | int | `20` | Items per page; clamped to `1`–`100` |
 | `status` | string | — | Filter by status; `all` (or omitted) returns all statuses |
-| `repository` | string | — | Filter by repository name (exact match) |
+| `repository` | string | — | Fuzzy (partial) match on repository name, case-insensitive for ASCII (SQL `LIKE '%value%'`; `%`, `_`, and `\` in the value are matched literally) |
 
 **Response `data`**
 
@@ -199,7 +199,7 @@ curl http://localhost:8080/api/jobs
 # Failed jobs only, page 2
 curl "http://localhost:8080/api/jobs?status=failed&page=2&limit=50"
 
-# Jobs for a single repository
+# Jobs whose repository name contains "gitrieve" (fuzzy match)
 curl "http://localhost:8080/api/jobs?repository=gitrieve"
 ```
 
@@ -283,16 +283,83 @@ Repositories are read from and written back to `config.yaml`. The `:id` path par
 
 ### List repositories
 
+List repositories from `config.yaml` (see [Configuration](../README.md#configuration)) with per-repository execution stats, pagination, and an optional fuzzy name filter.
+
 ```
 GET /api/repositories
 ```
 
-**Response `data`** — an array of repository objects matching the `repository:` entries in `config.yaml` (see [Configuration](../README.md#configuration)).
+**Query parameters**
 
-**Example**
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | int | `1` | Page number (1-based) |
+| `limit` | int | `20` | Items per page; clamped to `1`–`100` |
+| `search` | string | — | Fuzzy (partial) match on repository name, case-insensitive for ASCII |
+
+**Response `data`** — a paginated object (not a bare array). Each item embeds the repository fields (PascalCase, matching the `repository:` config entries) plus lower-cased execution stats.
+
+```json
+{
+  "repositories": [
+    {
+      "Name": "gitrieve",
+      "URL": "github.com/wnarutou/gitrieve",
+      "Cron": "0 * * * *",
+      "Storage": ["localFile"],
+      "UseCache": true,
+      "AllBranches": false,
+      "Type": "repo",
+      "OrgName": "",
+      "Depth": 0,
+      "DownloadReleases": true,
+      "DownloadIssues": false,
+      "DownloadWiki": false,
+      "DownloadDiscussion": false,
+      "last_run_time": "2026-08-05T10:02:30Z",
+      "next_run_time": "2026-08-05T11:00:00Z",
+      "total_runs": 42,
+      "success_runs": 40,
+      "failed_runs": 2
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "limit": 20
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `repositories[]` | object | A repository from config plus its per-run stats |
+| `repositories[].Name` | string | Repository name (the unique key) |
+| `repositories[].URL` | string | Repository URL |
+| `repositories[].Cron` | string | Cron schedule, empty if none |
+| `repositories[].Storage` | array of string | Storage backend names |
+| `repositories[].Type` | string | `repo` \| `user` \| `org` |
+| `repositories[].OrgName` | string | Organization name for `user`/`org` types |
+| `repositories[].last_run_time` | string \| null | RFC3339 timestamp of the most recent execution |
+| `repositories[].next_run_time` | string \| null | RFC3339 timestamp of the next scheduled run (computed from `Cron`), `null` if no valid cron |
+| `repositories[].total_runs` | int | Total executions for the repository |
+| `repositories[].success_runs` | int | Executions that finished `completed` |
+| `repositories[].failed_runs` | int | Executions that finished `failed` |
+| `total` | int | Total matching repositories (before pagination) |
+| `page` | int | Current page |
+| `limit` | int | Items per page |
+
+Other embedded repository fields (`UseCache`, `AllBranches`, `Depth`, `DownloadReleases`, `DownloadIssues`, `DownloadWiki`, `DownloadDiscussion`) are the boolean/int options from the config entry.
+
+**Examples**
 
 ```bash
+# All repositories, first page with the default limit
 curl http://localhost:8080/api/repositories
+
+# Fuzzy name search
+curl "http://localhost:8080/api/repositories?search=gitr"
+
+# Page 2 with a custom limit
+curl "http://localhost:8080/api/repositories?page=2&limit=50"
 ```
 
 **Status codes**
@@ -300,6 +367,7 @@ curl http://localhost:8080/api/repositories
 | Code | Meaning |
 |---|---|
 | 200 | Repositories returned |
+| 500 | Failed to query execution stats |
 
 ---
 
