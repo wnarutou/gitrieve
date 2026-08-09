@@ -122,18 +122,12 @@ function statusBadge(status) {
     return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
 }
 
-function jobsToolbar(repos, jobCount) {
-    const options = (repos || []).map(r => '<option value="' + esc(r.Name) + '">' + esc(r.Name) + '</option>').join('');
-    const hasRepos = (repos || []).length > 0;
+function jobsToolbar(jobCount) {
     return `
         <div class="panel">
             <div class="toolbar">
                 <div class="toolbar-group">
-                    <label class="run-label">Run job</label>
-                    <select id="run-repo" ${hasRepos ? '' : 'disabled'}>
-                        ${options || '<option value="">No repositories configured</option>'}
-                    </select>
-                    <button id="btn-run" class="btn btn-primary" ${hasRepos ? '' : 'disabled'}>Run</button>
+                    <input type="text" id="jobs-repo-filter" placeholder="Filter by repository name…" value="${esc(state.jobsRepo)}">
                 </div>
                 <div class="toolbar-group">
                     <select id="jobs-status">
@@ -153,7 +147,7 @@ function jobsToolbar(repos, jobCount) {
 
 function jobsTable(jobs, page, limit, total) {
     if (!jobs.length) {
-        return '<div class="empty">No jobs yet. Pick a repository above and click <strong>Run</strong>.</div>';
+        return '<div class="empty">No jobs yet. Run a repository from the <strong>Repositories</strong> page, or click <strong>Refresh</strong>.</div>';
     }
     const rows = jobs.map(j => `
         <tr>
@@ -185,22 +179,15 @@ function jobsTable(jobs, page, limit, total) {
                 <tbody>${rows}</tbody>
             </table>
         </div>
-        <div class="pagination">
-            <button class="btn btn-sm" id="pg-prev" ${page > 1 ? '' : 'disabled'}>Prev</button>
-            <span class="pg-info">Page ${page} of ${pages} (${total} total)</span>
-            <button class="btn btn-sm" id="pg-next" ${page < pages ? '' : 'disabled'}>Next</button>
-        </div>`;
+        ${paginationHTML(page, pages, total, 'jobs')}`;
 }
 
 async function renderJobs() {
     $('#app').innerHTML = '<div class="loading">Loading jobs\u2026</div>';
-    let repos = [];
-    try {
-        repos = (await api('/api/repositories')) || [];
-    } catch (e) { /* keep empty */ }
 
     const params = new URLSearchParams({ page: state.jobsPage, limit: 20 });
     if (state.jobsStatus) params.set('status', state.jobsStatus);
+    if (state.jobsRepo) params.set('repository', state.jobsRepo);
 
     let jobs = [], total = 0;
     try {
@@ -212,9 +199,8 @@ async function renderJobs() {
         return;
     }
 
-    $('#app').innerHTML = jobsToolbar(repos, total) + jobsTable(jobs, state.jobsPage, 20, total);
+    $('#app').innerHTML = jobsToolbar(total) + jobsTable(jobs, state.jobsPage, 20, total);
 
-    $('#btn-run').addEventListener('click', runJob);
     $('#btn-refresh').addEventListener('click', () => renderJobs());
     $('#jobs-status').value = state.jobsStatus;
     $('#jobs-status').addEventListener('change', (ev) => {
@@ -223,31 +209,28 @@ async function renderJobs() {
         renderJobs();
     });
 
-    const prev = $('#pg-prev');
-    const next = $('#pg-next');
+    const filter = $('#jobs-repo-filter');
+    filter.addEventListener('input', debounce(() => {
+        state.jobsRepo = filter.value.trim();
+        state.jobsPage = 1;
+        renderJobs();
+    }, 300));
+    filter.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            state.jobsRepo = filter.value.trim();
+            state.jobsPage = 1;
+            renderJobs();
+        }
+    });
+
+    const prev = $('#pg-prev-jobs');
+    const next = $('#pg-next-jobs');
     if (prev) prev.addEventListener('click', () => { if (state.jobsPage > 1) { state.jobsPage--; renderJobs(); } });
     if (next) next.addEventListener('click', () => { state.jobsPage++; renderJobs(); });
 
     $$('.btn-log').forEach(b => b.addEventListener('click', () => openLogModal(b.dataset.jobid, b.dataset.jobname)));
     $$('.btn-cancel').forEach(b => b.addEventListener('click', () => cancelJob(b.dataset.jobid)));
-}
-
-async function runJob() {
-    const sel = $('#run-repo');
-    const name = sel && sel.value;
-    if (!name) return;
-    const btn = $('#btn-run');
-    btn.disabled = true;
-    try {
-        const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ repository: name }) });
-        toast('Job started (' + (data.job_id || '').slice(0, 8) + '\u2026)');
-        openLogModal(data.job_id, name);
-        renderJobs();
-    } catch (e) {
-        toast('Failed to start job: ' + e.message, true);
-    } finally {
-        btn.disabled = false;
-    }
 }
 
 async function cancelJob(jobId) {
@@ -622,8 +605,4 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(refreshMetrics, 15000);
 
     renderApp();
-    setInterval(() => {
-        const route = (location.hash || '#/jobs').replace(/^#\/?/, '').split('/')[0];
-        if (route === 'jobs' && $('#log-modal').classList.contains('hidden')) renderJobs();
-    }, 5000);
 });
