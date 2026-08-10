@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -51,6 +52,55 @@ func TestExecuteJobWritesBoundLogs(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("expected a 'Starting job execution' log row for execution %s", jobID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
+	// The component syncs (issue/release/wiki/discussion) read the package-global
+	// config via config.GetIns() and dereference cfg.GitHubToken, so mirror the
+	// server process (where cobra.OnInitialize runs config.Init) to avoid a nil
+	// pointer panic.
+	tmp, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	_, err = tmp.WriteString("githubtoken: test-token\n")
+	require.NoError(t, err)
+	require.NoError(t, tmp.Close())
+	config.Path = tmp.Name()
+	config.Init()
+	t.Cleanup(func() { config.Path = "" })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { testDB.Close() })
+
+	log := logger.NewLogger(testDB)
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "test-repo", URL: "github.com/test/repo", DownloadIssues: true},
+		},
+	}
+	exec := NewExecutor(log, testDB, cfg)
+
+	jobID, err := exec.ExecuteJob("test-repo")
+	require.NoError(t, err)
+
+	// The executor must run the configured component syncs. "Downloading issues"
+	// is written via ui before the sync's network I/O, so it appears regardless
+	// of whether the (nonexistent) test repo is reachable.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var count int
+		err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Downloading issues'", jobID,
+		).Scan(&count)
+		require.NoError(t, err)
+		if count >= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 'Downloading issues' log row for execution %s", jobID)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

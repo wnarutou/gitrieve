@@ -42,18 +42,6 @@ async function api(path, opts) {
     return body ? body.data : null;
 }
 
-function debounce(fn, ms) {
-    let t;
-    function wrapped(...args) {
-        clearTimeout(t);
-        t = setTimeout(() => fn.apply(this, args), ms);
-    }
-    // Cancel a pending invocation, e.g. before an Enter-key handler fires its
-    // own immediate render, so the debounced call does not double-fire.
-    wrapped.cancel = () => clearTimeout(t);
-    return wrapped;
-}
-
 function paginationHTML(page, pages, total, idPrefix) {
     return `
         <div class="pagination">
@@ -132,6 +120,7 @@ function jobsToolbar(jobCount) {
             <div class="toolbar">
                 <div class="toolbar-group">
                     <input type="text" id="jobs-repo-filter" placeholder="Filter by repository name…" value="${esc(state.jobsRepo)}">
+                    <button id="btn-search-jobs" class="btn">Search</button>
                 </div>
                 <div class="toolbar-group">
                     <select id="jobs-status">
@@ -213,20 +202,18 @@ async function renderJobs() {
         renderJobs();
     });
 
-    const filter = $('#jobs-repo-filter');
-    const onFilterInput = debounce(() => {
-        state.jobsRepo = filter.value.trim();
+    // Query only on explicit action (Search button or Enter), never on every
+    // keystroke, so the input keeps focus while typing.
+    const applyJobFilter = () => {
+        state.jobsRepo = $('#jobs-repo-filter').value.trim();
         state.jobsPage = 1;
         renderJobs();
-    }, 300);
-    filter.addEventListener('input', onFilterInput);
-    filter.addEventListener('keydown', (ev) => {
+    };
+    $('#btn-search-jobs').addEventListener('click', applyJobFilter);
+    $('#jobs-repo-filter').addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {
             ev.preventDefault();
-            onFilterInput.cancel();
-            state.jobsRepo = filter.value.trim();
-            state.jobsPage = 1;
-            renderJobs();
+            applyJobFilter();
         }
     });
 
@@ -439,6 +426,7 @@ async function renderRepositories() {
             <h2>Repositories</h2>
             <div class="toolbar-group">
                 <input type="text" id="repos-search" placeholder="Filter by repository name\u2026" value="${esc(state.reposSearch)}">
+                <button id="btn-search-repos" class="btn">Search</button>
                 <button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
                 <button id="btn-refresh-repos" class="btn">Refresh</button>
             </div>
@@ -454,20 +442,18 @@ async function renderRepositories() {
 
     $('#btn-add-repo').addEventListener('click', () => openRepoForm(null));
     $('#btn-refresh-repos').addEventListener('click', () => renderRepositories());
-    const search = $('#repos-search');
-    const onSearchInput = debounce(() => {
-        state.reposSearch = search.value.trim();
+    // Query only on explicit action (Search button or Enter), never on every
+    // keystroke, so the input keeps focus while typing.
+    const applyRepoSearch = () => {
+        state.reposSearch = $('#repos-search').value.trim();
         state.reposPage = 1;
         renderRepositories();
-    }, 300);
-    search.addEventListener('input', onSearchInput);
-    search.addEventListener('keydown', (ev) => {
+    };
+    $('#btn-search-repos').addEventListener('click', applyRepoSearch);
+    $('#repos-search').addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {
             ev.preventDefault();
-            onSearchInput.cancel();
-            state.reposSearch = search.value.trim();
-            state.reposPage = 1;
-            renderRepositories();
+            applyRepoSearch();
         }
     });
 

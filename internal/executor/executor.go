@@ -8,10 +8,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
+	"github.com/wnarutou/gitrieve/internal/discussion"
+	"github.com/wnarutou/gitrieve/internal/issue"
 	"github.com/wnarutou/gitrieve/internal/logger"
+	"github.com/wnarutou/gitrieve/internal/release"
 	"github.com/wnarutou/gitrieve/internal/repository"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
+	"github.com/wnarutou/gitrieve/internal/wiki"
 )
 
 type ExecutionStatus string
@@ -138,26 +142,59 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		}
 	}
 
-	// Execute repository sync
-	err := repository.Sync(job, false, storages)
-
-	if err != nil {
-		// Check if cancelled
-		if ctx.Err() != nil {
-			// Final log line before the terminal status update (see note above).
-			ui.Printf("Job was cancelled")
-			e.updateJobStatus(jobID, string(StatusCancelled), "")
-		} else {
-			// Final log line before the terminal status update (see note above).
-			ui.Errorf("Job failed: %v", err)
-			e.updateJobStatus(jobID, string(StatusFailed), err.Error())
-		}
-		return
+	// Execute repository sync (code). The metadata/content components below run
+	// even if this fails, mirroring the daemon's independent per-repo jobs, so a
+	// partial archive is still attempted.
+	codeErr := repository.Sync(job, false, storages)
+	if codeErr != nil {
+		ui.Errorf("Code sync failed: %v", codeErr)
 	}
 
+	// Download the configured metadata/content components.
+	compErr := e.downloadComponents(job, storages)
+
+	if ctx.Err() != nil {
+		// Final log line before the terminal status update (see note above).
+		ui.Printf("Job was cancelled")
+		e.updateJobStatus(jobID, string(StatusCancelled), "")
+		return
+	}
+	if codeErr != nil {
+		e.updateJobStatus(jobID, string(StatusFailed), codeErr.Error())
+		return
+	}
+	if compErr != nil {
+		e.updateJobStatus(jobID, string(StatusFailed), compErr.Error())
+		return
+	}
 	// Final log line before the terminal status update (see note above).
 	ui.Printf("Job completed successfully")
 	e.updateJobStatus(jobID, string(StatusCompleted), "")
+}
+
+// downloadComponents runs the per-repository metadata/content syncs enabled in
+// the config (releases, issues, wiki, discussions), mirroring what the daemon
+// schedules. Each runs independently and logs its own progress/failure via ui;
+// the first error is returned so the job can be marked failed.
+func (e *Executor) downloadComponents(job typedef.Repository, storages []typedef.MultiStorage) error {
+	var firstErr error
+	run := func(name string, enabled bool, fn func() error) {
+		if !enabled {
+			return
+		}
+		ui.Printf("Downloading %s", name)
+		if err := fn(); err != nil {
+			ui.Errorf("Failed to download %s: %v", name, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("download %s failed: %w", name, err)
+			}
+		}
+	}
+	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(job, storages) })
+	run("issues", job.DownloadIssues, func() error { return issue.Sync(job, storages) })
+	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(job, storages) })
+	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(job, storages) })
+	return firstErr
 }
 
 func (e *Executor) CancelJob(jobID string) error {
