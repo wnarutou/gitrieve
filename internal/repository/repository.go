@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path"
@@ -11,7 +10,7 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/uuid"
-	"github.com/mholt/archives"
+	"github.com/wnarutou/gitrieve/internal/archive"
 	internalconfig "github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/scm/github"
@@ -330,53 +329,26 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			// fetched objects are already preserved in the local cache.
 			return syncCtx.Err()
 		}
-		// change directory to the parent directory of the repo
-		err = os.Chdir(path.Dir(gitDir))
-		if err != nil {
-			ui.Errorf("Error changing directory, %s", err)
-		}
-
-		var sourceDir string
 		var targetDir string
 		if iswiki {
-			sourceDir = "wiki"
 			targetDir = r.Name + "_wiki"
 		} else {
-			sourceDir = "code"
 			targetDir = r.Name
 		}
-		files, err := archives.FilesFromDisk(context.TODO(), &archives.FromDiskOptions{}, map[string]string{
-			sourceDir: targetDir,
-		})
-		if err != nil {
-			ui.Errorf("Error reading files, %s", err)
-			return err
-		}
 
-		// For codes, there is no need to save the history.
-		// The latest one is the full version and already contains all the history,
-		// so it can be replaced directly.
-		// now := time.Now().Format("20060102150405")
-		base := targetDir + ".tar.gz"
-		// TODO store to a temporary file first if greater than certain size,
-		//      we can use isUpdated to support this feature temporality
-		archive := &bytes.Buffer{}
-
-		format := archives.CompressedArchive{
-			Compression: archives.Gz{},
-			Archival:    archives.Tar{},
-		}
-		err = format.Archive(context.Background(), archive, files)
+		// Archive the working tree directly from gitDir. Create takes an
+		// absolute path and never changes the process cwd, so it is safe to
+		// run from concurrent job goroutines.
+		buf, err := archive.Create(syncCtx, gitDir, targetDir)
 		if err != nil {
 			ui.Errorf("Error creating archive, %s", err)
 			return err
 		}
 
-		// change to current dir
-		err = os.Chdir(currentDir)
-		if err != nil {
-			ui.Errorf("Error changing directory, %s", err)
-		}
+		// For codes, there is no need to save the history: the latest one is
+		// the full version and already contains all the history, so it can be
+		// replaced directly.
+		base := targetDir + ".tar.gz"
 
 		// handle storages
 		for _, s := range storages {
@@ -385,7 +357,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Errorf("Error getting backend, %s", err)
 				return err
 			}
-			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), archive.Bytes())
+			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
 				return err
