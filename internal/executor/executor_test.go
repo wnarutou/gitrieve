@@ -87,9 +87,10 @@ func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
 	require.NoError(t, err)
 
 	// The executor must run the configured component syncs. "Downloading issues"
-	// is written via ui before the sync's network I/O, so it appears regardless
-	// of whether the (nonexistent) test repo is reachable.
-	deadline := time.Now().Add(3 * time.Second)
+	// is written only after repository.Sync returns, and that sync does a real
+	// clone of the (nonexistent) test repo that can take a while on a slow
+	// network — use a generous deadline.
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		var count int
 		err := testDB.QueryRow(

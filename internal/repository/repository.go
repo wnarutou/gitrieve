@@ -292,11 +292,16 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
+				if syncCtx.Err() != nil {
+					// Cancelled — stop the whole sync instead of continuing to
+					// the remaining branches. The fetched objects stay in the
+					// local cache and are picked up on the next run.
+					return err
+				}
 			} else {
 				isUpdated = true
+				ui.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
 			}
-
-			ui.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
 		}
 		return nil
 	})
@@ -313,6 +318,11 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	if isUpdated {
+		if syncCtx.Err() != nil {
+			// Cancelled after the network work — skip archiving/storing; the
+			// fetched objects are already preserved in the local cache.
+			return syncCtx.Err()
+		}
 		// change directory to the parent directory of the repo
 		err = os.Chdir(path.Dir(gitDir))
 		if err != nil {
