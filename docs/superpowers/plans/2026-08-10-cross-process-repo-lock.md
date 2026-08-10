@@ -6,12 +6,12 @@
 
 **Architecture:** A new `internal/lock` package exposes `Acquire(ctx, r *scm.Repository, component) (release func(), err error)`, a two-layer lock: a per-key in-process binary semaphore (ctx-aware) plus a cross-process OS advisory file lock via `github.com/gofrs/flock` on `.gitrieve/locks/<host>/<owner>/<repo>/<component>.lock`. Each component sync function (`repository.Sync` for code/wiki, `issue.Sync`, `discussion.Sync`, `release.DownloadAllAssets`) acquires the lock at its top and releases via `defer`. No function signatures change.
 
-**Tech Stack:** Go 1.23, `github.com/gofrs/flock v0.13.0` (only new dependency), standard `sync`/`context`, `testify` for tests.
+**Tech Stack:** Go 1.23, `github.com/gofrs/flock v0.12.1` (only new dependency), standard `sync`/`context`, `testify` for tests.
 
 ## Global Constraints
 
 - Go 1.23 (go.mod already declares `go 1.23.0`); do not bump it.
-- Only new dependency: `github.com/gofrs/flock v0.13.0`. Use `go get github.com/gofrs/flock@v0.13.0`.
+- Only new dependency: `github.com/gofrs/flock v0.12.1`. Use `go get github.com/gofrs/flock@v0.12.1`. (Ruling: v0.13.0 declares `go 1.24.0` and pulls `x/sys v0.37.0`, incompatible with the Go 1.23 constraint above; v0.12.1 has the identical API — `New`, `TryLockContext(ctx, retryDelay) (bool, error)`, `Unlock`, `Close`.)
 - Lock key = `path.Join(r.Host, r.Owner, r.Name, component)`; component ∈ `{code, wiki, issue, discussion, release}`.
 - Lock file = `<cwd>/.gitrieve/locks/<host>/<owner>/<repo>/<component>.lock`, created via `os.MkdirAll`, **never deleted**.
 - Lock acquisition order: in-process semaphore first, then `flock.TryLockContext` (both honor `ctx`; a pre-cancelled or mid-wait-cancelled ctx returns `ctx.Err()`).
@@ -33,8 +33,8 @@
 
 - [ ] **Step 1: Add the dependency**
 
-Run: `go get github.com/gofrs/flock@v0.13.0`
-Expected: go.mod gains `require github.com/gofrs/flock v0.13.0`; no other code changes.
+Run: `go get github.com/gofrs/flock@v0.12.1`
+Expected: go.mod gains `require github.com/gofrs/flock v0.12.1`; no other code changes.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -200,8 +200,10 @@ func TestCrossProcessLock(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "parent must be blocked while the child holds the lock")
 
 	// Killing the child releases the lock (advisory lock dies with the process).
+	// cmd.Wait returns *exec.ExitError here: the child was killed, so it did not
+	// exit cleanly — that is expected, not a failure.
 	require.NoError(t, cmd.Process.Kill())
-	require.NoError(t, cmd.Wait())
+	require.Error(t, cmd.Wait())
 	killed = true
 
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
