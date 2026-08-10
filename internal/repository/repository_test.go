@@ -50,7 +50,7 @@ func TestSyncBlocksWhileCodeLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, false, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "Sync must block on the held code lock")
+	require.Equal(t, context.DeadlineExceeded, err, "Sync must block on the held code lock")
 }
 
 func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
@@ -65,5 +65,5 @@ func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, true, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "wiki Sync must block on the held wiki lock")
+	require.Equal(t, context.DeadlineExceeded, err, "wiki Sync must block on the held wiki lock")
 }
