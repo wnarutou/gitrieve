@@ -58,6 +58,9 @@ func runIssue(cmd *cobra.Command, args []string) {
 			// move on to next repo
 		}
 	}
+	if ctx.Err() != nil {
+		os.Exit(130)
+	}
 	ui.Printf("Done")
 }
 

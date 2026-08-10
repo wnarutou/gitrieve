@@ -62,6 +62,9 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 	allReleaseSize := 0
 	var reserveTagName []string
 	for _, release := range releases {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if releaseSizeLimit >= 0 {
 			if allReleaseSize >= releaseSizeLimit {
 				ui.Printf("The size %d limit has been reached, no more downloading", releaseSizeLimit)
