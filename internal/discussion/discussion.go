@@ -1,7 +1,6 @@
 package discussion
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mholt/archives"
 	"github.com/shurcooL/githubv4"
+	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
@@ -448,36 +447,16 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	}
 
 	if isUpdated {
-		err = os.Chdir(path.Dir(gitDir))
-		if err != nil {
-			ui.Errorf("Error changing directory: %s", err)
-		}
-
-		files, err := archives.FilesFromDisk(context.TODO(), &archives.FromDiskOptions{}, map[string]string{
-			"discussion": "discussion",
-		})
-		if err != nil {
-			ui.Errorf("Error reading files: %s", err)
-			return err
-		}
-
-		base := "discussions.tar.gz"
-		archive := &bytes.Buffer{}
-
-		format := archives.CompressedArchive{
-			Compression: archives.Gz{},
-			Archival:    archives.Tar{},
-		}
-		err = format.Archive(context.Background(), archive, files)
+		// Archive the discussion dir directly from gitDir. Create takes an
+		// absolute path and never changes the process cwd, so it is safe to
+		// run from concurrent job goroutines.
+		buf, err := archive.Create(ctx, gitDir, "discussion")
 		if err != nil {
 			ui.Errorf("Error creating archive: %s", err)
 			return err
 		}
 
-		err = os.Chdir(currentDir)
-		if err != nil {
-			ui.Errorf("Error changing directory: %s", err)
-		}
+		base := "discussions.tar.gz"
 
 		for _, s := range storages {
 			backend, err := storage.GetStorage(s)
@@ -485,7 +464,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 				ui.Errorf("Error getting backend: %s", err)
 				return err
 			}
-			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), archive.Bytes())
+			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file: %s", err)
 				return err
