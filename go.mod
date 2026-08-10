@@ -8,6 +8,7 @@ require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/go-co-op/gocron/v2 v2.16.1
 	github.com/go-git/go-git/v5 v5.16.0
+	github.com/gofrs/flock v0.12.1
 	github.com/google/uuid v1.6.0
 	github.com/gookit/color v1.5.4
 	github.com/mholt/archives v0.1.1
