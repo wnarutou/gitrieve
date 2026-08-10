@@ -116,6 +116,10 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 					}
 				}
 
+				if len(objectMetaInfo) == 0 {
+					needDownloadStorage = append(needDownloadStorage, s)
+					continue
+				}
 				if objectMetaInfo[0].Size != int64(asset.GetSize()) {
 					needDownloadStorage = append(needDownloadStorage, s)
 					continue

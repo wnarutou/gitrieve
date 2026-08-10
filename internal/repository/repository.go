@@ -108,7 +108,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 	repoName := r.Name
 	// check if repo name is valid
-	if repoName == "." || repo.Name == "/" {
+	if repoName == "." || repoName == "/" {
 		ui.Errorf("Invalid repository name")
 		return err
 	}
