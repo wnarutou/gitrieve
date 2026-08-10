@@ -50,10 +50,10 @@ func Acquire(ctx context.Context, r *scm.Repository, component string) (release 
 ```
 
 实现要点：
-- 进程内层：包级 `map[string]*sync.Mutex` + 守卫 `sync.Mutex`（模式与 executor 的 `runningJobs` 相同）。key 集合由「配置 repo × 5 组件」界定，有界、无需清理。
-- 跨进程层：`flock.New(lockPath)`，先 `os.MkdirAll(filepath.Dir(lockPath))`，再 `f.LockContext(ctx)`（可被 ctx 取消）。
-- 获取顺序：先进程内 mutex，后 flock；任一层失败都要释放已获取的层再返回错误。
-- release：`f.Unlock()`（gofrs/flock 自动随进程释放，不删文件），再释放进程内 mutex。
+- 进程内层：包级 `map[string]chan struct{}`（二元信号量）+ 守卫 `sync.Mutex`。key 集合由「配置 repo × 5 组件」界定，有界、无需清理。用信号量而非 `sync.Mutex`，是为了让进程内层同样可被 `ctx` 取消（见 §7）。
+- 跨进程层：`flock.New(lockPath)`，先 `os.MkdirAll(filepath.Dir(lockPath))`，再 `f.TryLockContext(ctx, 100*time.Millisecond)`（gofrs/flock v0.12.1 无 `LockContext`；`TryLockContext` 是可被 ctx 取消的阻塞式排他获取）。
+- 获取顺序：先进程内信号量，后 flock；任一层失败都要释放已获取的层再返回错误。
+- release：`f.Unlock()`（gofrs/flock 自动随进程释放，不删文件），再释放进程内信号量。
 - `cwd` 在 Acquire 调用时用 `os.Getwd()` 解析——各函数在 os.Chdir 之前调用 Acquire，取到的是正确 cwd。
 
 ## 5. 各组件接入点
