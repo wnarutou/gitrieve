@@ -57,7 +57,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		if repo.DownloadReleases {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
-				gocron.NewTask(release.DownloadAllAssets, repo, storages),
+				gocron.NewTask(release.DownloadAllAssets, context.Background(), repo, storages),
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download releases of %s, %s", repo.Name, err)

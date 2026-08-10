@@ -1,6 +1,7 @@
 package release
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,10 @@ func (r ByPublishedAt) Less(i, j int) bool { return r[i].PublishedAt.After(r[j].
 // Implement the Swap method of the sort.Interface interface
 func (r ByPublishedAt) Swap(i, j int) { r[i], r[j] = r[j], r[i] }
 
-func DownloadAllAssets(repo typedef.Repository, storages []typedef.MultiStorage) error {
+func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	releaseNumLimit := config.GetReleaseNumLimit()
 	releaseSizeLimit := config.GetReleaseSizeLimit()
 	r, err := scm.NewRepository(repo.URL)
@@ -51,6 +55,9 @@ func DownloadAllAssets(repo typedef.Repository, storages []typedef.MultiStorage)
 			releaseNumLimit = len(releases)
 		}
 		releases = releases[:releaseNumLimit]
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	allReleaseSize := 0
 	var reserveTagName []string
@@ -154,7 +161,13 @@ func DownloadAllAssets(repo typedef.Repository, storages []typedef.MultiStorage)
 					}
 				}
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	for _, s := range storages {
 		backend, err := storage.GetStorage(s)
