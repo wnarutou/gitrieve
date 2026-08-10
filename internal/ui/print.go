@@ -93,7 +93,9 @@ func logThroughSink(level, message string) {
 	if !ok {
 		return
 	}
-	_ = s.Log(b.executionID, b.jobName, level, message)
+	// Trim trailing whitespace so format strings that end with "\n" (added for
+	// terminal spacing) do not persist a literal newline into the log stream.
+	_ = s.Log(b.executionID, b.jobName, level, strings.TrimRight(message, " \t\r\n"))
 }
 
 func Errorf(format string, a ...interface{}) {

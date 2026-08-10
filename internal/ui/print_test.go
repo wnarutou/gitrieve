@@ -49,6 +49,25 @@ func TestBindRoutesUiOutputToSink(t *testing.T) {
 	assert.Equal(t, "exec-1|repo-a|error|boom 42", msgs[0])
 }
 
+func TestSinkTrimsTrailingWhitespace(t *testing.T) {
+	s := &fakeSink{}
+	SetSink(s)
+	defer SetSink(nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		unbind := Bind("exec-1", "repo-a")
+		Printf("checked out. \n")
+		unbind()
+	}()
+	<-done
+
+	msgs := s.messages()
+	assert.Len(t, msgs, 1)
+	assert.Equal(t, "exec-1|repo-a|info|checked out.", msgs[0], "trailing newline must be trimmed")
+}
+
 func TestBindIsPerGoroutine(t *testing.T) {
 	s := &fakeSink{}
 	SetSink(s)

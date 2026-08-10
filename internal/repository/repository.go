@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -126,10 +127,17 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 		exist = true
 	}
 	var gitRepo *git.Repository
+	// Bound every go-git network operation (clone, fetch, remote list, pull)
+	// so a stalled connection fails the sync instead of hanging the job
+	// forever. The budget is generous; it is a stall detector, not a cap on
+	// legitimate large clones.
+	syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
 		isUpdated = true
-		_, err = git.PlainClone(gitDir, false, &git.CloneOptions{
+		_, err = git.PlainCloneContext(syncCtx, gitDir, false, &git.CloneOptions{
 			URL:      "https://" + gitUrl,
 			Progress: os.Stdout,
 			Depth:    depth,
@@ -149,7 +157,7 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 	}
 
 	// fetch all remote branches
-	err = gitRepo.Fetch(&git.FetchOptions{
+	err = gitRepo.FetchContext(syncCtx, &git.FetchOptions{
 		RemoteName: "origin",
 		RefSpecs: []config.RefSpec{
 			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
@@ -184,7 +192,7 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 		ui.Errorf("Error get remote, %s", err)
 		return err
 	}
-	remoteRefs, err := remote.List(&git.ListOptions{})
+	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
 	if err != nil {
 		ui.Errorf("Error get remote references, %s", err)
 	}
@@ -266,7 +274,7 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 			}
 
 			// pull from upstream branch
-			err = w.Pull(&git.PullOptions{
+			err = w.PullContext(syncCtx, &git.PullOptions{
 				RemoteName:    "origin",
 				ReferenceName: branchRef,
 				// pull all commits, not only the latest
