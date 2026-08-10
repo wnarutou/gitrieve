@@ -1,6 +1,10 @@
 package release
 
 import (
+	"context"
+	"os"
+	"os/signal"
+
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/release"
@@ -36,12 +40,26 @@ func runRelease(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	for _, repo := range repository.GetRepositories(repoName) {
+		if ctx.Err() != nil {
+			ui.Printf("Cancelled")
+			break
+		}
 		ui.Printf("Running %s", repo.Name)
-		if err := release.DownloadAllAssets(repo, storages); err != nil {
+		if err := release.DownloadAllAssets(ctx, repo, storages); err != nil {
+			if ctx.Err() != nil {
+				ui.Printf("Download cancelled")
+				break
+			}
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}
+	}
+	if ctx.Err() != nil {
+		os.Exit(130)
 	}
 	ui.Printf("Done")
 }

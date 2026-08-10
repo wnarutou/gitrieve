@@ -182,13 +182,17 @@ func (e *Executor) downloadComponents(ctx context.Context, job typedef.Repositor
 		}
 		ui.Printf("Downloading %s", name)
 		if err := fn(); err != nil {
-			ui.Errorf("Failed to download %s: %v", name, err)
+			if ctx.Err() != nil {
+				ui.Printf("%s download cancelled", name)
+			} else {
+				ui.Errorf("Failed to download %s: %v", name, err)
+			}
 		}
 	}
-	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(job, storages) })
-	run("issues", job.DownloadIssues, func() error { return issue.Sync(job, storages) })
-	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(job, storages) })
-	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(job, storages) })
+	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(ctx, job, storages) })
+	run("issues", job.DownloadIssues, func() error { return issue.Sync(ctx, job, storages) })
+	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(ctx, job, storages) })
+	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(ctx, job, storages) })
 }
 
 func (e *Executor) CancelJob(jobID string) error {

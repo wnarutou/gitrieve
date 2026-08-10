@@ -19,7 +19,10 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
-func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
+func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	isUpdated := false
 	useCache := repo.UseCache
 	// get current directory
@@ -56,6 +59,15 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if err != nil {
 		ui.Errorf("Error creating working directory, %s", err)
 		return err
+	}
+	if !useCache {
+		defer func() {
+			if err := os.RemoveAll(gitDir); err != nil {
+				ui.Errorf("Error cleaning up working directory, %s", err)
+				return
+			}
+			ui.Printf("Cleanup completed for directory: %s", gitDir)
+		}()
 	}
 	// Get all issue files in the gitDir directory
 	files, err := os.ReadDir(gitDir)
@@ -200,6 +212,9 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				return err
 			}
 			ui.Printf("Success writing issue #%d to file %s", issue.GetNumber(), issueFilePath)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		}
 
 		if resp.NextPage == 0 {
@@ -260,14 +275,5 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		ui.Printf("All is up to date, no need to restore")
 	}
 
-	// Cleanup
-	if !useCache {
-		err = os.RemoveAll(gitDir)
-		if err != nil {
-			ui.Errorf("Error cleaning up working directory, %s", err)
-			return err
-		}
-		ui.Printf("Cleanup completed for directory: %s", gitDir)
-	}
 	return nil
 }

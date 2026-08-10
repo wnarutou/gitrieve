@@ -11,7 +11,10 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
-func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
+func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// get the repo name from the URL
 	r, err := scm.NewRepository(repo.URL)
 	if err != nil {
@@ -37,8 +40,10 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	}
 
 	ui.Printf("Running %s's wiki", repo.Name)
-	if err := repository.Sync(context.Background(), repo, true, storages); err != nil {
-		ui.Errorf("Error running %s's wiki, %s", repo.Name, err)
+	if err := repository.Sync(ctx, repo, true, storages); err != nil {
+		if ctx.Err() == nil {
+			ui.Errorf("Error running %s's wiki, %s", repo.Name, err)
+		}
 		return err
 	}
 	return nil

@@ -141,7 +141,10 @@ type repliesQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
-func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
+func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	isUpdated := false
 	useCache := repo.UseCache
 	currentDir, err := os.Getwd() // Fix: Handle os.Getwd() error
@@ -179,6 +182,15 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if err != nil {
 		ui.Errorf("Error creating working directory, %s", err)
 		return err
+	}
+	if !useCache {
+		defer func() {
+			if err := os.RemoveAll(gitDir); err != nil {
+				ui.Errorf("Error cleaning up working directory: %s", err)
+				return
+			}
+			ui.Printf("Cleanup completed for directory: %s", gitDir)
+		}()
 	}
 
 	files, err := os.ReadDir(gitDir)
@@ -424,6 +436,9 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 				return err
 			}
 			ui.Printf("Success writing discussion %s to file %s", discussion.Title, discussionFilePath)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		}
 
 		if !query.Repository.Discussions.PageInfo.HasNextPage {
@@ -481,13 +496,5 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 		ui.Printf("All is up to date, no need to restore")
 	}
 
-	if !useCache {
-		err = os.RemoveAll(gitDir)
-		if err != nil {
-			ui.Errorf("Error cleaning up working directory: %s", err)
-			return err
-		}
-		ui.Printf("Cleanup completed for directory: %s", gitDir)
-	}
 	return nil
 }
