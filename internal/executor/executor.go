@@ -192,7 +192,7 @@ func (e *Executor) downloadComponents(ctx context.Context, job typedef.Repositor
 	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(job, storages) })
 	run("issues", job.DownloadIssues, func() error { return issue.Sync(ctx, job, storages) })
 	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(job, storages) })
-	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(job, storages) })
+	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(ctx, job, storages) })
 }
 
 func (e *Executor) CancelJob(jobID string) error {
