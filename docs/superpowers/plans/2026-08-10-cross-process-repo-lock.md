@@ -729,7 +729,7 @@ Expected: all packages build, vet clean, and every test passes (including the ex
 - [ ] **Step 2: Verify go.mod is tidy**
 
 Run: `go mod tidy`
-Expected: no unexpected changes; `github.com/gofrs/flock v0.13.0` remains the only new direct dependency.
+Expected: no unexpected changes; `github.com/gofrs/flock v0.12.1` remains the only new direct dependency.
 
 - [ ] **Step 3: Document the lock in CLAUDE.md**
 
