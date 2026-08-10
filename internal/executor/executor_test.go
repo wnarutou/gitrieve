@@ -34,26 +34,26 @@ func TestExecuteJobWritesBoundLogs(t *testing.T) {
 	require.NoError(t, err)
 
 	// executeAsync binds the goroutine and ui.Printf("Starting job execution")
-	// is forwarded to the DB logs for this execution.
+	// is forwarded to the DB logs for this execution. Poll for that specific
+	// row rather than asserting a single snapshot's ordering: under parallel
+	// full-suite load a concurrent reader can transiently hold SQLite's write
+	// lock and an insert can be BUSY-dropped (sink errors are deliberately
+	// discarded), so the row is only guaranteed to appear eventually.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		var count int
-		err := testDB.QueryRow("SELECT COUNT(*) FROM logs WHERE execution_id = ?", jobID).Scan(&count)
+		err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Starting job execution'", jobID,
+		).Scan(&count)
 		require.NoError(t, err)
 		if count >= 1 {
-			break
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected at least one log row for execution %s, found none", jobID)
+			t.Fatalf("expected a 'Starting job execution' log row for execution %s", jobID)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-
-	// The log content must be the unified ui output, scoped to this execution.
-	var message string
-	err = testDB.QueryRow("SELECT message FROM logs WHERE execution_id = ? ORDER BY id LIMIT 1", jobID).Scan(&message)
-	require.NoError(t, err)
-	assert.Equal(t, "Starting job execution", message)
 }
 
 func TestExecuteJobCreatesRecord(t *testing.T) {

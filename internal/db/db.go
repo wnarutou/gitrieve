@@ -15,6 +15,16 @@ func Initialize(path string) (*DB, error) {
 		return nil, err
 	}
 
+	// An in-memory SQLite database lives per-connection, so a connection pool
+	// would hand out multiple unrelated databases (schema created on one, empty
+	// on the rest). Pin the pool to a single connection for ":memory:" so tests
+	// that concurrently read and write (job goroutines + assertions) see a
+	// coherent database. File-backed databases are shared across connections
+	// and need no such pinning.
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
+
 	// Create tables
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS executions (
