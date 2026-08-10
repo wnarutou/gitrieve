@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,4 +57,48 @@ func TestCreateArchiveEntryNamesMatchRelativeLayout(t *testing.T) {
 	files := extract(t, buf)
 	assert.Equal(t, "top", files["target/top.txt"])
 	assert.Equal(t, "inner", files["target/sub/inner.txt"])
+}
+
+// TestCreateArchiveConcurrentIsolation 从多个 goroutine 同时 Create，断言每个
+// 归档只含自己的 sentinel 内容、且进程 cwd 未被改动。这是旧 os.Chdir 实现的
+// 回归护栏：旧实现并发时相互踩踏 cwd，归档会串到别的仓库目录。
+func TestCreateArchiveConcurrentIsolation(t *testing.T) {
+	base := t.TempDir()
+	const n = 12
+
+	cwdBefore, err := os.Getwd()
+	require.NoError(t, err)
+
+	dirs := make([]string, n)
+	for i := 0; i < n; i++ {
+		src := path.Join(base, fmt.Sprintf("repo%d", i), "code")
+		require.NoError(t, os.MkdirAll(src, 0o755))
+		require.NoError(t, os.WriteFile(path.Join(src, "file.txt"), []byte(fmt.Sprintf("sentinel-%d", i)), 0o644))
+		dirs[i] = src
+	}
+
+	start := make(chan struct{})
+	bufs := make([]*bytes.Buffer, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			bufs[i], errs[i] = Create(context.Background(), dirs[i], "code")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		require.NoError(t, errs[i])
+		want := map[string]string{"code/file.txt": fmt.Sprintf("sentinel-%d", i)}
+		assert.Equal(t, want, extract(t, bufs[i]), "archive %d must contain exactly its own sentinel", i)
+	}
+
+	cwdAfter, err := os.Getwd()
+	require.NoError(t, err)
+	assert.Equal(t, cwdBefore, cwdAfter, "Create must never change the process cwd")
 }
