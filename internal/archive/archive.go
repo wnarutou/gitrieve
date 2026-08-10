@@ -3,6 +3,7 @@ package archive
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 
 	"github.com/mholt/archives"
@@ -18,6 +19,10 @@ import (
 // compressed, to avoid holding an entire repository in memory (this TODO previously
 // hung on the caller; it moves here along with the packaging logic).
 func Create(ctx context.Context, sourceDir, targetName string) (*bytes.Buffer, error) {
+	if !filepath.IsAbs(sourceDir) {
+		return nil, fmt.Errorf("archive: sourceDir must be an absolute path, got %q", sourceDir)
+	}
+
 	// archives.FilesFromDisk computes in-archive names by trimming sourceDir off the
 	// walked filenames; a sourceDir with mixed separators (e.g. path.Join applied to
 	// a Windows cwd) breaks that prefix match and leaks the absolute path into entry

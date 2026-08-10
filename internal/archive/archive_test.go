@@ -102,3 +102,11 @@ func TestCreateArchiveConcurrentIsolation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cwdBefore, cwdAfter, "Create must never change the process cwd")
 }
+
+// TestCreateRejectsRelativeSourceDir guards the documented precondition that
+// sourceDir must be absolute — a relative path would silently reintroduce
+// process-cwd dependence, which is exactly what this package exists to prevent.
+func TestCreateRejectsRelativeSourceDir(t *testing.T) {
+	_, err := Create(context.Background(), "relative/path", "target")
+	require.Error(t, err)
+}
