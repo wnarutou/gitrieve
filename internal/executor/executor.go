@@ -150,8 +150,10 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		ui.Errorf("Code sync failed: %v", codeErr)
 	}
 
-	// Download the configured metadata/content components.
-	compErr := e.downloadComponents(job, storages)
+	// Download the configured metadata/content components. Best-effort: a
+	// component may legitimately fail (e.g. a repo with no wiki), so failures
+	// are logged as errors but the job status reflects only the code sync.
+	e.downloadComponents(job, storages)
 
 	if ctx.Err() != nil {
 		// Final log line before the terminal status update (see note above).
@@ -163,10 +165,6 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		e.updateJobStatus(jobID, string(StatusFailed), codeErr.Error())
 		return
 	}
-	if compErr != nil {
-		e.updateJobStatus(jobID, string(StatusFailed), compErr.Error())
-		return
-	}
 	// Final log line before the terminal status update (see note above).
 	ui.Printf("Job completed successfully")
 	e.updateJobStatus(jobID, string(StatusCompleted), "")
@@ -174,10 +172,9 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 
 // downloadComponents runs the per-repository metadata/content syncs enabled in
 // the config (releases, issues, wiki, discussions), mirroring what the daemon
-// schedules. Each runs independently and logs its own progress/failure via ui;
-// the first error is returned so the job can be marked failed.
-func (e *Executor) downloadComponents(job typedef.Repository, storages []typedef.MultiStorage) error {
-	var firstErr error
+// schedules. Each runs independently; progress and failures are logged via ui
+// so they surface in the job's log stream.
+func (e *Executor) downloadComponents(job typedef.Repository, storages []typedef.MultiStorage) {
 	run := func(name string, enabled bool, fn func() error) {
 		if !enabled {
 			return
@@ -185,16 +182,12 @@ func (e *Executor) downloadComponents(job typedef.Repository, storages []typedef
 		ui.Printf("Downloading %s", name)
 		if err := fn(); err != nil {
 			ui.Errorf("Failed to download %s: %v", name, err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("download %s failed: %w", name, err)
-			}
 		}
 	}
 	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(job, storages) })
 	run("issues", job.DownloadIssues, func() error { return issue.Sync(job, storages) })
 	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(job, storages) })
 	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(job, storages) })
-	return firstErr
 }
 
 func (e *Executor) CancelJob(jobID string) error {
