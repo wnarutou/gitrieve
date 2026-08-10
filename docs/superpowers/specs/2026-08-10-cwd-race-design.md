@@ -46,7 +46,7 @@ os.Chdir(currentDir)                          // 切回
 
 选 A 的收益：
 - 架构层面根治：不再有进程级全局可变状态，goroutine 天然安全，无需任何锁。
-- 归档字节级不变（兼容已存储的历史归档）。
+- 归档条目布局与内容不变（兼容已存储的历史归档）。
 - 顺带修掉「错误路径 cwd 泄漏」隐藏 bug；相对 storage path 解析因 cwd 恒定而变得确定。
 
 备选并否决：
@@ -109,7 +109,7 @@ return buf, nil
 N=12 个 goroutine，各自创建含独特 sentinel 内容的目录，用起跑屏障（`sync.WaitGroup`）同时开始 `Create`：
 
 1. **进程 cwd 不变**：`os.Getwd()` 在测试前后必须相等（确定性断言，直接锁定「不再 Chdir」不变量）。
-2. **归档内容互不串扰**：解包每个归档（标准库 `compress/gzip` + `archive/tar`），断言只含自己的 sentinel、不含其他 repo 的 sentinel（高概率捕获「相对 key + Chdir」回归）。
+2. **归档内容互不串扰**：解包每个归档（标准库 `compress/gzip` + `archive/tar`），断言**每个归档包含且仅包含自己的 sentinel 文件内容**，不包含任何其他 goroutine 目录的 sentinel（高概率捕获「相对 key + Chdir」回归）。
 
 配合 `go test -race ./internal/archive/` 运行。注意：`-race` 检测不到 cwd 竞态（非共享内存），所以核心保障是内容断言 + cwd 不变断言。
 
