@@ -214,7 +214,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// find all remote branches
-	refs.ForEach(func(ref *plumbing.Reference) error {
+	if err := refs.ForEach(func(ref *plumbing.Reference) error {
 		if ref.Name().IsRemote() {
 			// get remote branch name
 			remoteBranchName := ref.Name().Short()
@@ -306,9 +306,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			}
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		// refs.ForEach stops at the first error, including a cancellation.
+		ui.Errorf("Error updating branches: %s", err)
 		return err
 	}
 
