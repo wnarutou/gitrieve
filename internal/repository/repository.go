@@ -202,7 +202,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
 	if err != nil {
+		// The default branch cannot be determined without this listing, and a
+		// cancellation must stop the sync here rather than falling through.
 		ui.Errorf("Error get remote references, %s", err)
+		return err
 	}
 	for _, ref := range remoteRefs {
 		if ref.Name() == "HEAD" {
