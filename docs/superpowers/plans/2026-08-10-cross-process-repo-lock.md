@@ -368,11 +368,15 @@ func TestSyncBlocksWhileCodeLockHeld(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(".gitrieve") })
 
 	// If Sync respects the lock it blocks here and hits the ctx timeout instead
-	// of reaching the network (github.com/test/repo does not exist).
+	// of reaching the network (github.com/test/repo does not exist). Exact
+	// equality (not ErrorIs): without the lock, the network clone's error wraps
+	// context.DeadlineExceeded and would satisfy ErrorIs — exact equality
+	// distinguishes "blocked at the lock" (bare sentinel) from "failed at the
+	// network" (wrapped).
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, false, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "Sync must block on the held code lock")
+	require.Equal(t, context.DeadlineExceeded, err, "Sync must block on the held code lock")
 }
 
 func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
@@ -387,14 +391,14 @@ func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, true, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "wiki Sync must block on the held wiki lock")
+	require.Equal(t, context.DeadlineExceeded, err, "wiki Sync must block on the held wiki lock")
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/repository/ -run 'TestSyncBlocks'`
-Expected: FAIL — without the lock, Sync proceeds to clone `github.com/test/repo` (network), so the error is not `context.DeadlineExceeded`.
+Expected: FAIL — without the lock, Sync proceeds to clone `github.com/test/repo` (network); the clone error is a wrapped error (e.g. `*url.Error` wrapping `context.DeadlineExceeded`), so `require.Equal(t, context.DeadlineExceeded, err)` fails. The exact-equality assertion is what makes this red reliable regardless of network timing.
 
 - [ ] **Step 3: Implement — add the import and the lock in `Sync`**
 
@@ -480,7 +484,7 @@ func TestSyncBlocksWhileLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "issue Sync must block on the held issue lock")
+	require.Equal(t, context.DeadlineExceeded, err, "issue Sync must block on the held issue lock")
 }
 ```
 
@@ -565,7 +569,7 @@ func TestSyncBlocksWhileLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = Sync(ctx, repo, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "discussion Sync must block on the held discussion lock")
+	require.Equal(t, context.DeadlineExceeded, err, "discussion Sync must block on the held discussion lock")
 }
 ```
 
@@ -662,7 +666,7 @@ func TestDownloadAllAssetsBlocksWhileLockHeld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	err = DownloadAllAssets(ctx, repo, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "DownloadAllAssets must block on the held release lock")
+	require.Equal(t, context.DeadlineExceeded, err, "DownloadAllAssets must block on the held release lock")
 }
 ```
 
