@@ -75,7 +75,10 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 	return ret
 }
 
-func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
+// Sync archives a repository's code (or wiki when iswiki is set). ctx bounds
+// every go-git network operation: a caller cancellation (e.g. a user cancelling
+// a job) or the internal 30-minute timeout fails the sync instead of hanging.
+func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
 	depth := repo.Depth
 	allBranches := repo.AllBranches
@@ -127,11 +130,11 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 		exist = true
 	}
 	var gitRepo *git.Repository
-	// Bound every go-git network operation (clone, fetch, remote list, pull)
-	// so a stalled connection fails the sync instead of hanging the job
-	// forever. The budget is generous; it is a stall detector, not a cap on
-	// legitimate large clones.
-	syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// Bound every go-git network operation (clone, fetch, remote list, pull).
+	// Derive from the caller's ctx so a job cancellation also interrupts them,
+	// and apply a 30-minute stall-detection timeout on top (generous; not a cap
+	// on legitimate large clones).
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
 	// clone the repo if it does not exist, otherwise pull
@@ -144,6 +147,11 @@ func Sync(repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage)
 		})
 
 		if err != nil {
+			// Remove the partial clone so the next sync retries cleanly. This
+			// branch holds no previously-pulled data, so it is safe — the
+			// deletion-safe guarantee only covers existing local history, which
+			// is handled by the fetch/pull path below.
+			os.RemoveAll(gitDir)
 			ui.Errorf("Error cloning repository, %s", err)
 			return err
 		}

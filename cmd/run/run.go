@@ -1,6 +1,8 @@
 package run
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/repository"
@@ -28,7 +30,7 @@ func runRun(cmd *cobra.Command, args []string) {
 			}
 		}
 		ui.Printf("Running %s", repo.Name)
-		if err := repository.Sync(repo, false, storages); err != nil {
+		if err := repository.Sync(context.Background(), repo, false, storages); err != nil {
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo
 		}

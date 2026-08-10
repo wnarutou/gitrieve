@@ -144,16 +144,17 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 
 	// Execute repository sync (code). The metadata/content components below run
 	// even if this fails, mirroring the daemon's independent per-repo jobs, so a
-	// partial archive is still attempted.
-	codeErr := repository.Sync(job, false, storages)
-	if codeErr != nil {
+	// partial archive is still attempted. When the caller cancels, Sync returns
+	// promptly with the context error; skip the "failed" log in that case.
+	codeErr := repository.Sync(ctx, job, false, storages)
+	if codeErr != nil && ctx.Err() == nil {
 		ui.Errorf("Code sync failed: %v", codeErr)
 	}
 
 	// Download the configured metadata/content components. Best-effort: a
 	// component may legitimately fail (e.g. a repo with no wiki), so failures
 	// are logged as errors but the job status reflects only the code sync.
-	e.downloadComponents(job, storages)
+	e.downloadComponents(ctx, job, storages)
 
 	if ctx.Err() != nil {
 		// Final log line before the terminal status update (see note above).
@@ -174,9 +175,9 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 // the config (releases, issues, wiki, discussions), mirroring what the daemon
 // schedules. Each runs independently; progress and failures are logged via ui
 // so they surface in the job's log stream.
-func (e *Executor) downloadComponents(job typedef.Repository, storages []typedef.MultiStorage) {
+func (e *Executor) downloadComponents(ctx context.Context, job typedef.Repository, storages []typedef.MultiStorage) {
 	run := func(name string, enabled bool, fn func() error) {
-		if !enabled {
+		if !enabled || ctx.Err() != nil {
 			return
 		}
 		ui.Printf("Downloading %s", name)

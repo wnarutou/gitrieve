@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
@@ -48,7 +49,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		}
 		_, err := s.NewJob(
 			gocron.CronJob(repo.Cron, false),
-			gocron.NewTask(repository.Sync, repo, storages),
+			gocron.NewTask(repository.Sync, context.Background(), repo, false, storages),
 		)
 		if err != nil {
 			ui.Errorf("Error scheduling download codes of %s, %s", repo.Name, err)

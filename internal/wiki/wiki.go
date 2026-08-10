@@ -37,7 +37,7 @@ func Sync(repo typedef.Repository, storages []typedef.MultiStorage) error {
 	}
 
 	ui.Printf("Running %s's wiki", repo.Name)
-	if err := repository.Sync(repo, true, storages); err != nil {
+	if err := repository.Sync(context.Background(), repo, true, storages); err != nil {
 		ui.Errorf("Error running %s's wiki, %s", repo.Name, err)
 		return err
 	}
