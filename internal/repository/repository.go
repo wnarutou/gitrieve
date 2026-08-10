@@ -308,6 +308,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		}
 		return nil
 	})
+	if err != nil {
+		// refs.ForEach stops at the first error, including a cancellation.
+		return err
+	}
 
 	// switch to default branch
 	err = w.Checkout(&git.CheckoutOptions{
@@ -390,6 +394,11 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		}
 	} else {
 		ui.Printf("All is uptodate, no need to restore")
+	}
+
+	if syncCtx.Err() != nil {
+		// Cancelled — stop before any remaining work (e.g. temp-dir cleanup).
+		return syncCtx.Err()
 	}
 
 	// cleanup
