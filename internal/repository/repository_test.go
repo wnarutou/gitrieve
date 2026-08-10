@@ -5,8 +5,12 @@ import (
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/lock"
+	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -30,4 +34,36 @@ func TestSyncCancelledContextFailsPromptlyAndCleansUp(t *testing.T) {
 
 	// Clean up the .gitrieve cache dir created by the test.
 	os.RemoveAll(path.Join(cwd, ".gitrieve"))
+}
+
+func TestSyncBlocksWhileCodeLockHeld(t *testing.T) {
+	repo := typedef.Repository{Name: "test-repo", URL: "github.com/test/repo", UseCache: true}
+	r, err := scm.NewRepository(repo.URL)
+	require.NoError(t, err)
+	release, err := lock.Acquire(context.Background(), r, "code")
+	require.NoError(t, err)
+	defer release()
+	t.Cleanup(func() { os.RemoveAll(".gitrieve") })
+
+	// If Sync respects the lock it blocks here and hits the ctx timeout instead
+	// of reaching the network (github.com/test/repo does not exist).
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err = Sync(ctx, repo, false, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Sync must block on the held code lock")
+}
+
+func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
+	repo := typedef.Repository{Name: "test-repo", URL: "github.com/test/repo", UseCache: true}
+	r, err := scm.NewRepository(repo.URL)
+	require.NoError(t, err)
+	release, err := lock.Acquire(context.Background(), r, "wiki")
+	require.NoError(t, err)
+	defer release()
+	t.Cleanup(func() { os.RemoveAll(".gitrieve") })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err = Sync(ctx, repo, true, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "wiki Sync must block on the held wiki lock")
 }

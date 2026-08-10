@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mholt/archives"
 	internalconfig "github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/scm/github"
 	"github.com/wnarutou/gitrieve/internal/storage"
@@ -112,6 +113,23 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		ui.Errorf("Invalid repository name")
 		return err
 	}
+
+	// Serialize concurrent syncs of the same repo+component across goroutines
+	// and processes (daemon overlap, executor re-trigger, parallel CLI runs).
+	// go-git has no internal locking; two writers to the same .git corrupt the
+	// object database. Keyed by (repo, component): code and wiki use different
+	// keys so they stay parallel. Held across the whole sync so the
+	// clone-failure RemoveAll can never delete a directory another sync is
+	// actively using.
+	component := "code"
+	if iswiki {
+		component = "wiki"
+	}
+	unlock, err := lock.Acquire(ctx, r, component)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var gitDir string
 	var gitSuffix string
 	var gitUrl string
