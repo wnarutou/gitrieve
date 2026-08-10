@@ -57,7 +57,7 @@ func DownloadAllAssets(repo typedef.Repository, storages []typedef.MultiStorage)
 	for _, release := range releases {
 		if releaseSizeLimit >= 0 {
 			if allReleaseSize >= releaseSizeLimit {
-				ui.Printf("The size %s limit has been reached, no more downloading", releaseSizeLimit)
+				ui.Printf("The size %d limit has been reached, no more downloading", releaseSizeLimit)
 				break
 			}
 		}
