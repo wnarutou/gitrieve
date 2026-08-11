@@ -124,7 +124,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	if iswiki {
 		component = "wiki"
 	}
-	unlock, err := lock.Acquire(ctx, r, component)
+	unlock, err := lock.Acquire(ctx, r, component, currentDir)
 	if err != nil {
 		return err
 	}
