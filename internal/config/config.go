@@ -14,7 +14,7 @@ type Config struct {
 	Repository       []typedef.Repository   `yaml:"repository"`
 	Storage          []typedef.MultiStorage `yaml:"storage"`
 	GitHubToken      string                 `yaml:"githubToken"`
-	ConcurrencyNum   uint                   `yaml:"cocurrencyNum"`
+	ConcurrencyNum   uint                   `yaml:"cocurrencyNum" mapstructure:"cocurrencyNum"`
 	ReleaseSizeLimit int                    `yaml:"releaseSizeLimit"`
 	ReleaseNumLimit  int                    `yaml:"releaseNumLimit"`
 	RetryMaxCount    int                    `yaml:"retryMaxCount"`

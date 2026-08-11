@@ -75,14 +75,25 @@ func TestGetLegacyDefaultsSeededByInit(t *testing.T) {
 }
 
 func TestGetLegacyFromConfig(t *testing.T) {
-	// Explicit values pass through untouched. Note: viper's mapstructure
-	// decoder matches struct fields by FIELD NAME (it ignores `yaml` tags), so
-	// the config key here is the field name "concurrencyNum" — the historically
-	// documented "cocurrencyNum" typo never actually mapped to the field.
-	writeTmpConfig(t, "githubtoken: test\nconcurrencyNum: 5\nreleaseNumLimit: 7\nreleaseSizeLimit: 1000\n")
+	// Explicit values pass through untouched. The ConcurrencyNum field carries
+	// a mapstructure:"cocurrencyNum" tag so the documented config key maps
+	// (viper's decoder matches struct tags, not field names).
+	writeTmpConfig(t, "githubtoken: test\ncocurrencyNum: 5\nreleaseNumLimit: 7\nreleaseSizeLimit: 1000\n")
 	require.Equal(t, uint(5), GetConcurrencyNum())
 	require.Equal(t, 7, GetReleaseNumLimit())
 	require.Equal(t, 1000, GetReleaseSizeLimit())
+}
+
+func TestSaveConcurrencyNumRoundTrip(t *testing.T) {
+	// Save() persists the key as "cocurrencyNum" (config.go:136); the
+	// mapstructure tag must let that exact key decode back on re-init.
+	writeTmpConfig(t, "githubtoken: test\ncocurrencyNum: 6\n")
+	require.Equal(t, uint(6), GetConcurrencyNum())
+
+	require.NoError(t, Save())
+
+	Init()
+	require.Equal(t, uint(6), GetConcurrencyNum())
 }
 
 func TestGetLegacyNegativeMeansNoLimit(t *testing.T) {
