@@ -13,6 +13,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/lock"
+	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -145,7 +146,15 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	cfg := config.GetIns()
 	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
 	for {
-		issues, resp, err := client.Issues.ListByRepo(context.Background(), r.Owner, r.Name, opt)
+		var (
+			issues []*gh.Issue
+			resp   *gh.Response
+		)
+		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+			var apiErr error
+			issues, resp, apiErr = client.Issues.ListByRepo(ctx, r.Owner, r.Name, opt)
+			return apiErr
+		})
 		if err != nil {
 			ui.Errorf("Error fetching issues, %s", err)
 			return err
@@ -164,7 +173,15 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			}
 			var allComments []*gh.IssueComment
 			for {
-				comments, resp, err := client.Issues.ListComments(context.Background(), r.Owner, r.Name, issue.GetNumber(), commentsOpt)
+				var (
+					comments []*gh.IssueComment
+					resp     *gh.Response
+				)
+				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+					var apiErr error
+					comments, resp, apiErr = client.Issues.ListComments(ctx, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
+					return apiErr
+				})
 				if err != nil {
 					ui.Errorf("Error fetching comments of issue %d, %s", issue.GetNumber(), err)
 					return err
