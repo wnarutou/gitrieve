@@ -45,6 +45,14 @@ go build -o gitrieve main.go
 - Daemon mode uses `gocron/v2` for scheduled jobs
 - Archives created with `archiver/v4`, uploaded via `minio-go` (S3) or direct file write
 
+### Concurrency: cross-process per-repo locks
+Same repo + same component syncs are serialized across goroutines AND processes
+by `internal/lock` — a per-key in-process semaphore plus a `gofrs/flock` advisory
+file lock on `.gitrieve/locks/<host>/<owner>/<repo>/<component>.lock`. Covers
+code/wiki/issue/discussion/release. The lock is per-host and per-working-directory:
+multi-host writes to shared storage (e.g. two machines writing one S3 bucket) are
+not guarded. Lock files are never deleted.
+
 ### Deletion-safe sync (critical invariant — do not regress)
 A core design goal: **once code and history are pulled locally, a sync must never delete them**, even when the upstream repo is taken down, DMCA-disabled, deleted, made private, or replaced with a single README. This makes gitrieve a true archive/backup tool, not a mirror. When modifying `internal/repository/repository.go` (`Sync`), preserve these guarantees:
 

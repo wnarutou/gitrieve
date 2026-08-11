@@ -12,6 +12,7 @@ import (
 	"github.com/shurcooL/githubv4"
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -175,6 +176,14 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Errorf("Invalid repository name")
 		return err
 	}
+
+	// Serialize concurrent syncs of the same repo's discussions: they share
+	// the .gitrieve/discussion cache dir and the discussions.tar.gz path.
+	unlock, err := lock.Acquire(ctx, r, "discussion")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "discussion")
 	err = storage.CreateDirIfNotExist(gitDir)

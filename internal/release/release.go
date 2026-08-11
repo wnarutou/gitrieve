@@ -11,6 +11,7 @@ import (
 
 	gh "github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/scm/github"
 	"github.com/wnarutou/gitrieve/internal/storage"
@@ -40,6 +41,14 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 	if err != nil {
 		return err
 	}
+
+	// Serialize concurrent syncs of the same repo's releases: they read-modify-
+	// write the same storage <tag>/<asset> paths and delete stale ones.
+	unlock, err := lock.Acquire(ctx, r, "release")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := github.New()
 	if err != nil {
 		return err

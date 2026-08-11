@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -53,6 +54,15 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Errorf("Invalid repository name")
 		return err
 	}
+
+	// Serialize concurrent syncs of the same repo's issues (in-process and
+	// cross-process): they share the .gitrieve/issues cache dir and the
+	// issues.tar.gz storage path.
+	unlock, err := lock.Acquire(ctx, r, "issue")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "issues")
 	err = storage.CreateDirIfNotExist(gitDir)
 	if err != nil {
