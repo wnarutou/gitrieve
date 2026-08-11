@@ -87,6 +87,8 @@ githubToken: <token>
 cocurrencyNum: <int>
 releaseSizeLimit: <bytes>
 releaseNumLimit: <count>
+retryMaxCount: <int, default 3>    # per-call max retries on rate-limit/5xx/network errors
+retryBaseDelay: <duration, default 5s>  # exponential-backoff base (doubles per retry)
 ```
 
 ## Testing

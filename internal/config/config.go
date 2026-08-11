@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"time"
+
 	"github.com/spf13/viper"
+	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
@@ -14,6 +17,8 @@ type Config struct {
 	ConcurrencyNum   uint                   `yaml:"cocurrencyNum"`
 	ReleaseSizeLimit int                    `yaml:"releaseSizeLimit"`
 	ReleaseNumLimit  int                    `yaml:"releaseNumLimit"`
+	RetryMaxCount    int                    `yaml:"retryMaxCount"`
+	RetryBaseDelay   time.Duration          `yaml:"retryBaseDelay"`
 }
 
 var Path string
@@ -87,6 +92,33 @@ func GetConcurrencyNum() uint {
 	return ins.ConcurrencyNum
 }
 
+// GetRetryMaxCount returns the configured max retries per API call. If not
+// configured (zero), default to 3 retries after the first attempt.
+func GetRetryMaxCount() int {
+	if ins.RetryMaxCount == 0 {
+		ins.RetryMaxCount = 3
+	}
+	return ins.RetryMaxCount
+}
+
+// GetRetryBaseDelay returns the exponential-backoff base delay. If not
+// configured (zero), default to 5 seconds.
+func GetRetryBaseDelay() time.Duration {
+	if ins.RetryBaseDelay == 0 {
+		ins.RetryBaseDelay = 5 * time.Second
+	}
+	return ins.RetryBaseDelay
+}
+
+// GetRetryConfig assembles the retry configuration used by every GitHub API
+// call site in the issue/discussion/release syncs.
+func GetRetryConfig() retry.Config {
+	return retry.Config{
+		MaxRetries: GetRetryMaxCount(),
+		BaseDelay:  GetRetryBaseDelay(),
+	}
+}
+
 // Save persists the current in-memory config back to the config file via viper.
 func Save() error {
 	if vp == nil {
@@ -99,5 +131,7 @@ func Save() error {
 	vp.Set("cocurrencyNum", ins.ConcurrencyNum)
 	vp.Set("releaseSizeLimit", ins.ReleaseSizeLimit)
 	vp.Set("releaseNumLimit", ins.ReleaseNumLimit)
+	vp.Set("retryMaxCount", ins.RetryMaxCount)
+	vp.Set("retryBaseDelay", ins.RetryBaseDelay)
 	return vp.WriteConfig()
 }
