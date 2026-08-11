@@ -3,6 +3,7 @@
 package retry
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"strconv"
@@ -122,4 +123,61 @@ func parseRetryAfterSeconds(msg string) time.Duration {
 		return 0
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// Do runs fn, retrying when the error is classified as retryable (GitHub rate
+// limit or transient 5xx/network error). The wait between retries honors the
+// reset time GitHub reports when available, else exponential backoff from
+// BaseDelay. Waits are interrupted when ctx is done. Returns the last error
+// after cfg.MaxRetries retries, or ctx.Err() if cancelled.
+func Do(ctx context.Context, cfg Config, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		retryable, wait := classify(lastErr)
+		if !retryable || attempt == cfg.MaxRetries {
+			return lastErr
+		}
+		if wait <= 0 {
+			wait = backoff(cfg.BaseDelay, attempt)
+		}
+		if err := sleep(ctx, wait); err != nil {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// backoff returns BaseDelay * 2^attempt, capped at maxBackoff. A zero BaseDelay
+// falls back to 1s so backoff never sleeps zero.
+func backoff(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	d := base << uint(attempt)
+	if d > maxBackoff {
+		return maxBackoff
+	}
+	return d
+}
+
+// sleep waits for d, returning ctx.Err() if ctx is cancelled first.
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

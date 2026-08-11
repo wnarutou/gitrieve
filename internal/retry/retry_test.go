@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -120,4 +121,106 @@ func TestClassifyGraphQL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDoSuccessFirstTry(t *testing.T) {
+	calls := 0
+	err := Do(context.Background(), Config{MaxRetries: 3, BaseDelay: time.Millisecond}, func() error {
+		calls++
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+}
+
+func TestDoRetriesThenSucceeds(t *testing.T) {
+	calls := 0
+	err := Do(context.Background(), Config{MaxRetries: 3, BaseDelay: time.Millisecond}, func() error {
+		calls++
+		if calls < 3 {
+			return &github.ErrorResponse{Response: resp(http.StatusInternalServerError)}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, calls)
+}
+
+func TestDoExhaustsRetries(t *testing.T) {
+	base := time.Millisecond
+	calls := 0
+	err := Do(context.Background(), Config{MaxRetries: 2, BaseDelay: base}, func() error {
+		calls++
+		return &github.ErrorResponse{Response: resp(http.StatusBadGateway)}
+	})
+	require.Error(t, err)
+	require.Equal(t, 3, calls) // 1 initial + 2 retries
+}
+
+func TestDoNonRetryableImmediate(t *testing.T) {
+	calls := 0
+	err := Do(context.Background(), Config{MaxRetries: 3, BaseDelay: time.Millisecond}, func() error {
+		calls++
+		return &github.ErrorResponse{Response: resp(http.StatusNotFound)}
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, calls) // no retry on 404
+}
+
+func TestDoContextCancelledDuringWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	firstCall := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Do(ctx, Config{MaxRetries: 3, BaseDelay: 100 * time.Millisecond}, func() error {
+			calls++
+			if calls == 1 {
+				close(firstCall)
+			}
+			return &github.ErrorResponse{Response: resp(http.StatusInternalServerError)}
+		})
+	}()
+	<-firstCall // wait until the first attempt actually ran
+	cancel()    // then cancel while Do is waiting on backoff
+	require.ErrorIs(t, <-errCh, context.Canceled)
+	require.Equal(t, 1, calls) // cancelled while waiting, no further attempts
+}
+
+func TestDoHonorsRateLimitReset(t *testing.T) {
+	// RateLimitError with a far reset must wait ~that long, not the backoff.
+	// Use a short reset so the test stays fast; assert the total elapsed
+	// roughly equals the reset delta (within tolerance) and succeeds.
+	reset := time.Now().Add(150 * time.Millisecond)
+	calls := 0
+	start := time.Now()
+	err := Do(context.Background(), Config{MaxRetries: 1, BaseDelay: time.Second}, func() error {
+		calls++
+		if calls == 1 {
+			return &github.RateLimitError{Rate: github.Rate{Reset: github.Timestamp{Time: reset}}}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	elapsed := time.Since(start)
+	require.GreaterOrEqual(t, elapsed, 120*time.Millisecond)
+	require.Less(t, elapsed, time.Second) // waited for reset, not the 1s backoff
+}
+
+func TestDoHonorsAbuseRetryAfter(t *testing.T) {
+	ra := 150 * time.Millisecond
+	calls := 0
+	start := time.Now()
+	err := Do(context.Background(), Config{MaxRetries: 1, BaseDelay: time.Second}, func() error {
+		calls++
+		if calls == 1 {
+			return &github.AbuseRateLimitError{RetryAfter: &ra}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	elapsed := time.Since(start)
+	require.GreaterOrEqual(t, elapsed, 120*time.Millisecond)
+	require.Less(t, elapsed, time.Second)
 }
