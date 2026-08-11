@@ -13,6 +13,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/lock"
+	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -262,7 +263,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	// Fetch discussion list
 	for {
 		var query discussionsQuery
-		err := client.Query(context.Background(), &query, discussionVariables)
+		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+			return client.Query(ctx, &query, discussionVariables)
+		})
 		if err != nil {
 			ui.Errorf("Error fetching discussions: %s", err)
 			return err
@@ -307,7 +310,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			// Fetch comments
 			for {
 				var commentsQuery commentsQuery
-				err := client.Query(context.Background(), &commentsQuery, commentVariables)
+				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+					return client.Query(ctx, &commentsQuery, commentVariables)
+				})
 				if err != nil {
 					ui.Errorf("Error fetching comments for discussion %d: %s", discussion.Number, err)
 					return err
@@ -339,7 +344,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 					// Fetch replies
 					for {
 						var repliesQuery repliesQuery
-						err := client.Query(context.Background(), &repliesQuery, replyVariables)
+						err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+							return client.Query(ctx, &repliesQuery, replyVariables)
+						})
 						if err != nil {
 							ui.Errorf("Error fetching replies for comment %d: %s", comment.DatabaseId, err)
 							return err
