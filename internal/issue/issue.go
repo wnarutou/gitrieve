@@ -58,7 +58,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	// Serialize concurrent syncs of the same repo's issues (in-process and
 	// cross-process): they share the .gitrieve/issues cache dir and the
 	// issues.tar.gz storage path.
-	unlock, err := lock.Acquire(ctx, r, "issue")
+	unlock, err := lock.Acquire(ctx, r, "issue", currentDir)
 	if err != nil {
 		return err
 	}

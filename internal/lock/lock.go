@@ -34,7 +34,13 @@ var (
 // .gitrieve/locks and is never deleted (unlinking would race between holders).
 // The lock is advisory and per-host + per-working-directory: it does not guard
 // multi-host writes to shared storage.
-func Acquire(ctx context.Context, r *scm.Repository, component string) (func(), error) {
+//
+// baseDir optionally pins the directory that roots the lock path. Callers that
+// capture a stable working directory at function entry (repository/issue/
+// discussion Sync) pass it so the lock file lands next to the .gitrieve cache
+// it guards regardless of any later change to the process cwd. When omitted it
+// defaults to os.Getwd(), preserving the current-working-directory scoping.
+func Acquire(ctx context.Context, r *scm.Repository, component string, baseDir ...string) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -55,12 +61,18 @@ func Acquire(ctx context.Context, r *scm.Repository, component string) (func(), 
 	}
 	releaseProc := func() { <-ch }
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		releaseProc()
-		return nil, err
+	lockRoot := ""
+	if len(baseDir) > 0 && baseDir[0] != "" {
+		lockRoot = baseDir[0]
+	} else {
+		var err error
+		lockRoot, err = os.Getwd()
+		if err != nil {
+			releaseProc()
+			return nil, err
+		}
 	}
-	lockPath := filepath.Join(cwd, ".gitrieve", "locks", r.Host, r.Owner, r.Name, component+".lock")
+	lockPath := filepath.Join(lockRoot, ".gitrieve", "locks", r.Host, r.Owner, r.Name, component+".lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		releaseProc()
 		return nil, err

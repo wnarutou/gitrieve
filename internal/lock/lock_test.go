@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,29 @@ func TestAcquireCancelledWhileWaiting(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Acquire should return when the context is cancelled while waiting")
 	}
+}
+
+// TestAcquirePinsLockToBaseDir proves the optional baseDir argument roots the
+// lock file there instead of the process cwd. Without it, a later process-wide
+// chdir would silently move newly-created lock files to a different path, so
+// two processes guarding the same repo could resolve different lock files and
+// both proceed concurrently — defeating the cross-process exclusion.
+func TestAcquirePinsLockToBaseDir(t *testing.T) {
+	base := t.TempDir()
+	r := &scm.Repository{Host: "github.com", Owner: "test", Name: "repo"}
+
+	release, err := Acquire(context.Background(), r, "code", base)
+	require.NoError(t, err)
+	defer release()
+
+	lockPath := filepath.Join(base, ".gitrieve", "locks", r.Host, r.Owner, r.Name, "code.lock")
+	_, statErr := os.Stat(lockPath)
+	require.NoError(t, statErr, "lock file must be rooted at the passed base dir")
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	_, cwdErr := os.Stat(filepath.Join(cwd, ".gitrieve", "locks"))
+	require.True(t, os.IsNotExist(cwdErr), "no lock tree may appear under the process cwd when baseDir is given")
 }
 
 // TestCrossProcessLock proves the file lock excludes a second *process*, and

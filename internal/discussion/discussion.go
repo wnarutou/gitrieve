@@ -179,7 +179,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 
 	// Serialize concurrent syncs of the same repo's discussions: they share
 	// the .gitrieve/discussion cache dir and the discussions.tar.gz path.
-	unlock, err := lock.Acquire(ctx, r, "discussion")
+	unlock, err := lock.Acquire(ctx, r, "discussion", currentDir)
 	if err != nil {
 		return err
 	}
