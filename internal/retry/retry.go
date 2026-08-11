@@ -1,0 +1,125 @@
+// Package retry provides rate-limit- and transient-error-aware retry for
+// GitHub API calls (REST via go-github, GraphQL via githubv4).
+package retry
+
+import (
+	"errors"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/go-github/v56/github"
+)
+
+// Config controls per-call retry behavior.
+type Config struct {
+	MaxRetries int           // retries after the first attempt; 0 = no retry
+	BaseDelay  time.Duration // base for exponential backoff (doubles per retry)
+}
+
+// maxBackoff caps the exponential-backoff fallback wait.
+const maxBackoff = 2 * time.Minute
+
+// classify reports whether err is retryable and, when GitHub reported an exact
+// reset/retry time, how long to wait. A returned wait <= 0 means "use
+// exponential backoff".
+func classify(err error) (retryable bool, wait time.Duration) {
+	// REST primary rate limit (403 with rate-limit headers).
+	var rateLimitErr *github.RateLimitError
+	if errors.As(err, &rateLimitErr) {
+		return true, time.Until(rateLimitErr.Rate.Reset.Time)
+	}
+
+	// REST secondary rate limit (403 abuse / secondary-limit response).
+	var abuseErr *github.AbuseRateLimitError
+	if errors.As(err, &abuseErr) {
+		if abuseErr.RetryAfter != nil {
+			return true, *abuseErr.RetryAfter
+		}
+		return true, 0
+	}
+
+	// Other REST error responses: 429 and 5xx are transient, rest are not.
+	var respErr *github.ErrorResponse
+	if errors.As(err, &respErr) {
+		switch respErr.Response.StatusCode {
+		case 429:
+			return true, retryAfterHeader(respErr.Response.Header.Get("Retry-After"))
+		case 500, 502, 503, 504:
+			return true, 0
+		default:
+			return false, 0
+		}
+	}
+
+	// Network-level errors (connection reset, timeout, ...).
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true, 0
+	}
+
+	// GraphQL (githubv4) surfaces errors only as strings: either the embedded
+	// "non-200 OK status code: <code> body: <body>" error, or the errors array
+	// whose Error() is the first GraphQL error message.
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "retryAfterSeconds"):
+		return true, parseRetryAfterSeconds(msg)
+	case strings.Contains(msg, "API rate limit exceeded"),
+		strings.Contains(msg, "secondary rate limit"),
+		strings.Contains(msg, "rate limit"):
+		return true, 0
+	case strings.Contains(msg, "non-200 OK status code: 429"),
+		strings.Contains(msg, "non-200 OK status code: 500"),
+		strings.Contains(msg, "non-200 OK status code: 502"),
+		strings.Contains(msg, "non-200 OK status code: 503"),
+		strings.Contains(msg, "non-200 OK status code: 504"):
+		return true, 0
+	default:
+		return false, 0
+	}
+}
+
+// retryAfterHeader parses a Retry-After header value (seconds) into a duration.
+// An empty or unparseable value yields 0, meaning "use backoff".
+func retryAfterHeader(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// parseRetryAfterSeconds extracts retryAfterSeconds from a GraphQL error body
+// embedded in the error string. Returns 0 when absent/unparseable.
+func parseRetryAfterSeconds(msg string) time.Duration {
+	const key = "retryAfterSeconds"
+	i := strings.Index(msg, key)
+	if i < 0 {
+		return 0
+	}
+	rest := msg[i+len(key):]
+	start := -1
+	for j := 0; j < len(rest); j++ {
+		if rest[j] >= '0' && rest[j] <= '9' {
+			start = j
+			break
+		}
+	}
+	if start < 0 {
+		return 0
+	}
+	end := start
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	secs, err := strconv.Atoi(rest[start:end])
+	if err != nil {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
