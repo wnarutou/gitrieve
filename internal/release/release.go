@@ -54,7 +54,7 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 		return err
 	}
 	// get all releases
-	releases, err := c.GetReleases(r.Owner, r.Name)
+	releases, err := c.GetReleases(ctx, r.Owner, r.Name)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 			}
 		}
 		// get all assets
-		assets, err := c.GetReleaseAssets(r.Owner, r.Name, release.GetID())
+		assets, err := c.GetReleaseAssets(ctx, r.Owner, r.Name, release.GetID())
 		if err != nil {
 			return err
 		}
@@ -139,7 +139,7 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 			}
 			// download asset
 			ui.Printf("Downloading %s asset %s", *release.TagName, asset.GetName())
-			rc, err := c.DownloadAsset(r.Owner, r.Name, asset.GetID())
+			rc, err := c.DownloadAsset(ctx, r.Owner, r.Name, asset.GetID())
 			if err != nil {
 				return err
 			}

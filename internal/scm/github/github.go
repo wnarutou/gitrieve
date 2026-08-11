@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -57,32 +58,45 @@ func (c *Client) GetRepos(name string, accountType string) ([]string, error) {
 	return repos, nil
 }
 
-func (c *Client) GetReleases(owner, repo string) ([]*github.RepositoryRelease, error) {
+func (c *Client) GetReleases(ctx context.Context, owner, repo string) ([]*github.RepositoryRelease, error) {
 	var (
 		list []*github.RepositoryRelease
 		err  error
 	)
-	list, _, err = c.c.Repositories.ListReleases(context.Background(), owner, repo, nil)
+	err = retry.Do(ctx, config.GetRetryConfig(), func() error {
+		var apiErr error
+		list, _, apiErr = c.c.Repositories.ListReleases(ctx, owner, repo, nil)
+		return apiErr
+	})
 	if err != nil {
 		return nil, err
 	}
 	return list, nil
 }
 
-func (c *Client) GetReleaseAssets(owner, repo string, id int64) ([]*github.ReleaseAsset, error) {
+func (c *Client) GetReleaseAssets(ctx context.Context, owner, repo string, id int64) ([]*github.ReleaseAsset, error) {
 	var (
 		list []*github.ReleaseAsset
 		err  error
 	)
-	list, _, err = c.c.Repositories.ListReleaseAssets(context.Background(), owner, repo, id, nil)
+	err = retry.Do(ctx, config.GetRetryConfig(), func() error {
+		var apiErr error
+		list, _, apiErr = c.c.Repositories.ListReleaseAssets(ctx, owner, repo, id, nil)
+		return apiErr
+	})
 	if err != nil {
 		return nil, err
 	}
 	return list, nil
 }
 
-func (c *Client) DownloadAsset(owner, repo string, id int64) (io.ReadCloser, error) {
-	rc, _, err := c.c.Repositories.DownloadReleaseAsset(context.Background(), owner, repo, id, http.DefaultClient)
+func (c *Client) DownloadAsset(ctx context.Context, owner, repo string, id int64) (io.ReadCloser, error) {
+	var rc io.ReadCloser
+	err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+		var apiErr error
+		rc, _, apiErr = c.c.Repositories.DownloadReleaseAsset(ctx, owner, repo, id, http.DefaultClient)
+		return apiErr
+	})
 	if err != nil {
 		return nil, err
 	}
