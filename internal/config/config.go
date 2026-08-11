@@ -37,14 +37,25 @@ func Init() {
 	if err != nil {
 		ui.ErrorfExit("Error unmarshalling config file, %s", err)
 	}
-	// Seed retry defaults here (single-threaded) rather than lazily in the
-	// getters: the getters are called from daemon worker goroutines, so lazy
-	// mutation would race. Any non-positive value means "unset -> default".
+	// Seed all option defaults here (single-threaded) rather than lazily in
+	// the getters: the getters are called from daemon worker goroutines, so
+	// lazy mutation would race. The retry options treat any non-positive value
+	// as "unset -> default"; the release/concurrency options only seed a zero
+	// value (a negative release limit is meaningful: "no limit").
 	if ins.RetryMaxCount <= 0 {
 		ins.RetryMaxCount = 3
 	}
 	if ins.RetryBaseDelay <= 0 {
 		ins.RetryBaseDelay = 5 * time.Second
+	}
+	if ins.ConcurrencyNum == 0 {
+		ins.ConcurrencyNum = 3
+	}
+	if ins.ReleaseNumLimit == 0 {
+		ins.ReleaseNumLimit = 3
+	}
+	if ins.ReleaseSizeLimit == 0 {
+		ins.ReleaseSizeLimit = 300000000
 	}
 }
 
@@ -69,35 +80,24 @@ func GetStorageMap() map[string]typedef.MultiStorage {
 	return storageMap
 }
 
+// GetReleaseNumLimit returns the max number of releases to keep. Init seeds it
+// to 3 when the config value is zero; a negative value means "no limit". It is
+// read-only (no lazy mutation) so it is safe under concurrent workers.
 func GetReleaseNumLimit() int {
-	if ins.ReleaseNumLimit == 0 {
-		// Keep the last three releases by default
-		// Less than 0 means no limit
-		// But it also needs to obey ReleaseSizeLimit
-		ins.ReleaseNumLimit = 3
-	}
 	return ins.ReleaseNumLimit
 }
 
+// GetReleaseSizeLimit returns the max total release size to keep. Init seeds it
+// to 300000000 when the config value is zero; a negative value means "no
+// limit". It is read-only so it is safe under concurrent workers.
 func GetReleaseSizeLimit() int {
-	if ins.ReleaseSizeLimit == 0 {
-		// Keep the maximum 300MB releases by default
-		// If the latest release is larger than 300MB, keep the latest release
-		// If the total size of all releases is less than 300MB, keep all releases
-		// Less than 0 means no limit
-		// But it also needs to obey ReleaseNumLimit
-		ins.ReleaseSizeLimit = 300000000
-	}
 	return ins.ReleaseSizeLimit
 }
 
+// GetConcurrencyNum returns the max number of concurrent scheduler jobs. Init
+// seeds it to 3 when the config value is zero. It is read-only so it is safe
+// under concurrent workers.
 func GetConcurrencyNum() uint {
-	// Retrieve the concurrency number from configuration. This determines the maximum number
-	// of concurrent jobs the scheduler will run. If not configured (i.e., zero),
-	// default to 3 concurrent jobs to ensure stable performance.
-	if ins.ConcurrencyNum == 0 {
-		ins.ConcurrencyNum = 3
-	}
 	return ins.ConcurrencyNum
 }
 

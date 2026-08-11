@@ -63,3 +63,32 @@ func TestSaveRetryRoundTrip(t *testing.T) {
 	require.Equal(t, 7, GetRetryMaxCount())
 	require.Equal(t, 10*time.Second, GetRetryBaseDelay())
 }
+
+func TestGetLegacyDefaultsSeededByInit(t *testing.T) {
+	// Config omits the fields: Init seeds the defaults, so the getters must
+	// return them without any lazy mutation (which would race under the
+	// daemon's concurrent release workers).
+	writeTmpConfig(t, "githubtoken: test\n")
+	require.Equal(t, uint(3), GetConcurrencyNum())
+	require.Equal(t, 3, GetReleaseNumLimit())
+	require.Equal(t, 300000000, GetReleaseSizeLimit())
+}
+
+func TestGetLegacyFromConfig(t *testing.T) {
+	// Explicit values pass through untouched. Note: viper's mapstructure
+	// decoder matches struct fields by FIELD NAME (it ignores `yaml` tags), so
+	// the config key here is the field name "concurrencyNum" — the historically
+	// documented "cocurrencyNum" typo never actually mapped to the field.
+	writeTmpConfig(t, "githubtoken: test\nconcurrencyNum: 5\nreleaseNumLimit: 7\nreleaseSizeLimit: 1000\n")
+	require.Equal(t, uint(5), GetConcurrencyNum())
+	require.Equal(t, 7, GetReleaseNumLimit())
+	require.Equal(t, 1000, GetReleaseSizeLimit())
+}
+
+func TestGetLegacyNegativeMeansNoLimit(t *testing.T) {
+	// Negative release limits are meaningful ("no limit") and must NOT be
+	// defaulted by Init's zero-only seeding.
+	writeTmpConfig(t, "githubtoken: test\nreleaseNumLimit: -1\nreleaseSizeLimit: -1\n")
+	require.Equal(t, -1, GetReleaseNumLimit())
+	require.Equal(t, -1, GetReleaseSizeLimit())
+}
