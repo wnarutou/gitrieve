@@ -93,4 +93,4 @@ retryBaseDelay: <duration, default 5s>  # exponential-backoff base (doubles per 
 
 ## Testing
 
-No test files exist in this codebase as of the last review. When adding tests, follow Go conventions with `_test.go` files alongside the code they test.
+Tests live alongside the code they test as `_test.go` files (e.g. `internal/retry/retry_test.go`, `internal/lock/lock_test.go`), following Go conventions. Run the full suite with `go test ./...`.

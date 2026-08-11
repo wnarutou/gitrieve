@@ -39,3 +39,27 @@ func TestGetRetryFromConfig(t *testing.T) {
 	require.Equal(t, 7, rc.MaxRetries)
 	require.Equal(t, 10*time.Second, rc.BaseDelay)
 }
+
+func TestGetRetryNonPositiveDefaults(t *testing.T) {
+	// A negative retryMaxCount means "unset -> default", not a no-op config.
+	writeTmpConfig(t, "githubtoken: test\nretryMaxCount: -1\n")
+	require.Equal(t, 3, GetRetryMaxCount())
+	require.Equal(t, 3, GetRetryConfig().MaxRetries)
+
+	// A negative retryBaseDelay means "unset -> default".
+	writeTmpConfig(t, "githubtoken: test\nretryBaseDelay: -5s\n")
+	require.Equal(t, 5*time.Second, GetRetryBaseDelay())
+}
+
+func TestSaveRetryRoundTrip(t *testing.T) {
+	writeTmpConfig(t, "githubtoken: test\nretryMaxCount: 7\nretryBaseDelay: 10s\n")
+	require.Equal(t, 7, GetRetryMaxCount())
+	require.Equal(t, 10*time.Second, GetRetryBaseDelay())
+
+	require.NoError(t, Save())
+
+	// Re-load from the same (rewritten) file: explicit values must survive.
+	Init()
+	require.Equal(t, 7, GetRetryMaxCount())
+	require.Equal(t, 10*time.Second, GetRetryBaseDelay())
+}

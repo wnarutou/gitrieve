@@ -37,6 +37,15 @@ func Init() {
 	if err != nil {
 		ui.ErrorfExit("Error unmarshalling config file, %s", err)
 	}
+	// Seed retry defaults here (single-threaded) rather than lazily in the
+	// getters: the getters are called from daemon worker goroutines, so lazy
+	// mutation would race. Any non-positive value means "unset -> default".
+	if ins.RetryMaxCount <= 0 {
+		ins.RetryMaxCount = 3
+	}
+	if ins.RetryBaseDelay <= 0 {
+		ins.RetryBaseDelay = 5 * time.Second
+	}
 }
 
 func GetIns() *Config {
@@ -92,21 +101,17 @@ func GetConcurrencyNum() uint {
 	return ins.ConcurrencyNum
 }
 
-// GetRetryMaxCount returns the configured max retries per API call. If not
-// configured (zero), default to 3 retries after the first attempt.
+// GetRetryMaxCount returns the configured max retries per API call. Init seeds
+// it to 3 when the config value is zero or negative, so this getter is
+// read-only.
 func GetRetryMaxCount() int {
-	if ins.RetryMaxCount == 0 {
-		ins.RetryMaxCount = 3
-	}
 	return ins.RetryMaxCount
 }
 
-// GetRetryBaseDelay returns the exponential-backoff base delay. If not
-// configured (zero), default to 5 seconds.
+// GetRetryBaseDelay returns the exponential-backoff base delay. Init seeds it
+// to 5 seconds when the config value is zero or negative, so this getter is
+// read-only.
 func GetRetryBaseDelay() time.Duration {
-	if ins.RetryBaseDelay == 0 {
-		ins.RetryBaseDelay = 5 * time.Second
-	}
 	return ins.RetryBaseDelay
 }
 

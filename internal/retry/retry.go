@@ -44,6 +44,9 @@ func classify(err error) (retryable bool, wait time.Duration) {
 	// Other REST error responses: 429 and 5xx are transient, rest are not.
 	var respErr *github.ErrorResponse
 	if errors.As(err, &respErr) {
+		if respErr.Response == nil {
+			return false, 0
+		}
 		switch respErr.Response.StatusCode {
 		case 429:
 			return true, retryAfterHeader(respErr.Response.Header.Get("Retry-After"))
@@ -131,6 +134,9 @@ func parseRetryAfterSeconds(msg string) time.Duration {
 // BaseDelay. Waits are interrupted when ctx is done. Returns the last error
 // after cfg.MaxRetries retries, or ctx.Err() if cancelled.
 func Do(ctx context.Context, cfg Config, fn func() error) error {
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 0
+	}
 	var lastErr error
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -159,6 +165,9 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 func backoff(base time.Duration, attempt int) time.Duration {
 	if base <= 0 {
 		base = time.Second
+	}
+	if attempt > 60 {
+		return maxBackoff
 	}
 	d := base << uint(attempt)
 	if d > maxBackoff {

@@ -70,6 +70,21 @@ func TestClassifyErrorResponse5xx(t *testing.T) {
 	err := &github.ErrorResponse{Response: resp(http.StatusNotFound)}
 	retryable, _ := classify(err)
 	require.False(t, retryable)
+
+	// A plain 403 error response without rate-limit headers is not retryable
+	// (it is only retryable when surfaced as a *github.RateLimitError).
+	err = &github.ErrorResponse{Response: resp(http.StatusForbidden)}
+	retryable, _ = classify(err)
+	require.False(t, retryable)
+}
+
+func TestClassifyErrorResponseNil(t *testing.T) {
+	// An ErrorResponse without an attached HTTP response must not panic and
+	// must not be retried.
+	err := &github.ErrorResponse{}
+	retryable, wait := classify(err)
+	require.False(t, retryable)
+	require.Equal(t, time.Duration(0), wait)
 }
 
 func TestClassifyURLError(t *testing.T) {
@@ -104,6 +119,21 @@ func TestClassifyGraphQL(t *testing.T) {
 		{
 			name:  "503 non-200",
 			msg:   "non-200 OK status code: 503 Service Unavailable body: {}",
+			retry: true,
+		},
+		{
+			name:  "500 non-200 no rate-limit phrase",
+			msg:   "non-200 OK status code: 500 Internal Server Error body: {\"message\":\"boom\"}",
+			retry: true,
+		},
+		{
+			name:  "502 non-200 no rate-limit phrase",
+			msg:   "non-200 OK status code: 502 Bad Gateway body: {}",
+			retry: true,
+		},
+		{
+			name:  "504 non-200 no rate-limit phrase",
+			msg:   "non-200 OK status code: 504 Gateway Timeout body: {}",
 			retry: true,
 		},
 		{
@@ -167,6 +197,18 @@ func TestDoNonRetryableImmediate(t *testing.T) {
 	require.Equal(t, 1, calls) // no retry on 404
 }
 
+func TestDoNegativeMaxRetriesRunsOnce(t *testing.T) {
+	// A negative MaxRetries must not make the loop skip the first attempt (which
+	// previously returned nil without calling fn, panicking callers on nil).
+	calls := 0
+	err := Do(context.Background(), Config{MaxRetries: -1, BaseDelay: time.Millisecond}, func() error {
+		calls++
+		return &github.ErrorResponse{Response: resp(http.StatusNotFound)}
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, calls) // fn called exactly once, no panic
+}
+
 func TestDoContextCancelledDuringWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -174,7 +216,7 @@ func TestDoContextCancelledDuringWait(t *testing.T) {
 	firstCall := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Do(ctx, Config{MaxRetries: 3, BaseDelay: 100 * time.Millisecond}, func() error {
+		errCh <- Do(ctx, Config{MaxRetries: 3, BaseDelay: time.Second}, func() error {
 			calls++
 			if calls == 1 {
 				close(firstCall)

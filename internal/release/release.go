@@ -143,6 +143,7 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 			if err != nil {
 				return err
 			}
+			defer rc.Close()
 			// put rc to file
 			data, err := io.ReadAll(rc)
 			if err != nil {
