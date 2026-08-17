@@ -20,6 +20,18 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
+func newIssueListOptions(lastUpdate time.Time) *gh.IssueListByRepoOptions {
+	return &gh.IssueListByRepoOptions{
+		State:     "all",
+		Since:     lastUpdate.UTC(),
+		Sort:      "updated",
+		Direction: "asc",
+		ListOptions: gh.ListOptions{
+			PerPage: 100,
+		},
+	}
+}
+
 func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -88,8 +100,8 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 
 	var lastUpdate time.Time
 	if len(files) == 0 {
-		// If the directory is empty, set to Unix epoch time
-		lastUpdate = time.Unix(0, 0)
+		// Keep the zero value so go-github omits the since filter and the
+		// first sync downloads every issue and pull request.
 		ui.Printf("No issues downloaded yet, need to download all issues")
 	} else {
 		// Traverse all issue files to get the latest update time
@@ -128,20 +140,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Printf("The latest update time among all issues is: %s", lastUpdate)
 	}
 
-	// Set query parameters to only get issues updated since the last sync
-	opt := &gh.IssueListByRepoOptions{
-		State: "all",
-		// Note: There's an inconsistency in how time formats are handled between time.Date() and time.Time.String():
-		// - When using lastUpdate.UTC(), go-github converts it to a string with 'Z' suffix (e.g. "1970-01-01T00:00:01Z")
-		// - When using time.Date(), it creates a new time object that may be formatted without 'Z' suffix (e.g. "1970-01-01T00:00:01")
-		// Both are valid ISO 8601 formats, but GitHub API may handle them differently.
-		Since:     time.Date(lastUpdate.Year(), lastUpdate.Month(), lastUpdate.Day(), lastUpdate.Hour(), lastUpdate.Minute(), lastUpdate.Second(), 0, time.UTC),
-		Sort:      "updated",
-		Direction: "asc", // Sort by update time in descending order
-		ListOptions: gh.ListOptions{
-			PerPage: 100,
-		},
-	}
+	// A zero lastUpdate omits since for the initial full sync. Incremental
+	// syncs use the same instant in UTC without reinterpreting wall-clock time.
+	opt := newIssueListOptions(lastUpdate)
 
 	cfg := config.GetIns()
 	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
