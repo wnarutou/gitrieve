@@ -7,7 +7,7 @@ type Storage struct {
 }
 
 type MultiStorage struct {
-	Storage         `mapstructure:",squash"`
+	Storage         `yaml:",inline" mapstructure:",squash"`
 	Endpoint        string `yaml:"endpoint"`
 	Bucket          string `yaml:"bucket"`
 	Region          string `yaml:"region"`

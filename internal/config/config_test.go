@@ -103,3 +103,24 @@ func TestGetLegacyNegativeMeansNoLimit(t *testing.T) {
 	require.Equal(t, -1, GetReleaseNumLimit())
 	require.Equal(t, -1, GetReleaseSizeLimit())
 }
+
+func TestSaveStorageRoundTripKeepsFlatFields(t *testing.T) {
+	writeTmpConfig(t, `storage:
+  - name: localFile
+    type: file
+    path: /app/repo
+`)
+	require.Len(t, GetIns().Storage, 1)
+	require.Equal(t, "localFile", GetIns().Storage[0].Name)
+
+	require.NoError(t, Save())
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.NotContains(t, string(saved), "- storage:")
+
+	Init()
+	require.Len(t, GetIns().Storage, 1)
+	require.Equal(t, "localFile", GetIns().Storage[0].Name)
+	require.Equal(t, "file", GetIns().Storage[0].Type)
+	require.Equal(t, "/app/repo", GetIns().Storage[0].Path)
+}
