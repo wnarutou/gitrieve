@@ -217,7 +217,6 @@ git commit -m "fix(issue): omit since on initial sync"
 ### Task 3: Docker 运行镜像时区数据
 
 **Files:**
-- Create: `dockerfile_test.go`
 - Modify: `Dockerfile`
 - Modify: `Dockerfile.goreleaser`
 
@@ -225,46 +224,18 @@ git commit -m "fix(issue): omit since on initial sync"
 - Consumes: 两个 Alpine runtime Dockerfile。
 - Produces: 两个运行镜像均包含 `/usr/share/zoneinfo`，可解析 `TZ=Asia/Shanghai`。
 
-- [ ] **Step 1: 添加失败的 Dockerfile 内容测试**
+- [ ] **Step 1: 构建修改前镜像并确认真实时区行为失败**
 
-创建根目录 `dockerfile_test.go`：
-
-```go
-package main
-
-import (
-    "os"
-    "regexp"
-    "testing"
-
-    "github.com/stretchr/testify/require"
-)
-
-func TestRuntimeDockerfilesInstallTZData(t *testing.T) {
-    installTZData := regexp.MustCompile(`(?m)^RUN apk add --no-cache[^\r\n]*\btzdata\b`)
-    for _, filename := range []string{"Dockerfile", "Dockerfile.goreleaser"} {
-        filename := filename
-        t.Run(filename, func(t *testing.T) {
-            content, err := os.ReadFile(filename)
-            require.NoError(t, err)
-            require.Regexp(t, installTZData, string(content))
-        })
-    }
-}
-```
-
-- [ ] **Step 2: 运行根包测试并确认失败**
-
-Run:
+从当前未修改的 Git HEAD 创建无秘密临时构建上下文，构建临时镜像：
 
 ```powershell
-$env:GOCACHE = Join-Path $env:TEMP 'gitrieve-go-build-cache'
-go test . -run TestRuntimeDockerfilesInstallTZData -count=1
+docker build -t gitrieve-tzdata-red:<temporary-tag> <clean-context>
+docker run --rm --entrypoint /bin/sh gitrieve-tzdata-red:<temporary-tag> -c "test -e /usr/share/zoneinfo/Asia/Shanghai"
 ```
 
-Expected: FAIL，两个 Dockerfile 的 `apk add` 行均缺少 `tzdata`。
+Expected: 构建成功，容器测试退出码非 0，因为运行镜像尚未安装时区数据库。这一失败直接复现 Compose 声明 `TZ=Asia/Shanghai` 但镜像无法解析该区域的问题。
 
-- [ ] **Step 3: 在两个运行镜像中安装 tzdata**
+- [ ] **Step 2: 在两个运行镜像中安装 tzdata**
 
 将两个 Dockerfile 的运行阶段依赖行改为：
 
@@ -272,22 +243,21 @@ Expected: FAIL，两个 Dockerfile 的 `apk add` 行均缺少 `tzdata`。
 RUN apk add --no-cache ca-certificates git tzdata
 ```
 
-- [ ] **Step 4: 格式化测试并验证通过**
+- [ ] **Step 3: 重建镜像并验证真实时区行为通过**
 
 Run:
 
 ```powershell
-gofmt -w dockerfile_test.go
-$env:GOCACHE = Join-Path $env:TEMP 'gitrieve-go-build-cache'
-go test . -run TestRuntimeDockerfilesInstallTZData -count=1
+docker build -t gitrieve-tzdata-green:<temporary-tag> <working-tree-context>
+docker run --rm --env TZ=Asia/Shanghai --entrypoint /bin/sh gitrieve-tzdata-green:<temporary-tag> -c "test -e /usr/share/zoneinfo/Asia/Shanghai && date +%z"
 ```
 
-Expected: PASS。
+Expected: 退出码 0，输出 `+0800`。此外通过最终的 GoReleaser Dockerfile 构建路径或针对其运行阶段执行同等镜像检查，确认 `Dockerfile.goreleaser` 也产生包含该时区文件的运行镜像。
 
-- [ ] **Step 5: 提交 Docker 时区修复**
+- [ ] **Step 4: 提交 Docker 时区修复**
 
 ```powershell
-git add -- Dockerfile Dockerfile.goreleaser dockerfile_test.go
+git add -- Dockerfile Dockerfile.goreleaser
 git commit -m "fix(docker): install timezone data"
 ```
 
@@ -402,4 +372,3 @@ docker compose -f C:\Users\wnaut\Documents\projects\gitrieve-docker\docker-compo
 - [ ] **Step 7: 清理并做最终状态检查**
 
 安全删除本任务创建的精确临时目录、临时构建产物和临时测试容器；保留 Compose 主容器和真实 Docker 配置。执行 `git status --short`，确认没有本任务遗留的未提交文件；确认主容器仍运行、使用最新镜像且 `/health` 为 200。
-
