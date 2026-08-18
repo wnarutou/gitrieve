@@ -154,12 +154,19 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
+	// Route git's own progress (server-side "Enumerating/Counting/Compressing
+	// objects" lines) into the log sink so a long clone/fetch streams live
+	// status to the UI instead of leaving it silent until the sync completes.
+	// One writer is shared across clone/fetch/pull so the throttle window is
+	// continuous for the whole sync.
+	progress := &progressWriter{}
+
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
 		isUpdated = true
 		_, err = git.PlainCloneContext(syncCtx, gitDir, false, &git.CloneOptions{
 			URL:      "https://" + gitUrl,
-			Progress: os.Stdout,
+			Progress: progress,
 			Depth:    depth,
 		})
 
@@ -187,7 +194,8 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		RefSpecs: []config.RefSpec{
 			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
 		},
-		Force: true,
+		Force:    true,
+		Progress: progress,
 	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		ui.Errorf("Error fetching remote branches, %s", err)
@@ -306,7 +314,8 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				RemoteName:    "origin",
 				ReferenceName: branchRef,
 				// pull all commits, not only the latest
-				Depth: depth,
+				Depth:    depth,
+				Progress: progress,
 			})
 			if err == git.NoErrAlreadyUpToDate {
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
