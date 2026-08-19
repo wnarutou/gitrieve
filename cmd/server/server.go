@@ -48,6 +48,11 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 		ui.ErrorfExit("Failed to initialize database: %s", err)
 	}
 
+	// 迁移旧库（新增 repo_key 列）。失败宁可起不来，也不在坏 schema 上跑。
+	if err := db.Migrate(database); err != nil {
+		ui.ErrorfExit("Failed to migrate database: %s", err)
+	}
+
 	// Initialize logger
 	log := logger.NewLogger(database)
 
