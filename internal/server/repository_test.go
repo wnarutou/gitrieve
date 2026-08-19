@@ -44,10 +44,10 @@ func TestGetRepositories(t *testing.T) {
 	// e2 starts LATER than e1, so the "list all" subtest below can assert the
 	// HAVING start_time = MAX(start_time) row selection returns e2's time.
 	now := time.Now()
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"e1", "repo-a", now, now.Add(time.Minute), "completed", "")
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"e2", "repo-a", now.Add(2*time.Minute), now.Add(3*time.Minute), "failed", "boom")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"e1", "repo-a", "github.com/a/a", now, now.Add(time.Minute), "completed", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"e2", "repo-a", "github.com/a/a", now.Add(2*time.Minute), now.Add(3*time.Minute), "failed", "boom")
 
 	s := server.NewRepoTestServer(cfg, testDB)
 
@@ -137,6 +137,12 @@ func TestGetRepositories(t *testing.T) {
 		assert.False(t, names["alpha"])
 	})
 
+	t.Run("search filters by URL", func(t *testing.T) {
+		d := getList("?search=github.com/b")
+		assert.Equal(t, 1, d.Total)
+		assert.Equal(t, "repo-b", d.Repositories[0].Name)
+	})
+
 	t.Run("pagination", func(t *testing.T) {
 		d1 := getList("?page=1&limit=2")
 		assert.Equal(t, 3, d1.Total)
@@ -195,7 +201,8 @@ func TestCreateRepository(t *testing.T) {
 		assert.Len(t, getResp.Data.Repositories, 2)
 	})
 
-	t.Run("duplicate_name", func(t *testing.T) {
+	t.Run("same_name_different_url", func(t *testing.T) {
+		// Name may repeat; identity is the URL. Same name + different URL → 200.
 		body, _ := json.Marshal(map[string]interface{}{
 			"name": "existing-repo",
 			"url":  "github.com/another/repo",
@@ -205,8 +212,8 @@ func TestCreateRepository(t *testing.T) {
 		resp := httptest.NewRecorder()
 		s.ServeHTTP(resp, req)
 
-		assert.Equal(t, 409, resp.Code)
-		assert.Equal(t, 409, repoResponseCode(t, resp))
+		assert.Equal(t, 200, resp.Code)
+		assert.Equal(t, 200, repoResponseCode(t, resp))
 	})
 
 	t.Run("empty_name", func(t *testing.T) {
@@ -241,7 +248,7 @@ func TestUpdateRepository(t *testing.T) {
 			"url":         "github.com/new/url",
 			"allBranches": true,
 		})
-		req, _ := http.NewRequest("PUT", "/api/repositories/update-me", bytes.NewBuffer(body))
+		req, _ := http.NewRequest("PUT", "/api/repositories/github.com/old/url", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp := httptest.NewRecorder()
 		s.ServeHTTP(resp, req)
@@ -287,7 +294,7 @@ func TestDeleteRepository(t *testing.T) {
 	s := server.NewRepoTestServer(cfg, testDB)
 
 	t.Run("success", func(t *testing.T) {
-		req, _ := http.NewRequest("DELETE", "/api/repositories/delete-me", nil)
+		req, _ := http.NewRequest("DELETE", "/api/repositories/github.com/delete/me", nil)
 		resp := httptest.NewRecorder()
 		s.ServeHTTP(resp, req)
 
@@ -325,4 +332,192 @@ func TestDeleteRepository(t *testing.T) {
 		assert.Equal(t, 404, resp.Code)
 		assert.Equal(t, 404, repoResponseCode(t, resp))
 	})
+}
+
+func TestCreateRepositoryDuplicateURL(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "existing-repo", URL: "github.com/existing/repo"},
+		},
+	}
+	s := server.NewRepoTestServer(cfg, testDB)
+
+	// 同一 URL 不同 name → 409（身份以 URL 为准，name 可重复）。
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "another-name",
+		"url":  "https://github.com/existing/repo.git",
+	})
+	req, _ := http.NewRequest("POST", "/api/repositories", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+
+	assert.Equal(t, 409, resp.Code)
+	assert.Equal(t, 409, repoResponseCode(t, resp))
+}
+
+func TestCreateRepositoryNameMayRepeat(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "repo", URL: "github.com/one/repo"},
+		},
+	}
+	s := server.NewRepoTestServer(cfg, testDB)
+
+	// 相同 name 不同 URL → 200（name 不再是唯一约束）。
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "repo",
+		"url":  "github.com/two/repo",
+	})
+	req, _ := http.NewRequest("POST", "/api/repositories", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+
+	assert.Equal(t, 200, resp.Code)
+}
+
+func TestCreateRepositoryOrgSynthesizesURL(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	s := server.NewRepoTestServer(&config.Config{}, testDB)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":    "acme",
+		"type":    "org",
+		"orgName": "acme",
+	})
+	req, _ := http.NewRequest("POST", "/api/repositories", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+
+	assert.Equal(t, 200, resp.Code)
+	var response struct {
+		Code int                `json:"code"`
+		Data typedef.Repository `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+	assert.Equal(t, 200, response.Code)
+	assert.Equal(t, "https://github.com/acme", response.Data.URL)
+}
+
+func TestCreateRepositoryEmptyURLRejected(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	s := server.NewRepoTestServer(&config.Config{}, testDB)
+
+	// type=repo 且无 URL；type=org 但无 orgName → 都 400。
+	for _, body := range []map[string]interface{}{
+		{"name": "orphan", "type": "repo"},
+		{"name": "nobody", "type": "org"},
+	} {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", "/api/repositories", bytes.NewBuffer(b))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+		assert.Equal(t, 400, resp.Code, "body %v", body)
+	}
+}
+
+func TestUpdateRepositoryURLCollision(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "a", URL: "github.com/a/a"},
+			{Name: "b", URL: "github.com/b/b"},
+		},
+	}
+	s := server.NewRepoTestServer(cfg, testDB)
+
+	// 把 a 的 URL 改成 b 的 → 409（与其他仓库冲突，不与自身比较）。
+	body, _ := json.Marshal(map[string]interface{}{
+		"url": "github.com/b/b",
+	})
+	req, _ := http.NewRequest("PUT", "/api/repositories/github.com/a/a", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+
+	assert.Equal(t, 409, resp.Code)
+}
+
+func TestGetRepositoriesOrgPrefixAggregation(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "acme", URL: "https://github.com/acme", Type: typedef.TypeOrg, OrgName: "acme"},
+			{Name: "solo", URL: "github.com/solo/app"},
+		},
+	}
+
+	now := time.Now()
+	// 成员仓库的 executions 各记一条。
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"a1", "alpha", "github.com/acme/alpha", now.Add(-2*time.Minute), now.Add(-1*time.Minute), "completed", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"b1", "beta", "github.com/acme/beta", now.Add(-4*time.Minute), now.Add(-3*time.Minute), "failed", "boom")
+	// 路径边界：github.com/acme2/x 不能被 acme 前缀吞掉。
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"c1", "other", "github.com/acme2/other", now.Add(-6*time.Minute), now.Add(-5*time.Minute), "completed", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"d1", "solo", "github.com/solo/app", now.Add(-8*time.Minute), now.Add(-7*time.Minute), "completed", "")
+
+	s := server.NewRepoTestServer(cfg, testDB)
+
+	type repoView struct {
+		Name        string     `json:"Name"`
+		LastRunTime *time.Time `json:"last_run_time"`
+		TotalRuns   int64      `json:"total_runs"`
+		SuccessRuns int64      `json:"success_runs"`
+		FailedRuns  int64      `json:"failed_runs"`
+	}
+	req, _ := http.NewRequest("GET", "/api/repositories", nil)
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+	var response struct {
+		Code int `json:"code"`
+		Data struct {
+			Repositories []repoView `json:"repositories"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+	assert.Equal(t, 200, response.Code)
+
+	byName := map[string]repoView{}
+	for _, r := range response.Data.Repositories {
+		byName[r.Name] = r
+	}
+
+	acme := byName["acme"]
+	assert.Equal(t, int64(2), acme.TotalRuns, "org aggregates its member repos only")
+	assert.Equal(t, int64(1), acme.SuccessRuns)
+	assert.Equal(t, int64(1), acme.FailedRuns)
+	require.NotNil(t, acme.LastRunTime)
+	// last_run is the max member START time: alpha (a1) starts at now-2m, beta
+	// (b1) at now-4m — the max is now-2m (the brief's original now-1m was the
+	// member's end time; the API convention is start_time-based).
+	assert.WithinDuration(t, now.Add(-2*time.Minute), *acme.LastRunTime, time.Second, "last_run must be the max of members")
+
+	solo := byName["solo"]
+	assert.Equal(t, int64(1), solo.TotalRuns)
 }

@@ -294,8 +294,46 @@ func (a *API) GetJobLogs(c *gin.Context) {
 	})
 }
 
+// runStats 是单仓库/单组织的聚合运行统计。
+type runStats struct {
+	LastRun *time.Time
+	Total   int64
+	Success int64
+	Failed  int64
+}
+
+// lookupStats 返回配置条目的运行统计。type=repo 直接取自身键；type=org/user
+// 对「路径边界前缀」（entry.Key()+"/"）命中的成员求和，last_run 取成员最大值。
+// 前缀以 "/" 结尾，避免 github.com/acme 误吞 github.com/acme2/x。
+func lookupStats(stats map[string]runStats, repo typedef.Repository) runStats {
+	key := repo.Key()
+	if key == "" {
+		return runStats{}
+	}
+	switch repo.GetType() {
+	case typedef.TypeOrg, typedef.TypeUser:
+		prefix := key + "/"
+		var sum runStats
+		for k, s := range stats {
+			if !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			sum.Total += s.Total
+			sum.Success += s.Success
+			sum.Failed += s.Failed
+			if s.LastRun != nil && (sum.LastRun == nil || s.LastRun.After(*sum.LastRun)) {
+				t := *s.LastRun
+				sum.LastRun = &t
+			}
+		}
+		return sum
+	default:
+		return stats[key]
+	}
+}
+
 // GetRepositories returns repositories with per-repo execution stats, last/next
-// run times, search (fuzzy name match) and pagination.
+// run times, search (fuzzy name or URL match) and pagination.
 func (a *API) GetRepositories(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
@@ -309,13 +347,7 @@ func (a *API) GetRepositories(c *gin.Context) {
 	}
 
 	// Aggregate per-repository execution stats from the DB.
-	type agg struct {
-		LastRun *time.Time
-		Total   int64
-		Success int64
-		Failed  int64
-	}
-	stats := map[string]agg{}
+	stats := map[string]runStats{}
 
 	// Note: we select the bare start_time column (constrained to the max by
 	// HAVING) rather than MAX(start_time). The modernc.org/sqlite driver only
@@ -323,13 +355,13 @@ func (a *API) GetRepositories(c *gin.Context) {
 	// aggregate expressions like MAX(start_time) have no declared type and come
 	// back as a raw string that database/sql cannot scan into *time.Time.
 	rows, err := a.db.Query(`
-		SELECT job_name,
+		SELECT repo_key,
 		       start_time AS last_run,
 		       COUNT(*)        AS total,
 		       COALESCE(SUM(status = 'completed'), 0) AS success,
 		       COALESCE(SUM(status = 'failed'), 0)    AS failed
 		FROM executions
-		GROUP BY job_name
+		GROUP BY repo_key
 		HAVING start_time = MAX(start_time)`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query repository stats: " + err.Error()})
@@ -338,30 +370,34 @@ func (a *API) GetRepositories(c *gin.Context) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var name string
+		var key string
 		var lastRun sql.NullTime
-		var a agg
-		if err := rows.Scan(&name, &lastRun, &a.Total, &a.Success, &a.Failed); err != nil {
+		var a runStats
+		if err := rows.Scan(&key, &lastRun, &a.Total, &a.Success, &a.Failed); err != nil {
 			c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to scan repository stats: " + err.Error()})
 			return
 		}
 		if lastRun.Valid {
 			a.LastRun = &lastRun.Time
 		}
-		stats[name] = a
+		stats[key] = a
 	}
 	if err := rows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to iterate repository stats: " + err.Error()})
 		return
 	}
 
-	// Fuzzy name filter (in-memory equivalent of LIKE '%search%'). SQL LIKE is
-	// case-insensitive for ASCII, so match that by folding both sides to lower
-	// case before the Contains check.
+	// Fuzzy name or URL filter (in-memory equivalent of LIKE '%search%'). SQL
+	// LIKE is case-insensitive for ASCII, so match that by folding both sides to
+	// lower case before the Contains check.
 	filtered := make([]typedef.Repository, 0, len(a.config.Repository))
 	for _, repo := range a.config.Repository {
-		if search != "" && !strings.Contains(strings.ToLower(repo.Name), strings.ToLower(search)) {
-			continue
+		if search != "" {
+			inName := strings.Contains(strings.ToLower(repo.Name), strings.ToLower(search))
+			inURL := strings.Contains(strings.ToLower(repo.EffectiveURL()), strings.ToLower(search))
+			if !inName && !inURL {
+				continue
+			}
 		}
 		filtered = append(filtered, repo)
 	}
@@ -379,7 +415,7 @@ func (a *API) GetRepositories(c *gin.Context) {
 	now := time.Now()
 	overviews := make([]RepositoryOverview, 0, end-start)
 	for _, repo := range filtered[start:end] {
-		s := stats[repo.Name]
+		s := lookupStats(stats, repo)
 		overviews = append(overviews, RepositoryOverview{
 			Repository:  repo,
 			LastRunTime: s.LastRun,
@@ -417,12 +453,22 @@ func (a *API) CreateRepository(c *gin.Context) {
 		return
 	}
 
-	// Check for duplicates
+	// user/org 空 URL → 填合成 URL；随后统一判身份键非空。
+	repo.URL = repo.EffectiveURL()
+	if repo.Key() == "" {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Repository needs a non-empty URL (or orgName for user/org type)",
+		})
+		return
+	}
+
+	// 判重按身份键（URL），name 允许重复。
 	for _, existing := range a.config.Repository {
-		if existing.Name == repo.Name {
+		if existing.Key() == repo.Key() {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
-				Message: "Repository with name '" + repo.Name + "' already exists",
+				Message: "Repository with URL '" + repo.Key() + "' already exists",
 			})
 			return
 		}
@@ -444,14 +490,17 @@ func (a *API) CreateRepository(c *gin.Context) {
 	})
 }
 
-// UpdateRepository modifies an existing repository by name (partial update via JSON merge).
+// UpdateRepository modifies an existing repository by identity key (partial update via JSON merge).
 func (a *API) UpdateRepository(c *gin.Context) {
-	id := c.Param("id")
+	// The route uses a *id catch-all so identity keys containing "/" reach the
+	// handler; gin prefixes the captured value with "/", which we strip before
+	// matching against repo keys.
+	id := strings.TrimPrefix(c.Param("id"), "/")
 
-	// Locate the existing repository
+	// Locate the existing repository by identity key (URL).
 	idx := -1
 	for i, existing := range a.config.Repository {
-		if existing.Name == id {
+		if existing.Matches(id) {
 			idx = i
 			break
 		}
@@ -513,6 +562,25 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		return
 	}
 
+	// user/org 空 URL → 填合成 URL；空身份键拒绝；与其他仓库 URL 冲突拒绝。
+	updated.URL = updated.EffectiveURL()
+	if updated.Key() == "" {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Repository needs a non-empty URL (or orgName for user/org type)",
+		})
+		return
+	}
+	for i, other := range a.config.Repository {
+		if i != idx && other.Key() == updated.Key() {
+			c.JSON(http.StatusConflict, Response{
+				Code:    409,
+				Message: "Repository with URL '" + updated.Key() + "' already exists",
+			})
+			return
+		}
+	}
+
 	a.config.Repository[idx] = updated
 
 	msg := ""
@@ -527,13 +595,14 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	})
 }
 
-// DeleteRepository removes a repository from the configuration by name.
+// DeleteRepository removes a repository from the configuration by identity key.
 func (a *API) DeleteRepository(c *gin.Context) {
-	id := c.Param("id")
+	// See UpdateRepository: strip the leading "/" gin adds to *id catch-all values.
+	id := strings.TrimPrefix(c.Param("id"), "/")
 
 	idx := -1
 	for i, existing := range a.config.Repository {
-		if existing.Name == id {
+		if existing.Matches(id) {
 			idx = i
 			break
 		}

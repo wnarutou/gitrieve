@@ -77,8 +77,9 @@ func NewRepoTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
 	s := &TestServer{router: gin.Default()}
 	s.router.GET("/api/repositories", api.GetRepositories)
 	s.router.POST("/api/repositories", api.CreateRepository)
-	s.router.PUT("/api/repositories/:id", api.UpdateRepository)
-	s.router.DELETE("/api/repositories/:id", api.DeleteRepository)
+	// *id catch-all: identity keys are URLs containing "/" that :id cannot match.
+	s.router.PUT("/api/repositories/*id", api.UpdateRepository)
+	s.router.DELETE("/api/repositories/*id", api.DeleteRepository)
 	return s
 }
 
