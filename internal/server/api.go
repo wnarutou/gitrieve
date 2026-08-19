@@ -415,6 +415,12 @@ func (a *API) GetRepositories(c *gin.Context) {
 	now := time.Now()
 	overviews := make([]RepositoryOverview, 0, end-start)
 	for _, repo := range filtered[start:end] {
+		// Serve the effective URL (type=user/org with empty URL and an orgName
+		// synthesizes https://github.com/<orgName>). The frontend keys rows off
+		// r.URL, so a raw config entry without `url` would otherwise come back
+		// with URL=="" and its row buttons would no-op / 404. repo is a loop copy,
+		// so this neither mutates nor persists the config.
+		repo.URL = repo.EffectiveURL()
 		s := lookupStats(stats, repo)
 		overviews = append(overviews, RepositoryOverview{
 			Repository:  repo,

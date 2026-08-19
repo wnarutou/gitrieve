@@ -152,6 +152,46 @@ func TestGetRepositories(t *testing.T) {
 	})
 }
 
+func TestGetRepositoriesSynthesizesOrgURL(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	// YAML-loaded org entry: type=org + orgName, NO url — the documented shape.
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "acme", Type: typedef.TypeOrg, OrgName: "acme"},
+		},
+	}
+
+	s := server.NewRepoTestServer(cfg, testDB)
+
+	// typedef.Repository fields marshal as PascalCase (no json tags).
+	type repoView struct {
+		Name string `json:"Name"`
+		URL  string `json:"URL"`
+	}
+	type listData struct {
+		Repositories []repoView `json:"repositories"`
+		Total        int        `json:"total"`
+	}
+	req, _ := http.NewRequest("GET", "/api/repositories", nil)
+	resp := httptest.NewRecorder()
+	s.ServeHTTP(resp, req)
+	var response struct {
+		Code int      `json:"code"`
+		Data listData `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+	assert.Equal(t, 200, response.Code)
+	assert.Equal(t, 1, response.Data.Total)
+	require.Len(t, response.Data.Repositories, 1)
+	assert.Equal(t, "acme", response.Data.Repositories[0].Name)
+	// The DTO must serve the synthesized URL so the frontend's repoKey (r.URL)
+	// resolves to a non-empty identity key.
+	assert.Equal(t, "https://github.com/acme", response.Data.Repositories[0].URL)
+}
+
 func TestCreateRepository(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)

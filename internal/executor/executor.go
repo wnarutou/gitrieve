@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
-	"time"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
@@ -17,6 +15,8 @@ import (
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 	"github.com/wnarutou/gitrieve/internal/wiki"
+	"sync"
+	"time"
 )
 
 type ExecutionStatus string
