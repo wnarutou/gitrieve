@@ -75,8 +75,9 @@
 新增（放在 `repository.go` 或新文件 `key.go`）：
 
 ```go
-// NormalizeURL 归一化仓库 URL：小写、去 http(s):// 前缀、去尾斜杠、去 .git 后缀。
-// 返回 "" 表示没有可用 URL。
+// NormalizeURL 归一化仓库 URL，产出无协议、小写、无 www、无尾斜杠、无 .git 的规范形态
+// "host/owner/repo"。处理顺序：去空白 → 去 #fragment → 小写 → 去 http(s):// → 去 www. →
+// 去尾斜杠 → 去 .git。返回 "" 表示没有可用 URL。
 func NormalizeURL(url string) string
 
 // EffectiveURL 返回条目的有效 URL：URL 非空直接用；type 为 user/org 且 orgName 非空时
@@ -97,6 +98,11 @@ func (r Repository) Matches(input string) bool
 | `github.com/wnarutou/gitrieve` | `github.com/wnarutou/gitrieve` |
 | `https://GITHUB.com/wnarutou/gitrieve/` | `github.com/wnarutou/gitrieve` |
 | `http://github.com/wnarutou/gitrieve.git` | `github.com/wnarutou/gitrieve` |
+| `https://www.github.com/wnarutou/gitrieve` | `github.com/wnarutou/gitrieve` |
+| `https://github.com/wnarutou/gitrieve#readme` | `github.com/wnarutou/gitrieve` |
+| `https://gitlab.com/Wnarutou/proj.git/` | `gitlab.com/wnarutou/proj` |
+
+**对齐 gitrieve-gleaner**（`urlUtils.js` 的 `cleanUrl`/`normalizeGitHubUrl` + `configGenerator` 的无协议输出）：去 `#fragment`、`http`→`https`（此处通过统一去协议体现）、去尾斜杠、去 `www.`、产出无协议形态 `host/owner/repo`。在此基础上确认的三点扩展：**任意主机通用清理**（gleaner 只处理 GitHub）、**去 `.git` 后缀**（gleaner 保留）、**统一小写**（gleaner 保留原大小写）。
 
 `git@host:path` 的 SCP 风格先**不支持**（示例配置全部用 `host/owner/repo` 形式）；若后续需要再扩展。规范化逻辑与前端 JS 版本各自独立实现，但**身份判定以后端为准**（API 路径参数在后端也做规范化后再匹配）。
 
@@ -217,7 +223,7 @@ type CreateJobResponse struct {
 
 新增：
 
-- `internal/typedef`：`NormalizeURL` / `EffectiveURL` / `Key` / `Matches` 表驱动测试（协议、大小写、尾斜杠、`.git`、user/org 合成 URL、空输入/空 URL 拒绝）。
+- `internal/typedef`：`NormalizeURL` / `EffectiveURL` / `Key` / `Matches` 表驱动测试（协议、大小写、尾斜杠、`.git`、`www.`、`#fragment`、多主机如 gitlab、user/org 合成 URL、空输入/空 URL 拒绝）。
 - `internal/db`：`Migrate` 测试——旧 schema（无 `repo_key` 列）补列成功；新 schema 幂等；不加回填断言（旧行键为空）。
 - `internal/executor`：按 `Key()`/`Matches` 查找、INSERT 写入 `repo_key`、找不到返回错误；**type=repo 返回单 jobID，type=org/user 经展开返回多个 jobID 且各写具体仓库键**。
 - `internal/repository`：`Expand` 对 repo/user/org 的展开结果（user/org 需要能 mock 掉 GitHub 客户端）。
