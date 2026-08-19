@@ -7,6 +7,9 @@ function esc(value) {
     }[c]));
 }
 
+// repoKey 返回仓库身份键。后端以规范化 URL 为唯一身份，前端不做规范化。
+const repoKey = (r) => r.URL || '';
+
 function fmtTime(value) {
     if (!value) return '-';
     const d = new Date(value);
@@ -119,7 +122,7 @@ function jobsToolbar(jobCount) {
         <div class="panel">
             <div class="toolbar">
                 <div class="toolbar-group">
-                    <input type="text" id="jobs-repo-filter" placeholder="Filter by repository name…" value="${esc(state.jobsRepo)}">
+                    <input type="text" id="jobs-repo-filter" placeholder="Filter by repository name or URL…" value="${esc(state.jobsRepo)}">
                     <button id="btn-search-jobs" class="btn">Search</button>
                 </div>
                 <div class="toolbar-group">
@@ -237,13 +240,18 @@ async function cancelJob(jobId) {
     }
 }
 
-async function runRepo(name, btn) {
-    if (!name) return;
+async function runRepo(key, name, btn) {
+    if (!key) return;
     btn.disabled = true;
     try {
-        const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ repository: name }) });
-        toast('Job started (' + (data.job_id || '').slice(0, 8) + '…)');
-        openLogModal(data.job_id, name);
+        const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ repository_key: key }) });
+        const jobIDs = (data && data.job_ids) || [];
+        if (jobIDs.length === 1) {
+            toast('Job started (' + jobIDs[0].slice(0, 8) + '…)');
+            openLogModal(jobIDs[0], name);
+        } else {
+            toast('Started ' + jobIDs.length + ' jobs (org expansion)');
+        }
         renderRepositories();
     } catch (e) {
         toast('Failed to start job: ' + e.message, true);
@@ -305,9 +313,9 @@ async function closeLogModal() {
 
 function openRepoForm(repo) {
     $('#repo-modal-title').textContent = repo ? 'Edit Repository' : 'Add Repository';
-    $('#repo-original-name').value = repo ? repo.Name : '';
+    $('#repo-original-key').value = repo ? repoKey(repo) : '';
     $('#repo-name').value = repo ? repo.Name : '';
-    $('#repo-name').disabled = !!repo;
+    $('#repo-name').disabled = false; // name 仅展示/查询，可重复可改名
     $('#repo-url').value = repo ? (repo.URL || '') : '';
     $('#repo-type').value = repo && repo.Type ? repo.Type : 'repo';
     $('#repo-org').value = repo ? (repo.OrgName || '') : '';
@@ -339,7 +347,7 @@ function openRepoForm(repo) {
 
 async function saveRepo(ev) {
     ev.preventDefault();
-    const original = $('#repo-original-name').value;
+    const originalKey = $('#repo-original-key').value;
     const name = $('#repo-name').value.trim();
     if (!name) { toast('Name is required', true); return; }
 
@@ -361,8 +369,8 @@ async function saveRepo(ev) {
     };
 
     try {
-        if (original) {
-            await api('/api/repositories/' + encodeURIComponent(original), { method: 'PUT', body: JSON.stringify(repo) });
+        if (originalKey) {
+            await api('/api/repositories/' + encodeURIComponent(originalKey), { method: 'PUT', body: JSON.stringify(repo) });
             toast('Repository updated');
         } else {
             await api('/api/repositories', { method: 'POST', body: JSON.stringify(repo) });
@@ -375,10 +383,10 @@ async function saveRepo(ev) {
     }
 }
 
-async function deleteRepo(name) {
-    if (!confirm('Delete repository "' + name + '"?')) return;
+async function deleteRepo(key) {
+    if (!confirm('Delete repository?')) return;
     try {
-        await api('/api/repositories/' + encodeURIComponent(name), { method: 'DELETE' });
+        await api('/api/repositories/' + encodeURIComponent(key), { method: 'DELETE' });
         toast('Repository deleted');
         renderRepositories();
     } catch (e) {
@@ -415,9 +423,9 @@ async function renderRepositories() {
             <td class="muted">${esc((r.Storage || []).join(', ') || '-')}</td>
             <td class="muted">${optionsCell(r)}</td>
             <td class="actions">
-                <button class="btn btn-sm btn-primary btn-run-repo" data-name="${esc(r.Name)}">Execute</button>
-                <button class="btn btn-sm btn-edit-repo" data-name="${esc(r.Name)}">Edit</button>
-                <button class="btn btn-sm btn-danger btn-del-repo" data-name="${esc(r.Name)}">Delete</button>
+                <button class="btn btn-sm btn-primary btn-run-repo" data-key="${esc(repoKey(r))}">Execute</button>
+                <button class="btn btn-sm btn-edit-repo" data-key="${esc(repoKey(r))}">Edit</button>
+                <button class="btn btn-sm btn-danger btn-del-repo" data-key="${esc(repoKey(r))}">Delete</button>
             </td>
         </tr>`).join('');
 
@@ -425,7 +433,7 @@ async function renderRepositories() {
         <div class="page-header">
             <h2>Repositories</h2>
             <div class="toolbar-group">
-                <input type="text" id="repos-search" placeholder="Filter by repository name\u2026" value="${esc(state.reposSearch)}">
+                <input type="text" id="repos-search" placeholder="Filter by name or URL\u2026" value="${esc(state.reposSearch)}">
                 <button id="btn-search-repos" class="btn">Search</button>
                 <button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
                 <button id="btn-refresh-repos" class="btn">Refresh</button>
@@ -462,12 +470,15 @@ async function renderRepositories() {
     if (prev) prev.addEventListener('click', () => { if (state.reposPage > 1) { state.reposPage--; renderRepositories(); } });
     if (next) next.addEventListener('click', () => { state.reposPage++; renderRepositories(); });
 
-    $$('.btn-run-repo').forEach(b => b.addEventListener('click', () => runRepo(b.dataset.name, b)));
+    $$('.btn-run-repo').forEach(b => b.addEventListener('click', () => {
+        const r = repos.find(x => repoKey(x) === b.dataset.key);
+        runRepo(b.dataset.key, r ? r.Name : '', b);
+    }));
     $$('.btn-edit-repo').forEach(b => b.addEventListener('click', () => {
-        const r = repos.find(x => x.Name === b.dataset.name);
+        const r = repos.find(x => repoKey(x) === b.dataset.key);
         if (r) openRepoForm(r);
     }));
-    $$('.btn-del-repo').forEach(b => b.addEventListener('click', () => deleteRepo(b.dataset.name)));
+    $$('.btn-del-repo').forEach(b => b.addEventListener('click', () => deleteRepo(b.dataset.key)));
 }
 
 function openStorageForm(storage) {
