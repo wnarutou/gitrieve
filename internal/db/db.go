@@ -10,7 +10,21 @@ type DB struct {
 }
 
 func Initialize(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// File-backed SQLite needs WAL journaling plus a busy timeout. With the
+	// default rollback journal, a concurrent reader + writer pair (the SSE
+	// log-stream poller and the job goroutines INSERTing log lines) reliably
+	// collides on the shared journal and the writer fails with "database is
+	// locked (SQLITE_BUSY)" — a failure that internal/ui swallows, silently
+	// dropping log lines mid-run. WAL lets readers run concurrently with a
+	// writer (each sees the last committed snapshot), and busy_timeout makes a
+	// colliding writer wait up to 5s instead of failing outright. ":memory:"
+	// is untouched: its single pinned connection needs no journaling pragma
+	// (and WAL only makes sense on a file anyway).
+	dsn := path
+	if path != ":memory:" {
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
