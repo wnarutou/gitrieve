@@ -23,12 +23,12 @@ type Job struct {
 }
 
 type CreateJobRequest struct {
-	Repository string `json:"repository" binding:"required"`
+	RepositoryKey string `json:"repository_key" binding:"required"`
 }
 
 type CreateJobResponse struct {
-	JobID  string `json:"job_id"`
-	Status string `json:"status"`
+	JobIDs []string `json:"job_ids"`
+	Status string   `json:"status"`
 }
 
 type CancelJobResponse struct {

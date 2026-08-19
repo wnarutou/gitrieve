@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -55,12 +56,12 @@ func TestGetJobs(t *testing.T) {
 
 	// Insert test data
 	now := time.Now()
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"job-1", "test-repo", now, now.Add(5*time.Minute), "completed", "")
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
-		"job-2", "test-repo", now, "running")
-	testDB.Exec(`INSERT INTO executions (id, job_name, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
-		"job-3", "test-repo", now, now.Add(2*time.Minute), "failed", "some error")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"job-1", "test-repo", "github.com/test/repo", now, now.Add(5*time.Minute), "completed", "")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, status) VALUES (?, ?, ?, ?, ?)`,
+		"job-2", "test-repo", "github.com/test/repo", now, "running")
+	testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"job-3", "test-repo", "github.com/test/repo", now, now.Add(2*time.Minute), "failed", "some error")
 
 	tests := []struct {
 		name           string
@@ -98,6 +99,10 @@ func TestGetJobs(t *testing.T) {
 				assert.Equal(t, 1, response.Data.Page)
 				assert.Equal(t, 20, response.Data.Limit)
 				assert.Len(t, response.Data.Jobs, 3)
+				// URL 解析：repo_key 命中配置条目 → url 被填上（三行同键，全部命中）
+				for _, j := range response.Data.Jobs {
+					assert.Equal(t, "github.com/test/repo", j.URL)
+				}
 			},
 		},
 		{
@@ -204,6 +209,22 @@ func TestGetJobs(t *testing.T) {
 				assert.Len(t, response.Data.Jobs, 0)
 			},
 		},
+		{
+			name:           "filter by full URL with scheme and trailing slash",
+			queryParams:    "?repository=" + url.QueryEscape("https://github.com/test/repo/"),
+			expectedStatus: 200,
+			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
+				var response struct {
+					Code    int `json:"code"`
+					Data    struct {
+						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
+						Total int64                               `json:"total"`
+					} `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+				assert.Equal(t, int64(3), response.Data.Total, "normalized URL must match repo_key despite scheme/slash")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -243,7 +264,7 @@ func TestCreateJob(t *testing.T) {
 	// Test invalid repository - this doesn't execute actual jobs
 	t.Run("invalid_repository", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]string{
-			"repository": "non-existent-repo",
+			"repository_key": "github.com/nope/repo",
 		})
 		req, _ := http.NewRequest("POST", "/api/jobs", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -280,6 +301,30 @@ func TestCreateJob(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 400, response.Code)
 		assert.Contains(t, response.Message, "Invalid request")
+	})
+
+	t.Run("valid_repository_key", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{
+			"repository_key": "https://github.com/test/repo",
+		})
+		req, _ := http.NewRequest("POST", "/api/jobs", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+
+		assert.Equal(t, 200, resp.Code)
+		var response struct {
+			Code int `json:"code"`
+			Data struct {
+				JobIDs []string `json:"job_ids"`
+				Status string   `json:"status"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		assert.Equal(t, 200, response.Code)
+		require.Len(t, response.Data.JobIDs, 1)
+		assert.NotEmpty(t, response.Data.JobIDs[0])
+		assert.Equal(t, "running", response.Data.Status)
 	})
 }
 

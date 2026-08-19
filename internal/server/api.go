@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,26 +38,15 @@ func (a *API) CreateJob(c *gin.Context) {
 		return
 	}
 
-	// Validate repository exists
-	var found bool
-	for _, repo := range a.config.Repository {
-		if repo.Name == req.Repository {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		c.JSON(http.StatusNotFound, Response{
-			Code:    404,
-			Message: "Repository not found in configuration",
-		})
-		return
-	}
-
-	// Execute job
-	jobID, err := a.executor.ExecuteJob(req.Repository)
+	jobIDs, err := a.executor.ExecuteJob(req.RepositoryKey)
 	if err != nil {
+		if errors.Is(err, executor.ErrRepositoryNotFound) {
+			c.JSON(http.StatusNotFound, Response{
+				Code:    404,
+				Message: "Repository not found in configuration",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
 			Message: "Failed to execute job: " + err.Error(),
@@ -67,7 +57,7 @@ func (a *API) CreateJob(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{
 		Code: 200,
 		Data: CreateJobResponse{
-			JobID:  jobID,
+			JobIDs: jobIDs,
 			Status: string(executor.StatusRunning),
 		},
 	})
@@ -117,25 +107,25 @@ func (a *API) GetJobs(c *gin.Context) {
 		limit = 20
 	}
 
+	const jobSelect = "SELECT id, job_name, repo_key, start_time, end_time, status, error_message FROM executions"
+
 	// Build query
-	query := "SELECT id, job_name, start_time, end_time, status, error_message FROM executions WHERE 1=1"
+	query := jobSelect + " WHERE 1=1"
 	args := []interface{}{}
-	argPos := 1
 
 	if status != "" && status != "all" {
 		query += " AND status = ?"
 		args = append(args, status)
-		argPos++
 	}
 
 	if repository != "" {
-		query += " AND job_name LIKE ? ESCAPE '\\'"
-		args = append(args, "%"+escapeLike(repository)+"%")
-		argPos++
+		// name 模糊匹配原始输入；URL 搜索词先规范化，命中规范化后的 repo_key。
+		query += " AND (job_name LIKE ? ESCAPE '\\' OR repo_key LIKE ? ESCAPE '\\')"
+		args = append(args, "%"+escapeLike(repository)+"%", "%"+escapeLike(typedef.NormalizeURL(repository))+"%")
 	}
 
 	// Get total count
-	countQuery := "SELECT COUNT(*) FROM executions" + query[len("SELECT id, job_name, start_time, end_time, status, error_message FROM executions"):]
+	countQuery := "SELECT COUNT(*) FROM executions" + query[len(jobSelect):]
 	var total int64
 	err := a.db.QueryRow(countQuery, args...).Scan(&total)
 	if err != nil {
@@ -167,7 +157,8 @@ func (a *API) GetJobs(c *gin.Context) {
 		var endTime *time.Time
 		var errorMessage *string
 
-		err := rows.Scan(&job.ID, &job.Name, &startTime, &endTime, &job.Status, &errorMessage)
+		var repoKey string
+		err := rows.Scan(&job.ID, &job.Name, &repoKey, &startTime, &endTime, &job.Status, &errorMessage)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, Response{
 				Code:    500,
@@ -182,9 +173,10 @@ func (a *API) GetJobs(c *gin.Context) {
 			job.ErrorMessage = *errorMessage
 		}
 
-		// Get repository URL from config
+		// Resolve URL from config by identity key; unmatched (renamed/deleted/old
+		// empty-key rows) keeps the job_name snapshot and empty URL.
 		for _, repo := range a.config.Repository {
-			if repo.Name == job.Name {
+			if repo.Matches(repoKey) {
 				job.URL = repo.URL
 				break
 			}
