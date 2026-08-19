@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
 // writeTmpConfig points the package global at a temp config file and loads it,
@@ -123,4 +124,22 @@ func TestSaveStorageRoundTripKeepsFlatFields(t *testing.T) {
 	require.Equal(t, "localFile", GetIns().Storage[0].Name)
 	require.Equal(t, "file", GetIns().Storage[0].Type)
 	require.Equal(t, "/app/repo", GetIns().Storage[0].Path)
+}
+
+func TestValidateIdentity(t *testing.T) {
+	// 非 user/org 且无 URL → 校验拒绝。
+	err := validateIdentity(&Config{Repository: []typedef.Repository{
+		{Name: "orphan", Type: typedef.TypeRepo},
+	}})
+	require.Error(t, err)
+
+	// user/org 且带 orgName → 通过；合成 URL 即为身份。
+	acme := Config{Repository: []typedef.Repository{
+		{Name: "acme", Type: typedef.TypeOrg, OrgName: "acme"},
+	}}
+	require.NoError(t, validateIdentity(&acme))
+	require.Equal(t, "https://github.com/acme", acme.Repository[0].EffectiveURL())
+
+	// 空仓库列表 → 通过。
+	require.NoError(t, validateIdentity(&Config{}))
 }

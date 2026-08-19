@@ -57,6 +57,11 @@ func Init() {
 	if ins.ReleaseSizeLimit == 0 {
 		ins.ReleaseSizeLimit = 300000000
 	}
+	// 启动校验：每个仓库条目都必须有可用身份。身份键为空意味着永远无法被
+	// 匹配或执行，直接拒绝启动。
+	if err := validateIdentity(ins); err != nil {
+		ui.ErrorfExit("Invalid configuration: %s", err)
+	}
 }
 
 func GetIns() *Config {
@@ -122,6 +127,21 @@ func GetRetryConfig() retry.Config {
 		MaxRetries: GetRetryMaxCount(),
 		BaseDelay:  GetRetryBaseDelay(),
 	}
+}
+
+// validateIdentity ensures every repository entry has a usable identity (a
+// non-empty URL, or orgName for user/org types). The repository identity is the
+// normalized URL; an entry without one can never be matched or executed.
+// Returns an error rather than exiting so it is unit-testable; Init surfaces
+// it via ui.ErrorfExit.
+func validateIdentity(cfg *Config) error {
+	for _, repo := range cfg.Repository {
+		if repo.Key() == "" {
+			return fmt.Errorf("repository %q (type %q) has an empty URL and no orgName; every repository needs a URL identity",
+				repo.Name, repo.GetType())
+		}
+	}
+	return nil
 }
 
 // Save persists the current in-memory config back to the config file via viper.
