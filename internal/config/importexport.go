@@ -145,3 +145,85 @@ func Reload() error {
 	ins = &next
 	return nil
 }
+
+// seedExportDefaults fills zero-valued global options in an imported document
+// with the same defaults Init applies (see seedDefaults), so an import that
+// omits them behaves identically to a config file that omits them.
+func seedExportDefaults(doc *ExportConfig) {
+	if doc.RetryMaxCount <= 0 {
+		doc.RetryMaxCount = 3
+	}
+	if time.Duration(doc.RetryBaseDelay) <= 0 {
+		doc.RetryBaseDelay = DurationString(5 * time.Second)
+	}
+	if doc.ConcurrencyNum == 0 {
+		doc.ConcurrencyNum = 3
+	}
+	if doc.ReleaseNumLimit == 0 {
+		doc.ReleaseNumLimit = 3
+	}
+	if doc.ReleaseSizeLimit == 0 {
+		doc.ReleaseSizeLimit = 300000000
+	}
+	// The server section is never hot-applied, but an absent/partial section
+	// must not force empty host/port/dbPath onto the config on apply.
+	if doc.Server.Host == "" {
+		doc.Server.Host = "0.0.0.0"
+	}
+	if doc.Server.Port == "" {
+		doc.Server.Port = "8080"
+	}
+	if doc.Server.DbPath == "" {
+		doc.Server.DbPath = "gitrieve.db"
+	}
+}
+
+// ParseImport parses an imported YAML config document into its typed form. It
+// seeds defaults for unset global options (mirroring Init), applies server
+// defaults for a missing/partial server section, and synthesizes concrete URLs
+// for user/org entries so their identity keys resolve. It does not validate
+// identities — ValidateImport collects every violation for the caller.
+func ParseImport(yamlStr string) (*ExportConfig, error) {
+	var doc ExportConfig
+	if err := yaml.Unmarshal([]byte(yamlStr), &doc); err != nil {
+		return nil, fmt.Errorf("invalid YAML: %w", err)
+	}
+	for i := range doc.Repository {
+		doc.Repository[i].URL = doc.Repository[i].EffectiveURL()
+	}
+	seedExportDefaults(&doc)
+	return &doc, nil
+}
+
+// ValidateImport checks an imported document for the rules that apply before
+// any import: every repository needs a usable identity (non-empty URL or
+// orgName), no two imported repositories share a normalized URL, and storage
+// names are non-empty and unique. Returns every violation so the caller can
+// surface them all at once.
+func ValidateImport(doc *ExportConfig) []string {
+	var errs []string
+	seen := map[string]string{}
+	for _, repo := range doc.Repository {
+		if repo.Key() == "" {
+			errs = append(errs, fmt.Sprintf("repository %q (type %q) has an empty URL and no orgName", repo.Name, repo.GetType()))
+			continue
+		}
+		if prev, ok := seen[repo.Key()]; ok {
+			errs = append(errs, fmt.Sprintf("repository %q duplicates URL %q of repository %q", repo.Name, repo.Key(), prev))
+		} else {
+			seen[repo.Key()] = repo.Name
+		}
+	}
+	seenStorage := map[string]bool{}
+	for _, st := range doc.Storage {
+		if st.Name == "" {
+			errs = append(errs, "storage entry has an empty name")
+			continue
+		}
+		if seenStorage[st.Name] {
+			errs = append(errs, fmt.Sprintf("storage %q is duplicated", st.Name))
+		}
+		seenStorage[st.Name] = true
+	}
+	return errs
+}
