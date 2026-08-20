@@ -80,3 +80,96 @@ type ListRepositoriesResponse struct {
 	Page         int                  `json:"page"`
 	Limit        int                  `json:"limit"`
 }
+
+type ImportPreviewRequest struct {
+	Config string `json:"config"`
+}
+
+type FieldChange struct {
+	Field    string      `json:"field"`
+	Existing interface{} `json:"existing"`
+	Imported interface{} `json:"imported"`
+}
+
+type RepoEntry struct {
+	Key     string        `json:"key"`
+	Name    string        `json:"name"`
+	URL     string        `json:"url"`
+	Changes []FieldChange `json:"changes,omitempty"`
+}
+
+type StorageEntry struct {
+	Name    string        `json:"name"`
+	Type    string        `json:"type,omitempty"`
+	Changes []FieldChange `json:"changes,omitempty"`
+}
+
+type RepoDiff struct {
+	Added    []RepoEntry `json:"added"`
+	Deleted  []RepoEntry `json:"deleted"`
+	Modified []RepoEntry `json:"modified"`
+}
+
+type StorageDiff struct {
+	Added    []StorageEntry `json:"added"`
+	Deleted  []StorageEntry `json:"deleted"`
+	Modified []StorageEntry `json:"modified"`
+}
+
+type CountSummary struct {
+	Added    int `json:"added"`
+	Deleted  int `json:"deleted"`
+	Modified int `json:"modified"`
+}
+
+type ChangedCount struct {
+	Changed int `json:"changed"`
+}
+
+type ImportSummary struct {
+	Repositories CountSummary `json:"repositories"`
+	Storages     CountSummary `json:"storages"`
+	Globals      ChangedCount `json:"globals"`
+	Server       ChangedCount `json:"server"`
+}
+
+type ImportPreviewData struct {
+	Summary      ImportSummary `json:"summary"`
+	Repositories RepoDiff      `json:"repositories"`
+	Storages     StorageDiff   `json:"storages"`
+	Globals      []FieldChange `json:"globals"`
+	Server       []FieldChange `json:"server"`
+	Warnings     []string      `json:"warnings"`
+}
+
+type ImportErrorData struct {
+	Errors []string `json:"errors"`
+}
+
+// ImportChoices selects, per entry, whether the imported or the existing value
+// wins on apply. Entries without a choice use the documented defaults
+// (added/modified/globals/server -> imported, deleted -> keep).
+type ImportChoices struct {
+	RepositoryDeletions []string          `json:"repository_deletions"`
+	RepositoryChoices   map[string]string `json:"repository_choices"`
+	StorageDeletions    []string          `json:"storage_deletions"`
+	StorageChoices      map[string]string `json:"storage_choices"`
+	GlobalChoices       map[string]string `json:"global_choices"`
+	ServerChoices       map[string]string `json:"server_choices"`
+}
+
+type ImportRequest struct {
+	Config  string        `json:"config"`
+	Choices ImportChoices `json:"choices"`
+}
+
+type ImportResult struct {
+	RepositoriesAdded   int `json:"repositories_added"`
+	RepositoriesUpdated int `json:"repositories_updated"`
+	RepositoriesDeleted int `json:"repositories_deleted"`
+	StoragesAdded       int `json:"storages_added"`
+	StoragesUpdated     int `json:"storages_updated"`
+	StoragesDeleted     int `json:"storages_deleted"`
+	GlobalsUpdated      int `json:"globals_updated"`
+	ServerUpdated       int `json:"server_updated"`
+}

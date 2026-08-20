@@ -106,6 +106,10 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	apiGroup.POST("/api/storage", api.CreateStorage)
 	apiGroup.PUT("/api/storage/:id", api.UpdateStorage)
 	apiGroup.DELETE("/api/storage/:id", api.DeleteStorage)
+	apiGroup.GET("/api/config/export", api.ExportConfig)
+	apiGroup.POST("/api/config/import/preview", api.PreviewImport)
+	apiGroup.POST("/api/config/import", api.ApplyImport)
+	apiGroup.POST("/api/config/reload", api.ReloadConfig)
 	apiGroup.GET("/api/metrics", monitor.GetMetrics)
 }
 
