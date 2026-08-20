@@ -80,3 +80,68 @@ type ListRepositoriesResponse struct {
 	Page         int                  `json:"page"`
 	Limit        int                  `json:"limit"`
 }
+
+type ImportPreviewRequest struct {
+	Config string `json:"config"`
+}
+
+type FieldChange struct {
+	Field    string      `json:"field"`
+	Existing interface{} `json:"existing"`
+	Imported interface{} `json:"imported"`
+}
+
+type RepoEntry struct {
+	Key     string        `json:"key"`
+	Name    string        `json:"name"`
+	URL     string        `json:"url"`
+	Changes []FieldChange `json:"changes,omitempty"`
+}
+
+type StorageEntry struct {
+	Name    string        `json:"name"`
+	Type    string        `json:"type,omitempty"`
+	Changes []FieldChange `json:"changes,omitempty"`
+}
+
+type RepoDiff struct {
+	Added    []RepoEntry `json:"added"`
+	Deleted  []RepoEntry `json:"deleted"`
+	Modified []RepoEntry `json:"modified"`
+}
+
+type StorageDiff struct {
+	Added    []StorageEntry `json:"added"`
+	Deleted  []StorageEntry `json:"deleted"`
+	Modified []StorageEntry `json:"modified"`
+}
+
+type CountSummary struct {
+	Added    int `json:"added"`
+	Deleted  int `json:"deleted"`
+	Modified int `json:"modified"`
+}
+
+type ChangedCount struct {
+	Changed int `json:"changed"`
+}
+
+type ImportSummary struct {
+	Repositories CountSummary `json:"repositories"`
+	Storages     CountSummary `json:"storages"`
+	Globals      ChangedCount `json:"globals"`
+	Server       ChangedCount `json:"server"`
+}
+
+type ImportPreviewData struct {
+	Summary      ImportSummary `json:"summary"`
+	Repositories RepoDiff      `json:"repositories"`
+	Storages     StorageDiff   `json:"storages"`
+	Globals      []FieldChange `json:"globals"`
+	Server       []FieldChange `json:"server"`
+	Warnings     []string      `json:"warnings"`
+}
+
+type ImportErrorData struct {
+	Errors []string `json:"errors"`
+}

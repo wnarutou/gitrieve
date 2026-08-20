@@ -20,10 +20,20 @@ import (
 // TestServer wraps a gin.Engine for testing.
 type TestServer struct {
 	router *gin.Engine
+	api    *API
 }
 
 func (s *TestServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
+}
+
+// Cfg returns the config instance the API currently holds. Used by the
+// config-reload tests to observe the in-memory config after a reload.
+func (s *TestServer) Cfg() *config.Config {
+	if s.api == nil {
+		return nil
+	}
+	return s.api.config
 }
 
 // newTestConfig returns the default config used by the test servers.
@@ -94,5 +104,18 @@ func NewStorageTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
 	s.router.POST("/api/storage", api.CreateStorage)
 	s.router.PUT("/api/storage/:id", api.UpdateStorage)
 	s.router.DELETE("/api/storage/:id", api.DeleteStorage)
+	return s
+}
+
+// NewConfigTestServer creates a test server with the config export + preview
+// routes registered, using a fresh executor backed by testDB. Task 4 adds the
+// apply + reload routes to the same constructor.
+func NewConfigTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
+	log := logger.NewLogger(testDB)
+	exec := executor.NewExecutor(log, testDB, cfg)
+	api := NewAPI(cfg, testDB, exec)
+	s := &TestServer{router: gin.Default(), api: api}
+	s.router.GET("/api/config/export", api.ExportConfig)
+	s.router.POST("/api/config/import/preview", api.PreviewImport)
 	return s
 }
