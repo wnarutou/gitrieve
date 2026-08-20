@@ -145,3 +145,31 @@ type ImportPreviewData struct {
 type ImportErrorData struct {
 	Errors []string `json:"errors"`
 }
+
+// ImportChoices selects, per entry, whether the imported or the existing value
+// wins on apply. Entries without a choice use the documented defaults
+// (added/modified/globals/server -> imported, deleted -> keep).
+type ImportChoices struct {
+	RepositoryDeletions []string          `json:"repository_deletions"`
+	RepositoryChoices   map[string]string `json:"repository_choices"`
+	StorageDeletions    []string          `json:"storage_deletions"`
+	StorageChoices      map[string]string `json:"storage_choices"`
+	GlobalChoices       map[string]string `json:"global_choices"`
+	ServerChoices       map[string]string `json:"server_choices"`
+}
+
+type ImportRequest struct {
+	Config  string        `json:"config"`
+	Choices ImportChoices `json:"choices"`
+}
+
+type ImportResult struct {
+	RepositoriesAdded   int `json:"repositories_added"`
+	RepositoriesUpdated int `json:"repositories_updated"`
+	RepositoriesDeleted int `json:"repositories_deleted"`
+	StoragesAdded       int `json:"storages_added"`
+	StoragesUpdated     int `json:"storages_updated"`
+	StoragesDeleted     int `json:"storages_deleted"`
+	GlobalsUpdated      int `json:"globals_updated"`
+	ServerUpdated       int `json:"server_updated"`
+}

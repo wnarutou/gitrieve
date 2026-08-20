@@ -304,3 +304,207 @@ func (a *API) PreviewImport(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, Response{Code: 200, Data: data})
 }
+
+// ApplyImport applies a previously-previewed import. Choices select, per entry,
+// whether the imported or the existing value wins; entries without a choice use
+// the documented defaults (added/modified/globals/server -> imported, deleted ->
+// keep). Mutates a.config in memory, then persists via config.Save(); the
+// server section is written to viper (never hot-applied).
+func (a *API) ApplyImport(c *gin.Context) {
+	var req ImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid request: " + err.Error()})
+		return
+	}
+	doc, err := config.ParseImport(req.Config)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: err.Error()})
+		return
+	}
+	if errs := config.ValidateImport(doc); len(errs) > 0 {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "导入配置无效", Data: ImportErrorData{Errors: errs}})
+		return
+	}
+
+	result := a.applyImport(doc, &req)
+
+	msg := ""
+	if err := config.Save(); err != nil {
+		msg = "配置已应用（内存）但未能持久化: " + err.Error()
+	}
+	c.JSON(http.StatusOK, Response{Code: 200, Data: result, Message: msg})
+}
+
+func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportResult {
+	var result ImportResult
+	choice := func(m map[string]string, key string, def string) string {
+		if v, ok := m[key]; ok {
+			return v
+		}
+		return def
+	}
+
+	// Recompute the classification so choices apply only to the classes the
+	// user actually saw in the preview (modified / deleted).
+	repoDiff := diffRepositories(a.config.Repository, doc.Repository)
+	modifiedRepos := map[string]bool{}
+	deletedRepos := map[string]bool{}
+	for _, e := range repoDiff.Modified {
+		modifiedRepos[e.Key] = true
+	}
+	for _, e := range repoDiff.Deleted {
+		deletedRepos[e.Key] = true
+	}
+	stDiff := diffStorages(a.config.Storage, doc.Storage)
+	modifiedStorages := map[string]bool{}
+	deletedStorages := map[string]bool{}
+	for _, e := range stDiff.Modified {
+		modifiedStorages[e.Name] = true
+	}
+	for _, e := range stDiff.Deleted {
+		deletedStorages[e.Name] = true
+	}
+
+	deleteRepo := map[string]bool{}
+	for _, k := range req.Choices.RepositoryDeletions {
+		deleteRepo[k] = true
+	}
+	deleteStorage := map[string]bool{}
+	for _, n := range req.Choices.StorageDeletions {
+		deleteStorage[n] = true
+	}
+
+	// ---- repositories: drop deleted, then merge imported ----
+	kept := make([]typedef.Repository, 0, len(a.config.Repository))
+	for _, r := range a.config.Repository {
+		if deletedRepos[r.Key()] && deleteRepo[r.Key()] {
+			result.RepositoriesDeleted++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	idxByKey := map[string]int{}
+	for i, r := range kept {
+		if r.Key() != "" {
+			idxByKey[r.Key()] = i
+		}
+	}
+	for _, imp := range doc.Repository {
+		imp.URL = imp.EffectiveURL() // 用户/组织条目以合成 URL 落库，保证身份
+		i, ok := idxByKey[imp.Key()]
+		if !ok {
+			kept = append(kept, imp)
+			idxByKey[imp.Key()] = len(kept) - 1
+			result.RepositoriesAdded++
+			continue
+		}
+		if !modifiedRepos[imp.Key()] {
+			continue // unchanged: existing wins silently
+		}
+		if choice(req.Choices.RepositoryChoices, imp.Key(), "imported") == "imported" {
+			kept[i] = imp
+			result.RepositoriesUpdated++
+		}
+	}
+	a.config.Repository = kept
+
+	// ---- storages: same pattern by name ----
+	keptSt := make([]typedef.MultiStorage, 0, len(a.config.Storage))
+	for _, st := range a.config.Storage {
+		if deletedStorages[st.Name] && deleteStorage[st.Name] {
+			result.StoragesDeleted++
+			continue
+		}
+		keptSt = append(keptSt, st)
+	}
+	idxByName := map[string]int{}
+	for i, st := range keptSt {
+		idxByName[st.Name] = i
+	}
+	for _, imp := range doc.Storage {
+		i, ok := idxByName[imp.Name]
+		if !ok {
+			keptSt = append(keptSt, imp)
+			idxByName[imp.Name] = len(keptSt) - 1
+			result.StoragesAdded++
+			continue
+		}
+		if !modifiedStorages[imp.Name] {
+			continue
+		}
+		if choice(req.Choices.StorageChoices, imp.Name, "imported") == "imported" {
+			keptSt[i] = imp
+			result.StoragesUpdated++
+		}
+	}
+	a.config.Storage = keptSt
+
+	// ---- globals ----
+	if choice(req.Choices.GlobalChoices, "githubToken", "imported") == "imported" && a.config.GitHubToken != doc.GitHubToken {
+		a.config.GitHubToken = doc.GitHubToken
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "cocurrencyNum", "imported") == "imported" && a.config.ConcurrencyNum != doc.ConcurrencyNum {
+		a.config.ConcurrencyNum = doc.ConcurrencyNum
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "releaseSizeLimit", "imported") == "imported" && a.config.ReleaseSizeLimit != doc.ReleaseSizeLimit {
+		a.config.ReleaseSizeLimit = doc.ReleaseSizeLimit
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "releaseNumLimit", "imported") == "imported" && a.config.ReleaseNumLimit != doc.ReleaseNumLimit {
+		a.config.ReleaseNumLimit = doc.ReleaseNumLimit
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "retryMaxCount", "imported") == "imported" && a.config.RetryMaxCount != doc.RetryMaxCount {
+		a.config.RetryMaxCount = doc.RetryMaxCount
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "retryBaseDelay", "imported") == "imported" {
+		d := time.Duration(doc.RetryBaseDelay)
+		if a.config.RetryBaseDelay != d {
+			a.config.RetryBaseDelay = d
+			result.GlobalsUpdated++
+		}
+	}
+
+	// ---- server section: persist chosen fields; never hot-applied ----
+	curServer := config.GetServerSection()
+	if choice(req.Choices.ServerChoices, "host", "imported") == "imported" && curServer.Host != doc.Server.Host {
+		_ = config.SetServerField("host", doc.Server.Host)
+		result.ServerUpdated++
+	}
+	if choice(req.Choices.ServerChoices, "port", "imported") == "imported" && curServer.Port != doc.Server.Port {
+		_ = config.SetServerField("port", doc.Server.Port)
+		result.ServerUpdated++
+	}
+	if choice(req.Choices.ServerChoices, "authEnabled", "imported") == "imported" && curServer.AuthEnabled != doc.Server.AuthEnabled {
+		_ = config.SetServerField("authEnabled", doc.Server.AuthEnabled)
+		result.ServerUpdated++
+	}
+	if choice(req.Choices.ServerChoices, "authToken", "imported") == "imported" && curServer.AuthToken != doc.Server.AuthToken {
+		_ = config.SetServerField("authToken", doc.Server.AuthToken)
+		result.ServerUpdated++
+	}
+	if choice(req.Choices.ServerChoices, "dbPath", "imported") == "imported" && curServer.DbPath != doc.Server.DbPath {
+		_ = config.SetServerField("dbPath", doc.Server.DbPath)
+		result.ServerUpdated++
+	}
+
+	return result
+}
+
+// ReloadConfig re-reads config.yaml from disk and repoints the API and executor
+// at the fresh config instance. The `server:` section is NOT hot-applied (a
+// restart is required); daemon cron schedules are also not rescheduled.
+func (a *API) ReloadConfig(c *gin.Context) {
+	if err := config.Reload(); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
+		return
+	}
+	a.config = config.GetIns()
+	if a.executor != nil {
+		a.executor.RefreshConfig(config.GetIns())
+	}
+	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}})
+}

@@ -55,6 +55,14 @@ func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor
 	}
 }
 
+// RefreshConfig repoints the executor at a new config instance. Called by the
+// server's config-reload endpoint after the config file is re-read; the
+// executor reads e.cfg dynamically on every ExecuteJob, so this is safe to
+// call while jobs are running.
+func (e *Executor) RefreshConfig(cfg *config.Config) {
+	e.cfg = cfg
+}
+
 // ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
 var ErrRepositoryNotFound = errors.New("repository not found in configuration")
 

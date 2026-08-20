@@ -227,3 +227,15 @@ func ValidateImport(doc *ExportConfig) []string {
 	}
 	return errs
 }
+
+// SetServerField persists one `server:` field to the loaded viper instance so
+// an imported server section is written to config.yaml. The running server
+// never re-reads the server section, so this only takes effect after a restart.
+// Returns an error when the config was never initialized.
+func SetServerField(field string, value interface{}) error {
+	if vp == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	vp.Set("server."+field, value)
+	return nil
+}

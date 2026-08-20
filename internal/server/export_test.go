@@ -117,5 +117,7 @@ func NewConfigTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
 	s := &TestServer{router: gin.Default(), api: api}
 	s.router.GET("/api/config/export", api.ExportConfig)
 	s.router.POST("/api/config/import/preview", api.PreviewImport)
+	s.router.POST("/api/config/import", api.ApplyImport)
+	s.router.POST("/api/config/reload", api.ReloadConfig)
 	return s
 }

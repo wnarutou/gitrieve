@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -14,6 +15,11 @@ import (
 	server "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
 
 func getJSON(t *testing.T, s *server.TestServer, method, path, body string) (int, map[string]interface{}) {
 	t.Helper()
@@ -187,4 +193,149 @@ server:
 	// Server section changed -> warning present.
 	warnings := data["warnings"].([]interface{})
 	require.Len(t, warnings, 1)
+}
+
+func TestApplyImportDefaultChoices(t *testing.T) {
+	loadTempConfig(t, "")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "mod-test", URL: "github.com/test/mod", Cron: "@daily"},
+			{Name: "del-test", URL: "github.com/test/del"},
+		},
+		Storage: []typedef.MultiStorage{
+			{Storage: typedef.Storage{Name: "st1", Type: "file", Path: "/tmp/one"}},
+		},
+	}
+	s := server.NewConfigTestServer(cfg, testDB)
+
+	importYAML := `repository:
+  - name: mod-test
+    url: github.com/test/mod
+  - name: add-test
+    url: github.com/test/added
+storage:
+  - name: st1
+    type: file
+    path: /tmp/two
+`
+	body, _ := json.Marshal(map[string]string{"config": importYAML})
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, 200, code)
+	data := resp["data"].(map[string]interface{})
+	require.Equal(t, float64(1), data["repositories_added"])
+	require.Equal(t, float64(1), data["repositories_updated"])
+	require.Equal(t, float64(0), data["repositories_deleted"])
+	require.Equal(t, float64(0), data["storages_added"])
+	require.Equal(t, float64(1), data["storages_updated"])
+	require.Equal(t, float64(0), data["storages_deleted"])
+
+	// Defaults: added+modified applied, deleted kept.
+	repos := s.Cfg().Repository
+	require.Len(t, repos, 3)
+	byName := map[string]typedef.Repository{}
+	for _, r := range repos {
+		byName[r.Name] = r
+	}
+	require.Equal(t, "", byName["mod-test"].Cron) // modified -> imported wins
+	_, delKept := byName["del-test"]
+	require.True(t, delKept) // deleted -> kept
+	_, addApplied := byName["add-test"]
+	require.True(t, addApplied) // added -> imported
+	require.Equal(t, "/tmp/two", s.Cfg().Storage[0].Path)
+}
+
+func TestApplyImportWithChoices(t *testing.T) {
+	loadTempConfig(t, "")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	cfg := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "mod-test", URL: "github.com/test/mod", Cron: "@daily"},
+			{Name: "del-test", URL: "github.com/test/del"},
+		},
+		Storage: []typedef.MultiStorage{
+			{Storage: typedef.Storage{Name: "st1", Type: "file", Path: "/tmp/one"}},
+		},
+	}
+	s := server.NewConfigTestServer(cfg, testDB)
+
+	importYAML := `repository:
+  - name: mod-test
+    url: github.com/test/mod
+  - name: add-test
+    url: github.com/test/added
+storage:
+  - name: st1
+    type: file
+    path: /tmp/two
+`
+	payload := map[string]interface{}{
+		"config": importYAML,
+		"choices": map[string]interface{}{
+			"repository_choices":   map[string]string{"github.com/test/mod": "existing"},
+			"repository_deletions": []string{"github.com/test/del"},
+			"storage_choices":      map[string]string{"st1": "existing"},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, 200, code)
+	data := resp["data"].(map[string]interface{})
+	require.Equal(t, float64(1), data["repositories_added"])
+	require.Equal(t, float64(0), data["repositories_updated"])
+	require.Equal(t, float64(1), data["repositories_deleted"])
+	require.Equal(t, float64(0), data["storages_updated"])
+
+	repos := s.Cfg().Repository
+	require.Len(t, repos, 2)
+	byName := map[string]typedef.Repository{}
+	for _, r := range repos {
+		byName[r.Name] = r
+	}
+	require.Equal(t, "@daily", byName["mod-test"].Cron) // choice "existing" wins
+	_, delGone := byName["del-test"]
+	require.False(t, delGone) // deletion applied
+	_, addApplied := byName["add-test"]
+	require.True(t, addApplied)                           // added always imported
+	require.Equal(t, "/tmp/one", s.Cfg().Storage[0].Path) // choice "existing" wins
+}
+
+func TestReloadConfig(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\n")
+	config.Path = path
+	config.Init()
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+	require.Equal(t, "one", s.Cfg().Repository[0].Name)
+
+	writeFile(t, path, "repository:\n  - name: two\n    url: github.com/two/repo\n")
+	code, _ := getJSON(t, s, http.MethodPost, "/api/config/reload", "")
+	require.Equal(t, 200, code)
+	require.Equal(t, "two", s.Cfg().Repository[0].Name)
+}
+
+func TestReloadConfigKeepsOldOnError(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\n")
+	config.Path = path
+	config.Init()
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+
+	writeFile(t, path, "repository: [broken\n")
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/reload", "")
+	require.Equal(t, 400, code)
+	require.Contains(t, resp["message"].(string), "重载配置失败")
+	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 }
