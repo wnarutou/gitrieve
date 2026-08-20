@@ -16,6 +16,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 	"github.com/wnarutou/gitrieve/internal/wiki"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,7 +37,7 @@ type JobContext struct {
 
 type Executor struct {
 	db          *db.DB
-	cfg         *config.Config
+	cfg         atomic.Pointer[config.Config]
 	runningJobs map[string]*JobContext
 	mu          sync.RWMutex
 }
@@ -48,19 +49,22 @@ func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor
 	if logger != nil {
 		ui.SetSink(logger)
 	}
-	return &Executor{
+	exec := &Executor{
 		db:          db,
-		cfg:         cfg,
 		runningJobs: make(map[string]*JobContext),
 	}
+	exec.cfg.Store(cfg)
+	return exec
 }
 
 // RefreshConfig repoints the executor at a new config instance. Called by the
-// server's config-reload endpoint after the config file is re-read; the
-// executor reads e.cfg dynamically on every ExecuteJob, so this is safe to
-// call while jobs are running.
+// server's config-reload endpoint after the config file is re-read. e.cfg is an
+// atomic pointer: concurrent reads (ExecuteJob's repository lookup and the
+// async executeAsync goroutine's storage lookup) observe either the old or the
+// new config in its entirety, never a torn read, so this is safe to call while
+// jobs are running.
 func (e *Executor) RefreshConfig(cfg *config.Config) {
-	e.cfg = cfg
+	e.cfg.Store(cfg)
 }
 
 // ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
@@ -76,7 +80,7 @@ var expandRepos = repository.Expand
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
 	var repo typedef.Repository
 	found := false
-	for _, r := range e.cfg.Repository {
+	for _, r := range e.cfg.Load().Repository {
 		if r.Matches(repoKey) {
 			repo = r
 			found = true
@@ -158,7 +162,7 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 	// Get storages
 	var storages []typedef.MultiStorage
 	for _, storageName := range job.Storage {
-		for _, s := range e.cfg.Storage {
+		for _, s := range e.cfg.Load().Storage {
 			if s.Name == storageName {
 				storages = append(storages, typedef.MultiStorage{
 					Storage: typedef.Storage{

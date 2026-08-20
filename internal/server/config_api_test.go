@@ -339,3 +339,41 @@ func TestReloadConfigKeepsOldOnError(t *testing.T) {
 	require.Contains(t, resp["message"].(string), "重载配置失败")
 	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 }
+
+// The server section is never hot-applied, but an accepted server choice must
+// persist to config.yaml via SetServerField + Save (the "persist on next
+// restart" contract). This guards the whole chain end to end.
+func TestApplyImportPersistsServerSection(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\n")
+	config.Path = path
+	config.Init()
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+
+	importYAML := `repository:
+  - name: one
+    url: github.com/one/repo
+server:
+  port: "9090"
+`
+	payload := map[string]interface{}{
+		"config": importYAML,
+		"choices": map[string]interface{}{
+			"server_choices": map[string]string{"port": "imported"},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, 200, code)
+	data := resp["data"].(map[string]interface{})
+	require.Equal(t, float64(1), data["server_updated"])
+
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(content), "server:")
+	require.Contains(t, string(content), "9090")
+}

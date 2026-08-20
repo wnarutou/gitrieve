@@ -157,7 +157,7 @@ func TestExecuteJobWritesRepoKey(t *testing.T) {
 
 func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 	exec, testDB := newTestExecutor(t)
-	exec.cfg.Repository = []typedef.Repository{
+	exec.cfg.Load().Repository = []typedef.Repository{
 		{Name: "acme", URL: "https://github.com/acme", Type: typedef.TypeOrg, OrgName: "acme"},
 	}
 
