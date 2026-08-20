@@ -350,6 +350,10 @@ func Reload() error {
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}
+	// Re-point viper at the current Path: Init pinned vp to the path it saw at
+	// startup, and Reload must honor a Path changed since (production keeps it
+	// constant; tests point it at a fresh file per case).
+	vp.SetConfigFile(Path)
 	if err := vp.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -715,7 +719,13 @@ func TestPreviewImportDiff(t *testing.T) {
 		Storage: []typedef.MultiStorage{
 			{Storage: typedef.Storage{Name: "st1", Type: "file", Path: "/tmp/one"}},
 		},
-		GitHubToken: "tok-existing",
+		// Globals already at the seeded defaults except GitHubToken and
+		// RetryBaseDelay, so the globals diff is exactly those two fields.
+		GitHubToken:      "tok-existing",
+		ConcurrencyNum:   3,
+		ReleaseSizeLimit: 300000000,
+		ReleaseNumLimit:  3,
+		RetryMaxCount:    3,
 	}
 	s := server.NewConfigTestServer(cfg, testDB)
 
@@ -747,7 +757,7 @@ server:
 	require.Equal(t, float64(0), storages["added"])
 	require.Equal(t, float64(0), storages["deleted"])
 	require.Equal(t, float64(1), storages["modified"])
-	require.Equal(t, float64(3), summary["globals"].(map[string]interface{})["changed"])
+	require.Equal(t, float64(2), summary["globals"].(map[string]interface{})["changed"])
 	require.Equal(t, float64(1), summary["server"].(map[string]interface{})["changed"])
 
 	repoDiff := data["repositories"].(map[string]interface{})
@@ -790,6 +800,18 @@ server:
 	require.NotNil(t, tokenChange)
 	require.Equal(t, "***", tokenChange["existing"])
 	require.Equal(t, "***", tokenChange["imported"])
+
+	// retryBaseDelay is compared in its string form ("0s" vs "5s"), not as
+	// raw nanoseconds.
+	var delayChange map[string]interface{}
+	for _, g := range globals {
+		if g.(map[string]interface{})["field"] == "retryBaseDelay" {
+			delayChange = g.(map[string]interface{})
+		}
+	}
+	require.NotNil(t, delayChange)
+	require.Equal(t, "0s", delayChange["existing"])
+	require.Equal(t, "5s", delayChange["imported"])
 
 	// Server section changed -> warning present.
 	warnings := data["warnings"].([]interface{})
