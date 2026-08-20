@@ -488,7 +488,7 @@ func TestValidateImport(t *testing.T) {
 	require.Contains(t, errs[0], "orphan")
 
 	// Duplicate normalized URL across entries is rejected.
-	doc, err = ParseImport("repository:\n  - name: a\n    url: github.com/x/y\n  - name: b\n    url: https://X/Y.git\n")
+	doc, err = ParseImport("repository:\n  - name: a\n    url: github.com/x/y\n  - name: b\n    url: https://github.com/X/Y.git\n")
 	require.NoError(t, err)
 	errs = ValidateImport(doc)
 	require.Len(t, errs, 1)
