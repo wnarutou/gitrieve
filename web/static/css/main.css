@@ -333,3 +333,28 @@ select:focus, input:focus {
 .toast.error { background: var(--danger); }
 
 .toast.hidden { display: none; }
+
+/* Config tab */
+.hidden { display: none !important; }
+.panel-pad { padding: 16px; }
+.panel-pad h3 { margin: 0 0 10px; }
+.config-textarea {
+    width: 100%;
+    min-height: 220px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    background: var(--panel);
+    resize: vertical;
+    box-sizing: border-box;
+}
+.diff-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.diff-chip { cursor: pointer; }
+.diff-chip:hover { background: #f3f4f6; }
+.diff-section { margin: 10px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.diff-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.diff-header strong { flex: 1; }
+.radio { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; font-size: 13px; color: var(--muted); }
+.alert.warn { padding: 10px 12px; border-radius: 8px; background: #fef3c7; color: #92400e; margin-bottom: 12px; }

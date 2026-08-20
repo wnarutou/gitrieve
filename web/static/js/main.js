@@ -40,7 +40,9 @@ async function api(path, opts) {
     let body = null;
     try { body = await resp.json(); } catch (e) { /* ignore */ }
     if (!resp.ok || (body && typeof body.code === 'number' && body.code >= 400)) {
-        throw new Error((body && body.message) || ('HTTP ' + resp.status));
+        const err = new Error((body && body.message) || ('HTTP ' + resp.status));
+        if (body && body.data && Array.isArray(body.data.errors)) err.errors = body.data.errors;
+        throw err;
     }
     return body ? body.data : null;
 }
@@ -95,6 +97,7 @@ function renderApp() {
     setActiveNav(route);
     if (route === 'repositories') renderRepositories();
     else if (route === 'storage') renderStorage();
+    else if (route === 'config') renderConfig();
     else renderJobs();
 }
 
@@ -588,6 +591,292 @@ async function renderStorage() {
         if (s) openStorageForm(s);
     }));
     $$('.btn-del-storage').forEach(b => b.addEventListener('click', () => deleteStorage(b.dataset.name)));
+}
+
+/* ---------------- Config: export / import / reload ---------------- */
+
+async function renderConfig() {
+    $('#app').innerHTML = `
+        <div class="page-header"><h2>Configuration</h2></div>
+        <div class="panel"><div class="panel-pad">
+            <h3>导出配置</h3>
+            <textarea id="config-export" class="config-textarea" readonly placeholder="点击“刷新”加载当前配置…"></textarea>
+            <div class="toolbar-group" style="margin-top:8px;">
+                <button id="btn-config-copy" class="btn btn-sm">复制</button>
+                <button id="btn-config-download" class="btn btn-sm">下载 config.yaml</button>
+                <button id="btn-config-export-refresh" class="btn btn-sm">刷新</button>
+            </div>
+        </div></div>
+        <div class="panel"><div class="panel-pad">
+            <h3>导入配置（合并）</h3>
+            <textarea id="config-import" class="config-textarea" placeholder="粘贴 config.yaml 内容，或选择文件…"></textarea>
+            <div class="toolbar-group" style="margin-top:8px;">
+                <button id="btn-config-file" class="btn btn-sm">选择文件</button>
+                <input type="file" id="config-file" accept=".yaml,.yml,.txt" hidden>
+                <button id="btn-config-preview" class="btn btn-sm btn-primary">预览差异</button>
+            </div>
+            <div id="config-preview"></div>
+        </div></div>
+        <div class="panel"><div class="panel-pad">
+            <h3>配置操作</h3>
+            <button id="btn-config-reload" class="btn">刷新配置（从磁盘重载 config.yaml）</button>
+            <p class="muted" style="margin-top:8px;">server 段（host/port/authEnabled/dbPath）改动需重启 server 生效；daemon 排程需重启 daemon。修改 authEnabled/authToken 后若忘记令牌，可能无法访问本界面。</p>
+        </div></div>`;
+
+    loadExport();
+    $('#btn-config-copy').addEventListener('click', copyExport);
+    $('#btn-config-download').addEventListener('click', downloadExport);
+    $('#btn-config-export-refresh').addEventListener('click', loadExport);
+    $('#btn-config-file').addEventListener('click', () => $('#config-file').click());
+    $('#config-file').addEventListener('change', (ev) => {
+        const f = ev.target.files[0];
+        if (!f) return;
+        const reader = new FileReader();
+        reader.onload = () => { $('#config-import').value = reader.result; };
+        reader.readAsText(f);
+    });
+    $('#btn-config-preview').addEventListener('click', previewImport);
+    $('#btn-config-reload').addEventListener('click', reloadConfig);
+}
+
+async function loadExport() {
+    try {
+        const data = await api('/api/config/export');
+        $('#config-export').value = (data && data.yaml) || '';
+    } catch (e) {
+        toast('导出配置失败: ' + e.message, true);
+    }
+}
+
+function copyExport() {
+    const text = $('#config-export').value;
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(
+        () => toast('配置已复制'),
+        () => toast('复制失败', true));
+}
+
+function downloadExport() {
+    const text = $('#config-export').value;
+    if (!text) return;
+    const blob = new Blob([text], { type: 'text/yaml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'config.yaml';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+async function previewImport() {
+    const config = $('#config-import').value.trim();
+    if (!config) { toast('请粘贴或选择配置内容', true); return; }
+    try {
+        const data = await api('/api/config/import/preview', { method: 'POST', body: JSON.stringify({ config }) });
+        renderPreview(data);
+    } catch (e) {
+        if (e.errors && e.errors.length) toast('导入配置无效：' + e.errors.join('；'), true);
+        else toast(e.message, true);
+        $('#config-preview').innerHTML = '';
+    }
+}
+
+function fmt(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Array.isArray(v)) return v.join(', ') || '(空)';
+    return String(v);
+}
+
+function entryLabel(e) {
+    return '<strong>' + esc(e.name) + '</strong>' +
+        (e.url ? ' <span class="muted">' + esc(e.url) + '</span>' : '');
+}
+
+function changeCell(changes) {
+    if (!changes || !changes.length) return '<span class="muted">—</span>';
+    return changes.map(c => `<code>${esc(c.field)}</code>: ${esc(fmt(c.existing))} → ${esc(fmt(c.imported))}`).join('<br>');
+}
+
+function chip(key, label, n) {
+    if (!n) return '';
+    return `<button type="button" class="btn btn-sm diff-chip" data-diff="${key}">${label} ${n}</button>`;
+}
+
+function renderPreview(data) {
+    const p = $('#config-preview');
+    const s = data.summary || {};
+    const warns = (data.warnings || []).map(w => `<div class="alert warn">${esc(w)}</div>`).join('');
+    const r = s.repositories || {}, st = s.storages || {}, g = s.globals || {}, sv = s.server || {};
+
+    p.innerHTML = warns + `
+        <div class="diff-summary">
+            ${chip('repos-added', '仓库 新增', r.added)}
+            ${chip('repos-deleted', '仓库 删除', r.deleted)}
+            ${chip('repos-modified', '仓库 修改', r.modified)}
+            ${chip('storages-added', '存储 新增', st.added)}
+            ${chip('storages-deleted', '存储 删除', st.deleted)}
+            ${chip('storages-modified', '存储 修改', st.modified)}
+            ${chip('globals', '全局项 变更', g.changed)}
+            ${chip('server', 'server 段 变更', sv.changed)}
+        </div>
+        <div id="diff-repos-added" class="diff-section hidden"></div>
+        <div id="diff-repos-deleted" class="diff-section hidden"></div>
+        <div id="diff-repos-modified" class="diff-section hidden"></div>
+        <div id="diff-storages-added" class="diff-section hidden"></div>
+        <div id="diff-storages-deleted" class="diff-section hidden"></div>
+        <div id="diff-storages-modified" class="diff-section hidden"></div>
+        <div id="diff-globals" class="diff-section hidden"></div>
+        <div id="diff-server" class="diff-section hidden"></div>
+        <div class="toolbar-group" style="margin-top:12px;">
+            <button id="btn-config-apply" class="btn btn-primary">应用导入</button>
+        </div>`;
+
+    renderAdded('#diff-repos-added', data.repositories.added);
+    renderDeleted('#diff-repos-deleted', data.repositories.deleted, 'repo');
+    renderModified('#diff-repos-modified', data.repositories.modified, 'repo');
+    renderAdded('#diff-storages-added', data.storages.added);
+    renderDeleted('#diff-storages-deleted', data.storages.deleted, 'storage');
+    renderModified('#diff-storages-modified', data.storages.modified, 'storage');
+    renderFieldChoices('#diff-globals', data.globals, 'global', '全局项');
+    renderFieldChoices('#diff-server', data.server, 'server', 'server 段');
+
+    $$('.diff-chip').forEach(ch => ch.addEventListener('click', () => {
+        const sec = $('#diff-' + ch.dataset.diff);
+        if (sec) sec.classList.toggle('hidden');
+    }));
+    $('#btn-config-apply').addEventListener('click', applyImport);
+}
+
+function renderAdded(sel, entries) {
+    const box = $(sel);
+    if (!entries || !entries.length) return;
+    box.innerHTML = `<div class="diff-header"><strong>新增（${entries.length}，将采用导入）</strong></div>
+        <div class="table-wrap"><table class="table"><tbody>
+        ${entries.map(e => `<tr><td>${entryLabel(e)}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    box.classList.remove('hidden');
+}
+
+function renderDeleted(sel, entries, kind) {
+    const box = $(sel);
+    if (!entries || !entries.length) return;
+    const rows = entries.map(e => `
+        <tr data-key="${esc(e.key || e.name)}">
+            <td>${entryLabel(e)}</td>
+            <td class="muted">导入配置中不存在</td>
+            <td>
+                <label class="radio"><input type="radio" name="${kind}-del-${esc(e.key || e.name)}" value="delete"> 删除</label>
+                <label class="radio"><input type="radio" name="${kind}-del-${esc(e.key || e.name)}" value="keep" checked> 保留</label>
+            </td>
+        </tr>`).join('');
+    box.innerHTML = `<div class="diff-header"><strong>删除（${entries.length}，默认保留）</strong>
+        <button type="button" class="btn btn-sm" data-bulk-del="delete">全部删除</button>
+        <button type="button" class="btn btn-sm" data-bulk-del="keep">全部保留</button></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>条目</th><th>说明</th><th>选择</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    box.classList.remove('hidden');
+    $$('[data-bulk-del]', box).forEach(b => b.addEventListener('click', () => {
+        const val = b.dataset.bulkDel;
+        $$('input[type=radio]', box).forEach(r => { r.checked = (r.value === val); });
+    }));
+}
+
+function renderModified(sel, entries, kind) {
+    const box = $(sel);
+    if (!entries || !entries.length) return;
+    const rows = entries.map(e => `
+        <tr data-key="${esc(e.key || e.name)}">
+            <td>${entryLabel(e)}</td>
+            <td>${changeCell(e.changes)}</td>
+            <td>
+                <label class="radio"><input type="radio" name="${kind}-${esc(e.key || e.name)}" value="imported" checked> 采用导入</label>
+                <label class="radio"><input type="radio" name="${kind}-${esc(e.key || e.name)}" value="existing"> 保留现有</label>
+            </td>
+        </tr>`).join('');
+    box.innerHTML = `<div class="diff-header"><strong>修改（${entries.length}，默认采用导入）</strong>
+        <button type="button" class="btn btn-sm" data-bulk="imported">全部采用导入</button>
+        <button type="button" class="btn btn-sm" data-bulk="existing">全部保留</button></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>条目</th><th>差异</th><th>选择</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    box.classList.remove('hidden');
+    $$('[data-bulk]', box).forEach(b => b.addEventListener('click', () => {
+        const val = b.dataset.bulk;
+        $$('input[type=radio]', box).forEach(r => { r.checked = (r.value === val); });
+    }));
+}
+
+function renderFieldChoices(sel, changes, kind, title) {
+    const box = $(sel);
+    if (!changes || !changes.length) return;
+    const rows = changes.map(c => `
+        <tr data-field="${esc(c.field)}">
+            <td><code>${esc(c.field)}</code></td>
+            <td class="muted">${esc(fmt(c.existing))}</td>
+            <td class="muted">${esc(fmt(c.imported))}</td>
+            <td>
+                <label class="radio"><input type="radio" name="${kind}-${esc(c.field)}" value="imported" checked> 采用导入</label>
+                <label class="radio"><input type="radio" name="${kind}-${esc(c.field)}" value="existing"> 保留现有</label>
+            </td>
+        </tr>`).join('');
+    box.innerHTML = `<div class="diff-header"><strong>${title}（变更 ${changes.length}，默认采用导入）</strong></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>现有</th><th>导入</th><th>选择</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    box.classList.remove('hidden');
+}
+
+async function applyImport() {
+    const config = $('#config-import').value.trim();
+    if (!config) return;
+    const choices = {
+        repository_deletions: [],
+        repository_choices: {},
+        storage_deletions: [],
+        storage_choices: {},
+        global_choices: {},
+        server_choices: {}
+    };
+    const collect = (sel, map, deleteArr) => {
+        $$(sel + ' tr[data-key]').forEach(tr => {
+            const input = $$('input[type=radio]:checked', tr)[0];
+            if (!input) return;
+            const key = tr.dataset.key;
+            if (deleteArr && input.value === 'delete') deleteArr.push(key);
+            else if (!deleteArr) map[key] = input.value;
+        });
+    };
+    collect('#diff-repos-modified', choices.repository_choices, null);
+    collect('#diff-repos-deleted', null, choices.repository_deletions);
+    collect('#diff-storages-modified', choices.storage_choices, null);
+    collect('#diff-storages-deleted', null, choices.storage_deletions);
+    $$('#diff-globals tr[data-field]').forEach(tr => {
+        const input = $$('input[type=radio]:checked', tr)[0];
+        if (input) choices.global_choices[tr.dataset.field] = input.value;
+    });
+    $$('#diff-server tr[data-field]').forEach(tr => {
+        const input = $$('input[type=radio]:checked', tr)[0];
+        if (input) choices.server_choices[tr.dataset.field] = input.value;
+    });
+    try {
+        const data = await api('/api/config/import', {
+            method: 'POST',
+            body: JSON.stringify({ config, choices })
+        });
+        const d = data || {};
+        toast('导入完成：仓库 +' + (d.repositories_added || 0) + '/改 ' + (d.repositories_updated || 0) +
+              '/删 ' + (d.repositories_deleted || 0) + '；存储 +' + (d.storages_added || 0) +
+              '/改 ' + (d.storages_updated || 0) + '/删 ' + (d.storages_deleted || 0));
+        renderApp();
+    } catch (e) {
+        if (e.errors && e.errors.length) toast('导入失败：' + e.errors.join('；'), true);
+        else toast('导入失败: ' + e.message, true);
+    }
+}
+
+async function reloadConfig() {
+    try {
+        await api('/api/config/reload', { method: 'POST' });
+        toast('配置已从磁盘重载');
+        renderApp();
+    } catch (e) {
+        toast('重载失败: ' + e.message, true);
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
