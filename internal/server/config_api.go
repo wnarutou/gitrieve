@@ -308,8 +308,9 @@ func (a *API) PreviewImport(c *gin.Context) {
 // ApplyImport applies a previously-previewed import. Choices select, per entry,
 // whether the imported or the existing value wins; entries without a choice use
 // the documented defaults (added/modified/globals/server -> imported, deleted ->
-// keep). Mutates a.config in memory, then persists via config.Save(); the
-// server section is written to viper (never hot-applied).
+// keep). Builds a complete replacement config and publishes it atomically, then
+// persists via config.Save(); the server section is written to viper (never
+// hot-applied).
 func (a *API) ApplyImport(c *gin.Context) {
 	var req ImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -337,6 +338,14 @@ func (a *API) ApplyImport(c *gin.Context) {
 
 func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportResult {
 	var result ImportResult
+	// Build a NEW config instance instead of mutating a.config in place: job
+	// goroutines read a.config / ins / e.cfg.Load() concurrently, and atomic
+	// pointer swaps only protect the pointer, not the contents. A shallow copy
+	// suffices — the merge below reassigns whole slice headers into freshly
+	// built kept/keptSt arrays and writes scalar globals, never mutating shared
+	// backing arrays or nested objects. The new instance is published once it is
+	// fully built (see the publish block before return).
+	next := *a.config
 	choice := func(m map[string]string, key string, def string) string {
 		if v, ok := m[key]; ok {
 			return v
@@ -345,7 +354,8 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	}
 
 	// Recompute the classification so choices apply only to the classes the
-	// user actually saw in the preview (modified / deleted).
+	// user actually saw in the preview (modified / deleted). This reads the
+	// current config before any merge.
 	repoDiff := diffRepositories(a.config.Repository, doc.Repository)
 	modifiedRepos := map[string]bool{}
 	deletedRepos := map[string]bool{}
@@ -375,8 +385,8 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	}
 
 	// ---- repositories: drop deleted, then merge imported ----
-	kept := make([]typedef.Repository, 0, len(a.config.Repository))
-	for _, r := range a.config.Repository {
+	kept := make([]typedef.Repository, 0, len(next.Repository))
+	for _, r := range next.Repository {
 		if deletedRepos[r.Key()] && deleteRepo[r.Key()] {
 			result.RepositoriesDeleted++
 			continue
@@ -406,11 +416,11 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 			result.RepositoriesUpdated++
 		}
 	}
-	a.config.Repository = kept
+	next.Repository = kept
 
 	// ---- storages: same pattern by name ----
-	keptSt := make([]typedef.MultiStorage, 0, len(a.config.Storage))
-	for _, st := range a.config.Storage {
+	keptSt := make([]typedef.MultiStorage, 0, len(next.Storage))
+	for _, st := range next.Storage {
 		if deletedStorages[st.Name] && deleteStorage[st.Name] {
 			result.StoragesDeleted++
 			continue
@@ -437,33 +447,33 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 			result.StoragesUpdated++
 		}
 	}
-	a.config.Storage = keptSt
+	next.Storage = keptSt
 
 	// ---- globals ----
-	if choice(req.Choices.GlobalChoices, "githubToken", "imported") == "imported" && a.config.GitHubToken != doc.GitHubToken {
-		a.config.GitHubToken = doc.GitHubToken
+	if choice(req.Choices.GlobalChoices, "githubToken", "imported") == "imported" && next.GitHubToken != doc.GitHubToken {
+		next.GitHubToken = doc.GitHubToken
 		result.GlobalsUpdated++
 	}
-	if choice(req.Choices.GlobalChoices, "cocurrencyNum", "imported") == "imported" && a.config.ConcurrencyNum != doc.ConcurrencyNum {
-		a.config.ConcurrencyNum = doc.ConcurrencyNum
+	if choice(req.Choices.GlobalChoices, "cocurrencyNum", "imported") == "imported" && next.ConcurrencyNum != doc.ConcurrencyNum {
+		next.ConcurrencyNum = doc.ConcurrencyNum
 		result.GlobalsUpdated++
 	}
-	if choice(req.Choices.GlobalChoices, "releaseSizeLimit", "imported") == "imported" && a.config.ReleaseSizeLimit != doc.ReleaseSizeLimit {
-		a.config.ReleaseSizeLimit = doc.ReleaseSizeLimit
+	if choice(req.Choices.GlobalChoices, "releaseSizeLimit", "imported") == "imported" && next.ReleaseSizeLimit != doc.ReleaseSizeLimit {
+		next.ReleaseSizeLimit = doc.ReleaseSizeLimit
 		result.GlobalsUpdated++
 	}
-	if choice(req.Choices.GlobalChoices, "releaseNumLimit", "imported") == "imported" && a.config.ReleaseNumLimit != doc.ReleaseNumLimit {
-		a.config.ReleaseNumLimit = doc.ReleaseNumLimit
+	if choice(req.Choices.GlobalChoices, "releaseNumLimit", "imported") == "imported" && next.ReleaseNumLimit != doc.ReleaseNumLimit {
+		next.ReleaseNumLimit = doc.ReleaseNumLimit
 		result.GlobalsUpdated++
 	}
-	if choice(req.Choices.GlobalChoices, "retryMaxCount", "imported") == "imported" && a.config.RetryMaxCount != doc.RetryMaxCount {
-		a.config.RetryMaxCount = doc.RetryMaxCount
+	if choice(req.Choices.GlobalChoices, "retryMaxCount", "imported") == "imported" && next.RetryMaxCount != doc.RetryMaxCount {
+		next.RetryMaxCount = doc.RetryMaxCount
 		result.GlobalsUpdated++
 	}
 	if choice(req.Choices.GlobalChoices, "retryBaseDelay", "imported") == "imported" {
 		d := time.Duration(doc.RetryBaseDelay)
-		if a.config.RetryBaseDelay != d {
-			a.config.RetryBaseDelay = d
+		if next.RetryBaseDelay != d {
+			next.RetryBaseDelay = d
 			result.GlobalsUpdated++
 		}
 	}
@@ -489,6 +499,16 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	if choice(req.Choices.ServerChoices, "dbPath", "imported") == "imported" && curServer.DbPath != doc.Server.DbPath {
 		_ = config.SetServerField("dbPath", doc.Server.DbPath)
 		result.ServerUpdated++
+	}
+
+	// Publish the fully-built replacement in one place: repoint the API, the
+	// package-global ins (which config.Save() reads), and the executor's atomic
+	// pointer. Concurrent readers (job goroutines) observe either the complete
+	// old or the complete new instance, never a torn one.
+	a.config = &next
+	config.SetIns(&next)
+	if a.executor != nil {
+		a.executor.RefreshConfig(&next)
 	}
 
 	return result

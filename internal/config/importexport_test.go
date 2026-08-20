@@ -95,6 +95,30 @@ func TestReloadRejectsIdentitylessRepo(t *testing.T) {
 	Path = ""
 }
 
+func TestReloadAfterSave(t *testing.T) {
+	// Apply-style flow: a Save() (which vp.Set()s applied values) must not
+	// poison a later Reload's re-read of a changed file.
+	writeTmpConfig(t, "githubToken: aaa\nrepository:\n  - name: one\n    url: github.com/one/repo\n")
+	require.Equal(t, "aaa", GetIns().GitHubToken)
+
+	// Simulate applyImport mutating the in-memory config, then persisting.
+	GetIns().GitHubToken = "zzz"
+	require.NoError(t, Save())
+
+	// The operator restores/edits config.yaml on disk to something else.
+	tmp, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	_, err = tmp.WriteString("githubToken: bbb\nrepository:\n  - name: two\n    url: github.com/two/repo\n")
+	require.NoError(t, err)
+	require.NoError(t, tmp.Close())
+	Path = tmp.Name()
+
+	require.NoError(t, Reload())
+	require.Equal(t, "bbb", GetIns().GitHubToken, "reload must reflect the file, not stale Save() overrides")
+	require.Equal(t, "two", GetIns().Repository[0].Name)
+	Path = ""
+}
+
 func TestGetServerSectionReadsFromConfigFile(t *testing.T) {
 	writeTmpConfig(t, "server:\n  host: 0.0.0.0\n  port: \"8080\"\n  dbPath: /tmp/t.db\n  authEnabled: true\n  authToken: secret\n")
 	s := GetServerSection()

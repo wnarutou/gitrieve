@@ -127,21 +127,23 @@ func Reload() error {
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}
-	// Re-point viper at the current Path: Init pinned vp to the path it saw at
-	// startup, and Reload must honor a Path changed since (production keeps it
-	// constant; tests point it at a fresh file per case).
-	vp.SetConfigFile(Path)
-	if err := vp.ReadInConfig(); err != nil {
+	// A fresh viper avoids inheriting override keys: Save()/SetServerField leave
+	// vp.Set() overrides that ReadInConfig never clears, so Unmarshal would merge
+	// the stale overrides on top of the freshly-read file.
+	nv := viper.New()
+	nv.SetConfigFile(Path)
+	if err := nv.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 	var next Config
-	if err := vp.Unmarshal(&next); err != nil {
+	if err := nv.Unmarshal(&next); err != nil {
 		return fmt.Errorf("failed to unmarshal config file: %w", err)
 	}
 	seedDefaults(&next)
 	if err := validateIdentity(&next); err != nil {
 		return err
 	}
+	vp = nv
 	ins = &next
 	return nil
 }

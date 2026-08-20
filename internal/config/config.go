@@ -71,6 +71,13 @@ func GetIns() *Config {
 	return ins
 }
 
+// SetIns replaces the package-global config instance. Used by apply/import to
+// publish a fully-built replacement so concurrent readers (job goroutines)
+// observe a complete old or complete new instance, never a torn one.
+func SetIns(cfg *Config) {
+	ins = cfg
+}
+
 // GetViper returns the viper instance that loaded the config file. It is nil
 // until Init has run (registered via cobra.OnInitialize, so it runs before any
 // command executes). Exposed so packages that read config sections outside the
