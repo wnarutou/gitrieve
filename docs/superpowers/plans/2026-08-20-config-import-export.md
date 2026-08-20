@@ -1475,14 +1475,18 @@ Expected: FAIL — `ApplyImport`, `ReloadConfig`, `RefreshConfig` undefined.
 Append:
 
 ```go
-type ImportRequest struct {
-	Config              string            `json:"config"`
+type ImportChoices struct {
 	RepositoryDeletions []string          `json:"repository_deletions"`
 	RepositoryChoices   map[string]string `json:"repository_choices"`
 	StorageDeletions    []string          `json:"storage_deletions"`
 	StorageChoices      map[string]string `json:"storage_choices"`
 	GlobalChoices       map[string]string `json:"global_choices"`
 	ServerChoices       map[string]string `json:"server_choices"`
+}
+
+type ImportRequest struct {
+	Config  string        `json:"config"`
+	Choices ImportChoices `json:"choices"`
 }
 
 type ImportResult struct {
@@ -1595,11 +1599,11 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	}
 
 	deleteRepo := map[string]bool{}
-	for _, k := range req.RepositoryDeletions {
+	for _, k := range req.Choices.RepositoryDeletions {
 		deleteRepo[k] = true
 	}
 	deleteStorage := map[string]bool{}
-	for _, n := range req.StorageDeletions {
+	for _, n := range req.Choices.StorageDeletions {
 		deleteStorage[n] = true
 	}
 
@@ -1630,7 +1634,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		if !modifiedRepos[imp.Key()] {
 			continue // unchanged: existing wins silently
 		}
-		if choice(req.RepositoryChoices, imp.Key(), "imported") == "imported" {
+		if choice(req.Choices.RepositoryChoices, imp.Key(), "imported") == "imported" {
 			kept[i] = imp
 			result.RepositoriesUpdated++
 		}
@@ -1661,7 +1665,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		if !modifiedStorages[imp.Name] {
 			continue
 		}
-		if choice(req.StorageChoices, imp.Name, "imported") == "imported" {
+		if choice(req.Choices.StorageChoices, imp.Name, "imported") == "imported" {
 			keptSt[i] = imp
 			result.StoragesUpdated++
 		}
@@ -1669,27 +1673,27 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	a.config.Storage = keptSt
 
 	// ---- globals ----
-	if choice(req.GlobalChoices, "githubToken", "imported") == "imported" && a.config.GitHubToken != doc.GitHubToken {
+	if choice(req.Choices.GlobalChoices, "githubToken", "imported") == "imported" && a.config.GitHubToken != doc.GitHubToken {
 		a.config.GitHubToken = doc.GitHubToken
 		result.GlobalsUpdated++
 	}
-	if choice(req.GlobalChoices, "cocurrencyNum", "imported") == "imported" && a.config.ConcurrencyNum != doc.ConcurrencyNum {
+	if choice(req.Choices.GlobalChoices, "cocurrencyNum", "imported") == "imported" && a.config.ConcurrencyNum != doc.ConcurrencyNum {
 		a.config.ConcurrencyNum = doc.ConcurrencyNum
 		result.GlobalsUpdated++
 	}
-	if choice(req.GlobalChoices, "releaseSizeLimit", "imported") == "imported" && a.config.ReleaseSizeLimit != doc.ReleaseSizeLimit {
+	if choice(req.Choices.GlobalChoices, "releaseSizeLimit", "imported") == "imported" && a.config.ReleaseSizeLimit != doc.ReleaseSizeLimit {
 		a.config.ReleaseSizeLimit = doc.ReleaseSizeLimit
 		result.GlobalsUpdated++
 	}
-	if choice(req.GlobalChoices, "releaseNumLimit", "imported") == "imported" && a.config.ReleaseNumLimit != doc.ReleaseNumLimit {
+	if choice(req.Choices.GlobalChoices, "releaseNumLimit", "imported") == "imported" && a.config.ReleaseNumLimit != doc.ReleaseNumLimit {
 		a.config.ReleaseNumLimit = doc.ReleaseNumLimit
 		result.GlobalsUpdated++
 	}
-	if choice(req.GlobalChoices, "retryMaxCount", "imported") == "imported" && a.config.RetryMaxCount != doc.RetryMaxCount {
+	if choice(req.Choices.GlobalChoices, "retryMaxCount", "imported") == "imported" && a.config.RetryMaxCount != doc.RetryMaxCount {
 		a.config.RetryMaxCount = doc.RetryMaxCount
 		result.GlobalsUpdated++
 	}
-	if choice(req.GlobalChoices, "retryBaseDelay", "imported") == "imported" {
+	if choice(req.Choices.GlobalChoices, "retryBaseDelay", "imported") == "imported" {
 		d := time.Duration(doc.RetryBaseDelay)
 		if a.config.RetryBaseDelay != d {
 			a.config.RetryBaseDelay = d
@@ -1699,23 +1703,23 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 
 	// ---- server section: persist chosen fields; never hot-applied ----
 	curServer := config.GetServerSection()
-	if choice(req.ServerChoices, "host", "imported") == "imported" && curServer.Host != doc.Server.Host {
+	if choice(req.Choices.ServerChoices, "host", "imported") == "imported" && curServer.Host != doc.Server.Host {
 		_ = config.SetServerField("host", doc.Server.Host)
 		result.ServerUpdated++
 	}
-	if choice(req.ServerChoices, "port", "imported") == "imported" && curServer.Port != doc.Server.Port {
+	if choice(req.Choices.ServerChoices, "port", "imported") == "imported" && curServer.Port != doc.Server.Port {
 		_ = config.SetServerField("port", doc.Server.Port)
 		result.ServerUpdated++
 	}
-	if choice(req.ServerChoices, "authEnabled", "imported") == "imported" && curServer.AuthEnabled != doc.Server.AuthEnabled {
+	if choice(req.Choices.ServerChoices, "authEnabled", "imported") == "imported" && curServer.AuthEnabled != doc.Server.AuthEnabled {
 		_ = config.SetServerField("authEnabled", doc.Server.AuthEnabled)
 		result.ServerUpdated++
 	}
-	if choice(req.ServerChoices, "authToken", "imported") == "imported" && curServer.AuthToken != doc.Server.AuthToken {
+	if choice(req.Choices.ServerChoices, "authToken", "imported") == "imported" && curServer.AuthToken != doc.Server.AuthToken {
 		_ = config.SetServerField("authToken", doc.Server.AuthToken)
 		result.ServerUpdated++
 	}
-	if choice(req.ServerChoices, "dbPath", "imported") == "imported" && curServer.DbPath != doc.Server.DbPath {
+	if choice(req.Choices.ServerChoices, "dbPath", "imported") == "imported" && curServer.DbPath != doc.Server.DbPath {
 		_ = config.SetServerField("dbPath", doc.Server.DbPath)
 		result.ServerUpdated++
 	}
