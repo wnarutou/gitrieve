@@ -31,8 +31,9 @@ func newTestExecutor(t *testing.T) (*Executor, *db.DB) {
 func TestExecuteJobWritesBoundLogs(t *testing.T) {
 	exec, testDB := newTestExecutor(t)
 
-	jobID, err := exec.ExecuteJob("test-repo")
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
 
 	// executeAsync binds the goroutine and ui.Printf("Starting job execution")
 	// is forwarded to the DB logs for this execution. Poll for that specific
@@ -44,14 +45,14 @@ func TestExecuteJobWritesBoundLogs(t *testing.T) {
 	for {
 		var count int
 		err := testDB.QueryRow(
-			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Starting job execution'", jobID,
+			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Starting job execution'", jobIDs[0],
 		).Scan(&count)
 		require.NoError(t, err)
 		if count >= 1 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected a 'Starting job execution' log row for execution %s", jobID)
+			t.Fatalf("expected a 'Starting job execution' log row for execution %s", jobIDs[0])
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -83,8 +84,9 @@ func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
 	}
 	exec := NewExecutor(log, testDB, cfg)
 
-	jobID, err := exec.ExecuteJob("test-repo")
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
 
 	// The executor must run the configured component syncs. "Downloading issues"
 	// is written only after repository.Sync returns, and that sync does a real
@@ -94,14 +96,14 @@ func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
 	for {
 		var count int
 		err := testDB.QueryRow(
-			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Downloading issues'", jobID,
+			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Downloading issues'", jobIDs[0],
 		).Scan(&count)
 		require.NoError(t, err)
 		if count >= 1 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected 'Downloading issues' log row for execution %s", jobID)
+			t.Fatalf("expected 'Downloading issues' log row for execution %s", jobIDs[0])
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -110,18 +112,19 @@ func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
 func TestExecuteJobCreatesRecord(t *testing.T) {
 	exec, testDB := newTestExecutor(t)
 
-	jobID, err := exec.ExecuteJob("test-repo")
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	assert.NoError(t, err)
-	assert.NotEmpty(t, jobID)
+	require.Len(t, jobIDs, 1)
+	assert.NotEmpty(t, jobIDs[0])
 
 	// A pending/running execution record should exist in the database
 	var status string
-	err = testDB.QueryRow("SELECT status FROM executions WHERE id = ?", jobID).Scan(&status)
+	err = testDB.QueryRow("SELECT status FROM executions WHERE id = ?", jobIDs[0]).Scan(&status)
 	assert.NoError(t, err)
 	assert.Contains(t, []string{"pending", "running"}, status)
 
 	// The job should be marked as running in memory
-	assert.True(t, exec.IsJobRunning(jobID))
+	assert.True(t, exec.IsJobRunning(jobIDs[0]))
 }
 
 func TestExecuteJobUnknownRepository(t *testing.T) {
@@ -137,4 +140,46 @@ func TestCancelNonRunningJob(t *testing.T) {
 	// Cancelling a job that was never started should still update its status
 	err := exec.CancelJob("never-started")
 	assert.NoError(t, err)
+}
+
+func TestExecuteJobWritesRepoKey(t *testing.T) {
+	exec, testDB := newTestExecutor(t)
+
+	jobIDs, err := exec.ExecuteJob("https://github.com/test/repo")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
+
+	var repoKey string
+	err = testDB.QueryRow("SELECT repo_key FROM executions WHERE id = ?", jobIDs[0]).Scan(&repoKey)
+	assert.NoError(t, err)
+	assert.Equal(t, "github.com/test/repo", repoKey)
+}
+
+func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
+	exec, testDB := newTestExecutor(t)
+	exec.cfg.Repository = []typedef.Repository{
+		{Name: "acme", URL: "https://github.com/acme", Type: typedef.TypeOrg, OrgName: "acme"},
+	}
+
+	old := expandRepos
+	t.Cleanup(func() { expandRepos = old })
+	expandRepos = func(repo typedef.Repository) []typedef.Repository {
+		return []typedef.Repository{
+			{Name: "alpha", URL: "github.com/acme/alpha"},
+			{Name: "beta", URL: "github.com/acme/beta"},
+		}
+	}
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 2)
+
+	keys := map[string]bool{}
+	for _, id := range jobIDs {
+		var repoKey string
+		require.NoError(t, testDB.QueryRow("SELECT repo_key FROM executions WHERE id = ?", id).Scan(&repoKey))
+		keys[repoKey] = true
+	}
+	assert.True(t, keys["github.com/acme/alpha"])
+	assert.True(t, keys["github.com/acme/beta"])
 }

@@ -44,6 +44,7 @@ func Initialize(path string) (*DB, error) {
 		CREATE TABLE IF NOT EXISTS executions (
 			id TEXT PRIMARY KEY,
 			job_name TEXT NOT NULL,
+			repo_key TEXT NOT NULL DEFAULT '',
 			start_time DATETIME NOT NULL,
 			end_time DATETIME,
 			status TEXT NOT NULL,

@@ -20,12 +20,20 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
+// repoLister 抽象 GitHub 客户端，测试时替换 newGithubClient 即可 mock。
+type repoLister interface {
+	GetRepos(name, accountType string) ([]string, error)
+}
+
+// newGithubClient 是可替换的包级 seam：生产用真客户端，测试注入 fake。
+var newGithubClient = func() (repoLister, error) { return github.New() }
+
 func GetRepositories(name string) []typedef.Repository {
 	repositories := make([]typedef.Repository, 0)
 	if name != "" {
 		// find repo in config
 		for _, repository := range internalconfig.GetIns().Repository {
-			if repository.Name == name {
+			if repository.Name == name || repository.Matches(name) {
 				repositories = addRepo(repository, repositories)
 			}
 		}
@@ -43,7 +51,7 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 		ret = append(ret, repo)
 	case typedef.TypeUser, typedef.TypeOrg:
 		// get repos
-		client, err := github.New()
+		client, err := newGithubClient()
 		if err != nil {
 			ui.Errorf("Error creating github client, %s", err)
 			return ret
@@ -409,4 +417,11 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		}
 	}
 	return nil
+}
+
+// Expand 返回一个配置条目实际对应的具体仓库列表。type=repo 原样返回自身；
+// type=user/org 通过 GitHub API 展开为成员仓库（继承 cron/storage 等选项）；
+// 非法类型返回空切片。CLI 与 executor 共用。
+func Expand(repo typedef.Repository) []typedef.Repository {
+	return addRepo(repo, nil)
 }

@@ -48,6 +48,11 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 		ui.ErrorfExit("Failed to initialize database: %s", err)
 	}
 
+	// 迁移旧库（新增 repo_key 列）。失败宁可起不来，也不在坏 schema 上跑。
+	if err := db.Migrate(database); err != nil {
+		ui.ErrorfExit("Failed to migrate database: %s", err)
+	}
+
 	// Initialize logger
 	log := logger.NewLogger(database)
 
@@ -92,8 +97,11 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	apiGroup.GET("/api/jobs/:id/logs", api.GetJobLogs)
 	apiGroup.GET("/api/repositories", api.GetRepositories)
 	apiGroup.POST("/api/repositories", api.CreateRepository)
-	apiGroup.PUT("/api/repositories/:id", api.UpdateRepository)
-	apiGroup.DELETE("/api/repositories/:id", api.DeleteRepository)
+	// *id catch-all: the identity key is a URL like github.com/owner/repo and
+	// contains "/", so a single-segment :id param cannot match it. gin prefixes
+	// the captured value with "/" (trimmed inside the handlers).
+	apiGroup.PUT("/api/repositories/*id", api.UpdateRepository)
+	apiGroup.DELETE("/api/repositories/*id", api.DeleteRepository)
 	apiGroup.GET("/api/storage", api.GetStorages)
 	apiGroup.POST("/api/storage", api.CreateStorage)
 	apiGroup.PUT("/api/storage/:id", api.UpdateStorage)

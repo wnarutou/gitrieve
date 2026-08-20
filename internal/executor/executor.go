@@ -2,9 +2,8 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
-	"time"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
@@ -16,6 +15,8 @@ import (
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 	"github.com/wnarutou/gitrieve/internal/wiki"
+	"sync"
+	"time"
 )
 
 type ExecutionStatus string
@@ -54,31 +55,52 @@ func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor
 	}
 }
 
-func (e *Executor) ExecuteJob(jobName string) (string, error) {
-	// Find repository in config
-	var job typedef.Repository
+// ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
+var ErrRepositoryNotFound = errors.New("repository not found in configuration")
+
+// expandRepos 是把 user/org 条目展开为具体仓库的 seam：生产用 repository.Expand，
+// 测试注入 fake，避免真实 GitHub 调用。
+var expandRepos = repository.Expand
+
+// ExecuteJob 按仓库身份键（规范化 URL）在配置中定位条目并执行。type=repo 产生
+// 一条 execution 并返回单元素 jobID；type=user/org 先在任务内展开为具体仓库，
+// 每个具体仓库独立执行（各自 jobID / execution / 日志流 / 可取消）。
+func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
+	var repo typedef.Repository
 	found := false
-	for _, repo := range e.cfg.Repository {
-		if repo.Name == jobName {
-			job = repo
+	for _, r := range e.cfg.Repository {
+		if r.Matches(repoKey) {
+			repo = r
 			found = true
 			break
 		}
 	}
-
 	if !found {
-		return "", fmt.Errorf("repository %s not found in configuration", jobName)
+		return nil, ErrRepositoryNotFound
 	}
 
+	jobIDs := make([]string, 0, 1)
+	for _, concrete := range expandRepos(repo) {
+		jobID, err := e.launchJob(concrete)
+		if err != nil {
+			return nil, err
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	return jobIDs, nil
+}
+
+// launchJob 为单个具体仓库创建 execution 记录并异步执行。
+func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	// Generate job ID
 	jobID := uuid.New().String()
 	startTime := time.Now()
 
-	// Create execution record
+	// Create execution record: job_name 保存展示名快照，repo_key 是身份键。
 	_, err := e.db.Exec(`
-		INSERT INTO executions (id, job_name, start_time, status)
-		VALUES (?, ?, ?, ?)
-	`, jobID, jobName, startTime, string(StatusPending))
+		INSERT INTO executions (id, job_name, repo_key, start_time, status)
+		VALUES (?, ?, ?, ?, ?)
+	`, jobID, job.Name, job.Key(), startTime, string(StatusPending))
 	if err != nil {
 		return "", fmt.Errorf("failed to create execution record: %w", err)
 	}

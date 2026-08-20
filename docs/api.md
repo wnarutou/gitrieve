@@ -58,26 +58,26 @@ POST /api/jobs
 
 ```json
 {
-  "repository": "gitrieve"
+  "repository_key": "github.com/wnarutou/gitrieve"
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `repository` | string | yes | The `name` of a repository defined in `config.yaml` |
+| `repository_key` | string | yes | The repository identity key — the normalized URL (e.g. `github.com/wnarutou/gitrieve`) of a repository defined in `config.yaml`. For `user`/`org` entries, use the synthesized `https://github.com/<orgName>` (server normalizes it). A bare display name is not accepted. |
 
 **Response `data`**
 
 ```json
 {
-  "job_id": "1719800000",
+  "job_ids": ["1719800000", "1719800001"],
   "status": "running"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `job_id` | string | Job identifier; pass to logs/cancel endpoints |
+| `job_ids` | array of string | One job identifier per expanded repository; pass each to the logs/cancel endpoints. A `repo`-type entry yields a single ID; a `user`/`org` entry yields one ID per concrete member repository |
 | `status` | string | Initial status, one of `pending` \| `running` \| `completed` \| `failed` \| `cancelled` |
 
 **Example**
@@ -85,7 +85,7 @@ POST /api/jobs
 ```bash
 curl -X POST http://localhost:8080/api/jobs \
   -H "Content-Type: application/json" \
-  -d '{"repository": "gitrieve"}'
+  -d '{"repository_key": "github.com/wnarutou/gitrieve"}'
 ```
 
 **Status codes**
@@ -111,7 +111,7 @@ DELETE /api/jobs/:id
 
 | Name | Description |
 |---|---|
-| `id` | The `job_id` returned by `POST /api/jobs` |
+| `id` | A job identifier from the `job_ids` array returned by `POST /api/jobs` |
 
 **Response `data`**
 
@@ -152,7 +152,7 @@ GET /api/jobs
 | `page` | int | `1` | Page number (1-based) |
 | `limit` | int | `20` | Items per page; clamped to `1`–`100` |
 | `status` | string | — | Filter by status; `all` (or omitted) returns all statuses |
-| `repository` | string | — | Fuzzy (partial) match on repository name, case-insensitive for ASCII (SQL `LIKE '%value%'`; `%`, `_`, and `\` in the value are matched literally) |
+| `repository` | string | — | Fuzzy (partial) match on repository **name or URL**, case-insensitive for ASCII. A URL term is normalized server-side (e.g. `https://github.com/wnarutou/gitrieve.git` matches the stored key `github.com/wnarutou/gitrieve`) (SQL `LIKE '%value%'`; `%`, `_`, and `\` in the value are matched literally) |
 
 **Response `data`**
 
@@ -199,8 +199,11 @@ curl http://localhost:8080/api/jobs
 # Failed jobs only, page 2
 curl "http://localhost:8080/api/jobs?status=failed&page=2&limit=50"
 
-# Jobs whose repository name contains "gitrieve" (fuzzy match)
+# Jobs whose repository name or URL contains "gitrieve" (fuzzy match)
 curl "http://localhost:8080/api/jobs?repository=gitrieve"
+
+# Match by URL (term is normalized server-side)
+curl "http://localhost:8080/api/jobs?repository=github.com/wnarutou/gitrieve"
 ```
 
 **Status codes**
@@ -279,11 +282,11 @@ es.onerror = () => es.close(); // stream ended by server or network
 
 ## Repositories
 
-Repositories are read from and written back to `config.yaml`. The `:id` path parameter is the repository **name** (not a numeric ID), because names are the unique key in the config.
+Repositories are read from and written back to `config.yaml`. The `:id` path parameter is the repository **identity key** — the normalized URL (e.g. `github.com/wnarutou/gitrieve`) — not the name. Because the identity key contains slashes, the route is registered as a gin catch-all. Names are display labels and may repeat; the normalized URL is the unique key in the config.
 
 ### List repositories
 
-List repositories from `config.yaml` (see [Configuration](../README.md#configuration)) with per-repository execution stats, pagination, and an optional fuzzy name filter.
+List repositories from `config.yaml` (see [Configuration](../README.md#configuration)) with per-repository execution stats, pagination, and an optional fuzzy name-or-URL filter.
 
 ```
 GET /api/repositories
@@ -295,7 +298,7 @@ GET /api/repositories
 |---|---|---|---|
 | `page` | int | `1` | Page number (1-based) |
 | `limit` | int | `20` | Items per page; clamped to `1`–`100` |
-| `search` | string | — | Fuzzy (partial) match on repository name, case-insensitive for ASCII |
+| `search` | string | — | Fuzzy (partial) match on repository **name or URL**, case-insensitive for ASCII |
 
 **Response `data`** — a paginated object (not a bare array). Each item embeds the repository fields (PascalCase, matching the `repository:` config entries) plus lower-cased execution stats.
 
@@ -332,7 +335,7 @@ GET /api/repositories
 | Field | Type | Description |
 |---|---|---|
 | `repositories[]` | object | A repository from config plus its per-run stats |
-| `repositories[].Name` | string | Repository name (the unique key) |
+| `repositories[].Name` | string | Repository display name (identity is the URL) |
 | `repositories[].URL` | string | Repository URL |
 | `repositories[].Cron` | string | Cron schedule, empty if none |
 | `repositories[].Storage` | array of string | Storage backend names |
@@ -355,8 +358,11 @@ Other embedded repository fields (`UseCache`, `AllBranches`, `Depth`, `DownloadR
 # All repositories, first page with the default limit
 curl http://localhost:8080/api/repositories
 
-# Fuzzy name search
+# Fuzzy name or URL search
 curl "http://localhost:8080/api/repositories?search=gitr"
+
+# URL terms match too
+curl "http://localhost:8080/api/repositories?search=github.com/wnarutou"
 
 # Page 2 with a custom limit
 curl "http://localhost:8080/api/repositories?page=2&limit=50"
@@ -395,14 +401,22 @@ POST /api/repositories
 }
 ```
 
+Identity is the URL. A `repo`-type entry must supply a `url`; a `user`/`org` entry may omit `url` and set `orgName` instead — an empty URL is auto-synthesized to `https://github.com/<orgName>`. An entry with no identity (empty URL and no `orgName`) is rejected with `400`. Names may repeat: duplicate detection compares the normalized URL, and a conflicting URL returns `409`.
+
 **Response `data`** — the created repository object.
 
 **Example**
 
 ```bash
+# repo-type entry with a URL
 curl -X POST http://localhost:8080/api/repositories \
   -H "Content-Type: application/json" \
   -d '{"name":"gitrieve","url":"github.com/wnarutou/gitrieve","storage":["localFile"],"useCache":true}'
+
+# org entry with no URL — the server synthesizes https://github.com/acme
+curl -X POST http://localhost:8080/api/repositories \
+  -H "Content-Type: application/json" \
+  -d '{"name":"acme","type":"org","orgName":"acme"}'
 ```
 
 **Status codes**
@@ -410,8 +424,8 @@ curl -X POST http://localhost:8080/api/repositories \
 | Code | Meaning |
 |---|---|
 | 200 | Repository added |
-| 400 | Invalid body or missing `name` |
-| 409 | A repository with that name already exists |
+| 400 | Invalid body, missing `name`, or no identity (empty URL for `repo` type; empty `orgName` for `user`/`org` type) |
+| 409 | A repository with that URL already exists (identity is the URL; names may repeat) |
 
 ---
 
@@ -427,7 +441,7 @@ PUT /api/repositories/:id
 
 | Name | Description |
 |---|---|
-| `id` | Repository `name` |
+| `id` | Repository identity key — the normalized URL (contains slashes; the route is a gin catch-all) |
 
 **Request body** — any subset of repository fields.
 
@@ -443,7 +457,7 @@ PUT /api/repositories/:id
 **Example**
 
 ```bash
-curl -X PUT http://localhost:8080/api/repositories/gitrieve \
+curl -X PUT http://localhost:8080/api/repositories/github.com/wnarutou/gitrieve \
   -H "Content-Type: application/json" \
   -d '{"cron":"0 */6 * * *"}'
 ```
@@ -455,6 +469,7 @@ curl -X PUT http://localhost:8080/api/repositories/gitrieve \
 | 200 | Repository updated |
 | 400 | Invalid body |
 | 404 | Repository not found |
+| 409 | The updated URL conflicts with another repository (identity is the URL) |
 | 500 | Failed to merge fields |
 
 ---
@@ -469,7 +484,7 @@ DELETE /api/repositories/:id
 
 | Name | Description |
 |---|---|
-| `id` | Repository `name` |
+| `id` | Repository identity key — the normalized URL (contains slashes; the route is a gin catch-all) |
 
 **Response `data`**
 
@@ -482,7 +497,7 @@ DELETE /api/repositories/:id
 **Example**
 
 ```bash
-curl -X DELETE http://localhost:8080/api/repositories/gitrieve
+curl -X DELETE http://localhost:8080/api/repositories/github.com/wnarutou/gitrieve
 ```
 
 **Status codes**
