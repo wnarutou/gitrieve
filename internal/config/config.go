@@ -37,30 +37,33 @@ func Init() {
 	if err != nil {
 		ui.ErrorfExit("Error unmarshalling config file, %s", err)
 	}
-	// Seed all option defaults here (single-threaded) rather than lazily in
-	// the getters: the getters are called from daemon worker goroutines, so
-	// lazy mutation would race. The retry options treat any non-positive value
-	// as "unset -> default"; the release/concurrency options only seed a zero
-	// value (a negative release limit is meaningful: "no limit").
-	if ins.RetryMaxCount <= 0 {
-		ins.RetryMaxCount = 3
-	}
-	if ins.RetryBaseDelay <= 0 {
-		ins.RetryBaseDelay = 5 * time.Second
-	}
-	if ins.ConcurrencyNum == 0 {
-		ins.ConcurrencyNum = 3
-	}
-	if ins.ReleaseNumLimit == 0 {
-		ins.ReleaseNumLimit = 3
-	}
-	if ins.ReleaseSizeLimit == 0 {
-		ins.ReleaseSizeLimit = 300000000
-	}
+	seedDefaults(ins)
 	// 启动校验：每个仓库条目都必须有可用身份。身份键为空意味着永远无法被
 	// 匹配或执行，直接拒绝启动。
 	if err := validateIdentity(ins); err != nil {
 		ui.ErrorfExit("Invalid configuration: %s", err)
+	}
+}
+
+// seedDefaults fills zero-valued global options with their defaults. It runs in
+// Init and Reload (both single-threaded) so the in-memory config always has the
+// same interpretation as the getters; lazy mutation in getters would race under
+// the daemon's concurrent workers.
+func seedDefaults(cfg *Config) {
+	if cfg.RetryMaxCount <= 0 {
+		cfg.RetryMaxCount = 3
+	}
+	if cfg.RetryBaseDelay <= 0 {
+		cfg.RetryBaseDelay = 5 * time.Second
+	}
+	if cfg.ConcurrencyNum == 0 {
+		cfg.ConcurrencyNum = 3
+	}
+	if cfg.ReleaseNumLimit == 0 {
+		cfg.ReleaseNumLimit = 3
+	}
+	if cfg.ReleaseSizeLimit == 0 {
+		cfg.ReleaseSizeLimit = 300000000
 	}
 }
 
