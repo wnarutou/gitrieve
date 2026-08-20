@@ -670,7 +670,9 @@ func getJSON(t *testing.T, s *server.TestServer, method, path, body string) (int
 
 func TestExportConfigYAML(t *testing.T) {
 	loadTempConfig(t, "server:\n  host: 127.0.0.1\n  port: \"8081\"\n")
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	cfg := &config.Config{
 		Repository:     []typedef.Repository{{Name: "test-repo", URL: "github.com/test/repo"}},
 		Storage:        []typedef.MultiStorage{{Storage: typedef.Storage{Name: "local", Type: "file", Path: "/tmp"}}},
@@ -693,8 +695,12 @@ func TestExportConfigYAML(t *testing.T) {
 
 func TestPreviewImportValidationErrors(t *testing.T) {
 	loadTempConfig(t, "")
-	testDB := db.Initialize(":memory:")
-	s := server.NewConfigTestServer(newTestConfig(), testDB)
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(&config.Config{
+		Repository: []typedef.Repository{{Name: "test-repo", URL: "github.com/test/repo"}},
+	}, testDB)
 
 	// Invalid YAML -> 400.
 	code, _ := getJSON(t, s, http.MethodPost, "/api/config/import/preview", `{"config":"repository: [unclosed\n"}`)
@@ -710,7 +716,9 @@ func TestPreviewImportValidationErrors(t *testing.T) {
 
 func TestPreviewImportDiff(t *testing.T) {
 	loadTempConfig(t, "")
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	cfg := &config.Config{
 		Repository: []typedef.Repository{
 			{Name: "mod-test", URL: "github.com/test/mod", Cron: "@daily"},
@@ -1281,7 +1289,9 @@ Append to `internal/server/config_api_test.go`:
 ```go
 func TestApplyImportDefaultChoices(t *testing.T) {
 	loadTempConfig(t, "")
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	cfg := &config.Config{
 		Repository: []typedef.Repository{
 			{Name: "mod-test", URL: "github.com/test/mod", Cron: "@daily"},
@@ -1331,7 +1341,9 @@ storage:
 
 func TestApplyImportWithChoices(t *testing.T) {
 	loadTempConfig(t, "")
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	cfg := &config.Config{
 		Repository: []typedef.Repository{
 			{Name: "mod-test", URL: "github.com/test/mod", Cron: "@daily"},
@@ -1390,7 +1402,9 @@ func TestReloadConfig(t *testing.T) {
 	config.Path = path
 	config.Init()
 
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	s := server.NewConfigTestServer(config.GetIns(), testDB)
 	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 
@@ -1406,7 +1420,9 @@ func TestReloadConfigKeepsOldOnError(t *testing.T) {
 	config.Path = path
 	config.Init()
 
-	testDB := db.Initialize(":memory:")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
 	s := server.NewConfigTestServer(config.GetIns(), testDB)
 
 	writeFile(t, path, "repository: [broken\n")
