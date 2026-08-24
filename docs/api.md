@@ -695,6 +695,144 @@ curl http://localhost:8080/api/metrics
 
 ---
 
+## Config
+
+### Export config
+
+Returns the full current configuration as YAML — `repository`, `storage`, all
+global options, and the `server:` section — formatted so the output can be used
+directly as `config.yaml`. Secrets (`githubToken`, `secretAccessKey`,
+`authToken`) are exported in plaintext; treat the file accordingly.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/config/export` | Export the full config as YAML |
+
+**Response**
+
+```json
+{ "code": 200, "data": { "yaml": "repository:\n  - name: …" }, "message": "" }
+```
+
+### Preview an import
+
+Parses, validates, and diffs a submitted YAML config against the current one.
+Does **not** mutate any state. The diff is precise per repository / storage /
+field: entries that are unchanged are omitted. Secrets in the diff are masked
+as `***`.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/config/import/preview` | Validate and diff an imported config |
+
+**Request body**
+
+```json
+{ "config": "repository:\n  - name: …\n" }
+```
+
+**Response** (`200`)
+
+```json
+{
+  "code": 200,
+  "data": {
+    "summary": {
+      "repositories": { "added": 1, "deleted": 1, "modified": 2 },
+      "storages":     { "added": 0, "deleted": 0, "modified": 1 },
+      "globals":      { "changed": 2 },
+      "server":       { "changed": 1 }
+    },
+    "repositories": {
+      "added":    [ { "key": "github.com/x/y", "name": "y", "url": "github.com/x/y" } ],
+      "deleted":  [ { "key": "github.com/a/b", "name": "b", "url": "github.com/a/b" } ],
+      "modified": [ { "key": "github.com/m/n", "name": "n", "url": "github.com/m/n",
+                      "changes": [ { "field": "cron", "existing": "@daily", "imported": "" } ] } ]
+    },
+    "storages": {
+      "added": [], "deleted": [],
+      "modified": [ { "name": "local", "type": "file",
+                      "changes": [ { "field": "path", "existing": "/tmp/one", "imported": "/tmp/two" } ] } ]
+    },
+    "globals": [ { "field": "githubToken", "existing": "***", "imported": "***" } ],
+    "server":  [ { "field": "port", "existing": "8080", "imported": "9090" } ],
+    "warnings": ["server 段已变更：该改动不会热生效，需重启 server 后生效。"]
+  },
+  "message": ""
+}
+```
+
+**Errors** (`400`): invalid YAML or validation violations. Validation errors
+carry the full list:
+
+```json
+{ "code": 400, "data": { "errors": ["repository \"orphan\" …"] }, "message": "导入配置无效" }
+```
+
+### Apply an import
+
+Applies a previously-previewed import. `choices` select, per entry, whether the
+imported or the existing value wins; entries without a choice use the defaults
+(added/modified/globals/server → imported, deleted → keep). Choices for
+entries the diff did not classify as changed/modified are ignored.
+`repository_deletions` / `storage_deletions` only take effect for entries the
+diff classified as deleted.
+
+The `server:` section is **never hot-applied** — accepted changes are written to
+`config.yaml` and take effect on the next server restart. A failure to persist
+returns `200` with a `message` noting the change is in memory only.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/config/import` | Apply an import with per-entry choices |
+
+**Request body**
+
+```json
+{
+  "config": "repository:\n  - name: …\n",
+  "choices": {
+    "repository_deletions": ["github.com/a/b"],
+    "repository_choices":   { "github.com/m/n": "imported" },
+    "storage_deletions":    [],
+    "storage_choices":      { "local": "existing" },
+    "global_choices":       { "githubToken": "imported" },
+    "server_choices":       { "port": "existing" }
+  }
+}
+```
+
+**Response** (`200`)
+
+```json
+{ "code": 200,
+  "data": {
+    "repositories_added": 1, "repositories_updated": 1, "repositories_deleted": 1,
+    "storages_added": 0,     "storages_updated": 0,     "storages_deleted": 0,
+    "globals_updated": 1,    "server_updated": 0
+  },
+  "message": "" }
+```
+
+### Reload config from disk
+
+Re-reads `config.yaml` from disk and repoints the running server (API and
+executor) at the fresh config. The `server:` section is not hot-applied (a
+restart is required) and daemon cron schedules are not rescheduled. On any
+error the previous config stays active and a `400` is returned.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/config/reload` | Reload config.yaml at runtime |
+
+**Response** (`200`)
+
+```json
+{ "code": 200, "data": {}, "message": "" }
+```
+
+---
+
 ### Web UI and static assets
 
 | Method | Path | Description |

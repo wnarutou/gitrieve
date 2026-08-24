@@ -157,7 +157,7 @@ func TestExecuteJobWritesRepoKey(t *testing.T) {
 
 func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 	exec, testDB := newTestExecutor(t)
-	exec.cfg.Repository = []typedef.Repository{
+	exec.cfg.Load().Repository = []typedef.Repository{
 		{Name: "acme", URL: "https://github.com/acme", Type: typedef.TypeOrg, OrgName: "acme"},
 	}
 
@@ -182,4 +182,21 @@ func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 	}
 	assert.True(t, keys["github.com/acme/alpha"])
 	assert.True(t, keys["github.com/acme/beta"])
+}
+
+func TestRefreshConfigRepointsExecutor(t *testing.T) {
+	exec, _ := newTestExecutor(t)
+
+	exec.RefreshConfig(&config.Config{Repository: []typedef.Repository{
+		{Name: "other", URL: "github.com/other/repo"},
+	}})
+
+	// The old key no longer resolves against the executor's config.
+	_, err := exec.ExecuteJob("github.com/test/repo")
+	require.Error(t, err)
+
+	// The new key resolves.
+	jobIDs, err := exec.ExecuteJob("github.com/other/repo")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
 }
