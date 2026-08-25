@@ -5,6 +5,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"net/url"
 	"strconv"
 	"strings"
@@ -134,6 +135,10 @@ func parseRetryAfterSeconds(msg string) time.Duration {
 // BaseDelay. Waits are interrupted when ctx is done. Returns the last error
 // after cfg.MaxRetries retries, or ctx.Err() if cancelled.
 func Do(ctx context.Context, cfg Config, fn func() error) error {
+	return do(ctx, cfg, rand.Int63n, fn)
+}
+
+func do(ctx context.Context, cfg Config, randN func(int64) int64, fn func() error) error {
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
 	}
@@ -151,13 +156,29 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 			return lastErr
 		}
 		if wait <= 0 {
-			wait = backoff(cfg.BaseDelay, attempt)
+			wait = jitter(backoff(cfg.BaseDelay, attempt), randN)
 		}
 		if err := sleep(ctx, wait); err != nil {
 			return err
 		}
 	}
 	return lastErr
+}
+
+func jitter(d time.Duration, randN func(int64) int64) time.Duration {
+	if d <= 0 || d >= maxBackoff {
+		return minDuration(d, maxBackoff)
+	}
+	span := d/2 + 1
+	result := d + time.Duration(randN(int64(span)))
+	return minDuration(result, maxBackoff)
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // backoff returns BaseDelay * 2^attempt, capped at maxBackoff. A zero BaseDelay

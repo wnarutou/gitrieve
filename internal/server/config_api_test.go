@@ -98,11 +98,15 @@ func TestPreviewImportDiff(t *testing.T) {
 		},
 		// Globals already at the seeded defaults except GitHubToken and
 		// RetryBaseDelay, so the globals diff is exactly those two fields.
-		GitHubToken:      "tok-existing",
-		ConcurrencyNum:   3,
-		ReleaseSizeLimit: 300000000,
-		ReleaseNumLimit:  3,
-		RetryMaxCount:    3,
+		GitHubToken:                 "tok-existing",
+		ConcurrencyNum:              3,
+		ReleaseSizeLimit:            300000000,
+		ReleaseNumLimit:             3,
+		RetryMaxCount:               3,
+		GitHubAPIConcurrency:        2,
+		GitHubMinRequestInterval:    200 * time.Millisecond,
+		GitHubLowRemainingThreshold: 100,
+		GitHubScheduleJitter:        30 * time.Second,
 	}
 	s := server.NewConfigTestServer(cfg, testDB)
 
@@ -193,6 +197,32 @@ server:
 	// Server section changed -> warning present.
 	warnings := data["warnings"].([]interface{})
 	require.Len(t, warnings, 1)
+}
+
+func TestApplyImportGitHubAPIGlobals(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\n")
+	config.Path = path
+	config.Init()
+	t.Cleanup(func() { config.Path = "" })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+
+	importYAML := "repository:\n  - name: one\n    url: github.com/one/repo\ngithubApiConcurrency: 5\ngithubMinRequestInterval: 900ms\ngithubLowRemainingThreshold: 321\ngithubScheduleJitter: 0s\n"
+	body, _ := json.Marshal(map[string]string{"config": importYAML})
+	code, _ := getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, 200, code)
+	require.Equal(t, uint(5), s.Cfg().GitHubAPIConcurrency)
+	require.Equal(t, 900*time.Millisecond, s.Cfg().GitHubMinRequestInterval)
+	require.Equal(t, 321, s.Cfg().GitHubLowRemainingThreshold)
+	require.Zero(t, s.Cfg().GitHubScheduleJitter)
+
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(content), "githubapiconcurrency: 5")
 }
 
 func TestApplyImportDefaultChoices(t *testing.T) {

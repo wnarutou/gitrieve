@@ -5,20 +5,25 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 type Config struct {
-	Repository       []typedef.Repository   `yaml:"repository"`
-	Storage          []typedef.MultiStorage `yaml:"storage"`
-	GitHubToken      string                 `yaml:"githubToken"`
-	ConcurrencyNum   uint                   `yaml:"cocurrencyNum" mapstructure:"cocurrencyNum"`
-	ReleaseSizeLimit int                    `yaml:"releaseSizeLimit"`
-	ReleaseNumLimit  int                    `yaml:"releaseNumLimit"`
-	RetryMaxCount    int                    `yaml:"retryMaxCount"`
-	RetryBaseDelay   time.Duration          `yaml:"retryBaseDelay"`
+	Repository                  []typedef.Repository   `yaml:"repository"`
+	Storage                     []typedef.MultiStorage `yaml:"storage"`
+	GitHubToken                 string                 `yaml:"githubToken"`
+	ConcurrencyNum              uint                   `yaml:"cocurrencyNum" mapstructure:"cocurrencyNum"`
+	ReleaseSizeLimit            int                    `yaml:"releaseSizeLimit"`
+	ReleaseNumLimit             int                    `yaml:"releaseNumLimit"`
+	RetryMaxCount               int                    `yaml:"retryMaxCount"`
+	RetryBaseDelay              time.Duration          `yaml:"retryBaseDelay"`
+	GitHubAPIConcurrency        uint                   `yaml:"githubApiConcurrency" mapstructure:"githubApiConcurrency"`
+	GitHubMinRequestInterval    time.Duration          `yaml:"githubMinRequestInterval" mapstructure:"githubMinRequestInterval"`
+	GitHubLowRemainingThreshold int                    `yaml:"githubLowRemainingThreshold" mapstructure:"githubLowRemainingThreshold"`
+	GitHubScheduleJitter        time.Duration          `yaml:"githubScheduleJitter" mapstructure:"githubScheduleJitter"`
 }
 
 var Path string
@@ -38,6 +43,10 @@ func Init() {
 		ui.ErrorfExit("Error unmarshalling config file, %s", err)
 	}
 	seedDefaults(ins)
+	if !vp.IsSet("githubScheduleJitter") {
+		ins.GitHubScheduleJitter = 30 * time.Second
+	}
+	githubapi.Configure(GetGitHubAPIConfig())
 	// 启动校验：每个仓库条目都必须有可用身份。身份键为空意味着永远无法被
 	// 匹配或执行，直接拒绝启动。
 	if err := validateIdentity(ins); err != nil {
@@ -65,6 +74,18 @@ func seedDefaults(cfg *Config) {
 	if cfg.ReleaseSizeLimit == 0 {
 		cfg.ReleaseSizeLimit = 300000000
 	}
+	if cfg.GitHubAPIConcurrency == 0 {
+		cfg.GitHubAPIConcurrency = 2
+	}
+	if cfg.GitHubMinRequestInterval <= 0 {
+		cfg.GitHubMinRequestInterval = 200 * time.Millisecond
+	}
+	if cfg.GitHubLowRemainingThreshold <= 0 {
+		cfg.GitHubLowRemainingThreshold = 100
+	}
+	if cfg.GitHubScheduleJitter < 0 {
+		cfg.GitHubScheduleJitter = 30 * time.Second
+	}
 }
 
 func GetIns() *Config {
@@ -76,6 +97,7 @@ func GetIns() *Config {
 // observe a complete old or complete new instance, never a torn one.
 func SetIns(cfg *Config) {
 	ins = cfg
+	githubapi.Configure(GetGitHubAPIConfig())
 }
 
 // GetViper returns the viper instance that loaded the config file. It is nil
@@ -130,6 +152,18 @@ func GetRetryBaseDelay() time.Duration {
 	return ins.RetryBaseDelay
 }
 
+func GetGitHubAPIConcurrency() uint { return ins.GitHubAPIConcurrency }
+
+func GetGitHubMinRequestInterval() time.Duration { return ins.GitHubMinRequestInterval }
+
+func GetGitHubLowRemainingThreshold() int { return ins.GitHubLowRemainingThreshold }
+
+func GetGitHubScheduleJitter() time.Duration { return ins.GitHubScheduleJitter }
+
+func GetGitHubAPIConfig() githubapi.Config {
+	return githubapi.Config{Concurrency: ins.GitHubAPIConcurrency, MinRequestInterval: ins.GitHubMinRequestInterval, LowRemainingThreshold: ins.GitHubLowRemainingThreshold}
+}
+
 // GetRetryConfig assembles the retry configuration used by every GitHub API
 // call site in the issue/discussion/release syncs.
 func GetRetryConfig() retry.Config {
@@ -168,5 +202,9 @@ func Save() error {
 	vp.Set("releaseNumLimit", ins.ReleaseNumLimit)
 	vp.Set("retryMaxCount", ins.RetryMaxCount)
 	vp.Set("retryBaseDelay", ins.RetryBaseDelay)
+	vp.Set("githubApiConcurrency", ins.GitHubAPIConcurrency)
+	vp.Set("githubMinRequestInterval", ins.GitHubMinRequestInterval)
+	vp.Set("githubLowRemainingThreshold", ins.GitHubLowRemainingThreshold)
+	vp.Set("githubScheduleJitter", ins.GitHubScheduleJitter)
 	return vp.WriteConfig()
 }

@@ -101,9 +101,9 @@ func TestClassifyGraphQL(t *testing.T) {
 		wantWait time.Duration
 	}{
 		{
-			name:  "secondary limit with retryAfterSeconds",
-			msg:   `non-200 OK status code: 403 Forbidden body: {"errors":[{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.","extensions":{"retryAfterSeconds":60}}]}`,
-			retry: true,
+			name:     "secondary limit with retryAfterSeconds",
+			msg:      `non-200 OK status code: 403 Forbidden body: {"errors":[{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.","extensions":{"retryAfterSeconds":60}}]}`,
+			retry:    true,
 			wantWait: 60 * time.Second,
 		},
 		{
@@ -265,4 +265,26 @@ func TestDoHonorsAbuseRetryAfter(t *testing.T) {
 	elapsed := time.Since(start)
 	require.GreaterOrEqual(t, elapsed, 120*time.Millisecond)
 	require.Less(t, elapsed, time.Second)
+}
+
+func TestJitterAddsAtMostHalfAndRespectsCap(t *testing.T) {
+	base := 10 * time.Second
+	require.Equal(t, base, jitter(base, func(int64) int64 { return 0 }))
+	require.Equal(t, 15*time.Second, jitter(base, func(n int64) int64 { return n - 1 }))
+	require.Equal(t, maxBackoff, jitter(maxBackoff, func(n int64) int64 { return n - 1 }))
+}
+
+func TestDoWithRandDoesNotJitterAuthoritativeWait(t *testing.T) {
+	ra := 20 * time.Millisecond
+	calls := 0
+	start := time.Now()
+	err := do(context.Background(), Config{MaxRetries: 1, BaseDelay: time.Second}, func(n int64) int64 { return n - 1 }, func() error {
+		calls++
+		if calls == 1 {
+			return &github.AbuseRateLimitError{RetryAfter: &ra}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Less(t, time.Since(start), 200*time.Millisecond)
 }

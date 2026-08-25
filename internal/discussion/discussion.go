@@ -12,6 +12,7 @@ import (
 	"github.com/shurcooL/githubv4"
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
@@ -64,8 +65,22 @@ type RepositoryData struct {
 	Discussions []DiscussionData `json:"discussions"`
 }
 
+type rateLimitData struct {
+	Cost      githubv4.Int
+	Remaining githubv4.Int
+	ResetAt   githubv4.DateTime
+}
+
+func graphQLObservation(rate rateLimitData, err error) githubapi.Observation {
+	if err != nil {
+		return githubapi.ObserveError(err)
+	}
+	return githubapi.Observation{Resource: "graphql", Used: int(rate.Cost), Remaining: int(rate.Remaining), Reset: rate.ResetAt.Time}
+}
+
 // Discussion list query
 type discussionsQuery struct {
+	RateLimit  rateLimitData
 	Repository struct {
 		Discussions struct {
 			Nodes []struct {
@@ -91,6 +106,7 @@ type discussionsQuery struct {
 
 // Comment query
 type commentsQuery struct {
+	RateLimit  rateLimitData
 	Repository struct {
 		Discussion struct {
 			Comments struct {
@@ -115,6 +131,7 @@ type commentsQuery struct {
 
 // Reply query
 type repliesQuery struct {
+	RateLimit  rateLimitData
 	Repository struct {
 		Discussion struct {
 			Comments struct {
@@ -264,7 +281,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	for {
 		var query discussionsQuery
 		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
-			return client.Query(ctx, &query, discussionVariables)
+			permit, acquireErr := githubapi.Acquire(ctx, "graphql")
+			if acquireErr != nil {
+				return acquireErr
+			}
+			apiErr := client.Query(ctx, &query, discussionVariables)
+			permit.Done(graphQLObservation(query.RateLimit, apiErr))
+			return apiErr
 		})
 		if err != nil {
 			ui.Errorf("Error fetching discussions: %s", err)
@@ -311,7 +334,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			for {
 				var commentsQuery commentsQuery
 				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
-					return client.Query(ctx, &commentsQuery, commentVariables)
+					permit, acquireErr := githubapi.Acquire(ctx, "graphql")
+					if acquireErr != nil {
+						return acquireErr
+					}
+					apiErr := client.Query(ctx, &commentsQuery, commentVariables)
+					permit.Done(graphQLObservation(commentsQuery.RateLimit, apiErr))
+					return apiErr
 				})
 				if err != nil {
 					ui.Errorf("Error fetching comments for discussion %d: %s", discussion.Number, err)
@@ -345,7 +374,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 					for {
 						var repliesQuery repliesQuery
 						err := retry.Do(ctx, config.GetRetryConfig(), func() error {
-							return client.Query(ctx, &repliesQuery, replyVariables)
+							permit, acquireErr := githubapi.Acquire(ctx, "graphql")
+							if acquireErr != nil {
+								return acquireErr
+							}
+							apiErr := client.Query(ctx, &repliesQuery, replyVariables)
+							permit.Done(graphQLObservation(repliesQuery.RateLimit, apiErr))
+							return apiErr
 						})
 						if err != nil {
 							ui.Errorf("Error fetching replies for comment %d: %s", comment.DatabaseId, err)

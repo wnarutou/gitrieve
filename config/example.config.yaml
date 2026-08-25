@@ -63,6 +63,10 @@ storage:
     secretAccessKey: your-secret-access-key
 
 githubToken: xxx
+githubApiConcurrency: 2
+githubMinRequestInterval: 200ms
+githubLowRemainingThreshold: 100
+githubScheduleJitter: 30s
 cocurrencyNum: 6
 releaseSizeLimit: 300000000
 releaseNumLimit: 3

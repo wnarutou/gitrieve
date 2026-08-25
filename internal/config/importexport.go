@@ -54,15 +54,19 @@ func (d *DurationString) UnmarshalYAML(node *yaml.Node) error {
 // ExportConfig is the full config document used for export/import: the Config
 // fields plus the server section (which Config does not model).
 type ExportConfig struct {
-	Repository       []typedef.Repository   `yaml:"repository"`
-	Storage          []typedef.MultiStorage `yaml:"storage"`
-	GitHubToken      string                 `yaml:"githubToken"`
-	ConcurrencyNum   uint                   `yaml:"cocurrencyNum"`
-	ReleaseSizeLimit int                    `yaml:"releaseSizeLimit"`
-	ReleaseNumLimit  int                    `yaml:"releaseNumLimit"`
-	RetryMaxCount    int                    `yaml:"retryMaxCount"`
-	RetryBaseDelay   DurationString         `yaml:"retryBaseDelay"`
-	Server           ServerSection          `yaml:"server"`
+	Repository                  []typedef.Repository   `yaml:"repository"`
+	Storage                     []typedef.MultiStorage `yaml:"storage"`
+	GitHubToken                 string                 `yaml:"githubToken"`
+	ConcurrencyNum              uint                   `yaml:"cocurrencyNum"`
+	ReleaseSizeLimit            int                    `yaml:"releaseSizeLimit"`
+	ReleaseNumLimit             int                    `yaml:"releaseNumLimit"`
+	RetryMaxCount               int                    `yaml:"retryMaxCount"`
+	RetryBaseDelay              DurationString         `yaml:"retryBaseDelay"`
+	GitHubAPIConcurrency        uint                   `yaml:"githubApiConcurrency"`
+	GitHubMinRequestInterval    DurationString         `yaml:"githubMinRequestInterval"`
+	GitHubLowRemainingThreshold int                    `yaml:"githubLowRemainingThreshold"`
+	GitHubScheduleJitter        DurationString         `yaml:"githubScheduleJitter"`
+	Server                      ServerSection          `yaml:"server"`
 }
 
 // GetServerSection returns the `server:` section, applying defaults for unset
@@ -98,15 +102,19 @@ func ExportFrom(cfg *Config) (string, error) {
 		return "", fmt.Errorf("config not initialized")
 	}
 	doc := ExportConfig{
-		Repository:       cfg.Repository,
-		Storage:          cfg.Storage,
-		GitHubToken:      cfg.GitHubToken,
-		ConcurrencyNum:   cfg.ConcurrencyNum,
-		ReleaseSizeLimit: cfg.ReleaseSizeLimit,
-		ReleaseNumLimit:  cfg.ReleaseNumLimit,
-		RetryMaxCount:    cfg.RetryMaxCount,
-		RetryBaseDelay:   DurationString(cfg.RetryBaseDelay),
-		Server:           GetServerSection(),
+		Repository:                  cfg.Repository,
+		Storage:                     cfg.Storage,
+		GitHubToken:                 cfg.GitHubToken,
+		ConcurrencyNum:              cfg.ConcurrencyNum,
+		ReleaseSizeLimit:            cfg.ReleaseSizeLimit,
+		ReleaseNumLimit:             cfg.ReleaseNumLimit,
+		RetryMaxCount:               cfg.RetryMaxCount,
+		RetryBaseDelay:              DurationString(cfg.RetryBaseDelay),
+		GitHubAPIConcurrency:        cfg.GitHubAPIConcurrency,
+		GitHubMinRequestInterval:    DurationString(cfg.GitHubMinRequestInterval),
+		GitHubLowRemainingThreshold: cfg.GitHubLowRemainingThreshold,
+		GitHubScheduleJitter:        DurationString(cfg.GitHubScheduleJitter),
+		Server:                      GetServerSection(),
 	}
 	out, err := yaml.Marshal(doc)
 	if err != nil {
@@ -140,18 +148,21 @@ func Reload() error {
 		return fmt.Errorf("failed to unmarshal config file: %w", err)
 	}
 	seedDefaults(&next)
+	if !nv.IsSet("githubScheduleJitter") {
+		next.GitHubScheduleJitter = 30 * time.Second
+	}
 	if err := validateIdentity(&next); err != nil {
 		return err
 	}
 	vp = nv
-	ins = &next
+	SetIns(&next)
 	return nil
 }
 
 // seedExportDefaults fills zero-valued global options in an imported document
 // with the same defaults Init applies (see seedDefaults), so an import that
 // omits them behaves identically to a config file that omits them.
-func seedExportDefaults(doc *ExportConfig) {
+func seedExportDefaults(doc *ExportConfig, jitterPresent bool) {
 	if doc.RetryMaxCount <= 0 {
 		doc.RetryMaxCount = 3
 	}
@@ -166,6 +177,18 @@ func seedExportDefaults(doc *ExportConfig) {
 	}
 	if doc.ReleaseSizeLimit == 0 {
 		doc.ReleaseSizeLimit = 300000000
+	}
+	if doc.GitHubAPIConcurrency == 0 {
+		doc.GitHubAPIConcurrency = 2
+	}
+	if time.Duration(doc.GitHubMinRequestInterval) <= 0 {
+		doc.GitHubMinRequestInterval = DurationString(200 * time.Millisecond)
+	}
+	if doc.GitHubLowRemainingThreshold <= 0 {
+		doc.GitHubLowRemainingThreshold = 100
+	}
+	if !jitterPresent || time.Duration(doc.GitHubScheduleJitter) < 0 {
+		doc.GitHubScheduleJitter = DurationString(30 * time.Second)
 	}
 	// The server section is never hot-applied, but an absent/partial section
 	// must not force empty host/port/dbPath onto the config on apply.
@@ -186,6 +209,10 @@ func seedExportDefaults(doc *ExportConfig) {
 // for user/org entries so their identity keys resolve. It does not validate
 // identities — ValidateImport collects every violation for the caller.
 func ParseImport(yamlStr string) (*ExportConfig, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlStr), &root); err != nil {
+		return nil, fmt.Errorf("invalid YAML: %w", err)
+	}
 	var doc ExportConfig
 	if err := yaml.Unmarshal([]byte(yamlStr), &doc); err != nil {
 		return nil, fmt.Errorf("invalid YAML: %w", err)
@@ -193,7 +220,16 @@ func ParseImport(yamlStr string) (*ExportConfig, error) {
 	for i := range doc.Repository {
 		doc.Repository[i].URL = doc.Repository[i].EffectiveURL()
 	}
-	seedExportDefaults(&doc)
+	jitterPresent := false
+	if len(root.Content) > 0 && len(root.Content[0].Content) > 0 {
+		for i := 0; i+1 < len(root.Content[0].Content); i += 2 {
+			if root.Content[0].Content[i].Value == "githubScheduleJitter" {
+				jitterPresent = true
+				break
+			}
+		}
+	}
+	seedExportDefaults(&doc, jitterPresent)
 	return &doc, nil
 }
 
