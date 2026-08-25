@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"math/rand"
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
@@ -22,7 +23,33 @@ var Cmd = &cobra.Command{
 	Run:   runDaemon,
 }
 
+func stagger(ctx context.Context, max time.Duration, randN func(int64) int64) error {
+	if max <= 0 {
+		return nil
+	}
+	d := time.Duration(randN(int64(max) + 1))
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func runStaggered(ctx context.Context, fn func() error) {
+	if err := stagger(ctx, config.GetGitHubScheduleJitter(), rand.Int63n); err != nil {
+		ui.Errorf("Scheduled job cancelled before start: %s", err)
+		return
+	}
+	if err := fn(); err != nil {
+		ui.Errorf("Scheduled job failed: %s", err)
+	}
+}
+
 func runDaemon(cmd *cobra.Command, args []string) {
+	daemonCtx := cmd.Context()
 	storageMap := config.GetStorageMap()
 
 	concurrencyNum := config.GetConcurrencyNum()
@@ -49,7 +76,9 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		}
 		_, err := s.NewJob(
 			gocron.CronJob(repo.Cron, false),
-			gocron.NewTask(repository.Sync, context.Background(), repo, false, storages),
+			gocron.NewTask(func() {
+				runStaggered(daemonCtx, func() error { return repository.Sync(daemonCtx, repo, false, storages) })
+			}),
 		)
 		if err != nil {
 			ui.Errorf("Error scheduling download codes of %s, %s", repo.Name, err)
@@ -57,7 +86,9 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		if repo.DownloadReleases {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
-				gocron.NewTask(release.DownloadAllAssets, context.Background(), repo, storages),
+				gocron.NewTask(func() {
+					runStaggered(daemonCtx, func() error { return release.DownloadAllAssets(daemonCtx, repo, storages) })
+				}),
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download releases of %s, %s", repo.Name, err)
@@ -66,7 +97,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		if repo.DownloadIssues {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
-				gocron.NewTask(issue.Sync, context.Background(), repo, storages),
+				gocron.NewTask(func() { runStaggered(daemonCtx, func() error { return issue.Sync(daemonCtx, repo, storages) }) }),
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download issues of %s, %s", repo.Name, err)
@@ -75,7 +106,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		if repo.DownloadWiki {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
-				gocron.NewTask(wiki.Sync, context.Background(), repo, storages),
+				gocron.NewTask(func() { runStaggered(daemonCtx, func() error { return wiki.Sync(daemonCtx, repo, storages) }) }),
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download wiki of %s, %s", repo.Name, err)
@@ -84,7 +115,7 @@ func runDaemon(cmd *cobra.Command, args []string) {
 		if repo.DownloadDiscussion {
 			_, err = s.NewJob(
 				gocron.CronJob(repo.Cron, false),
-				gocron.NewTask(discussion.Sync, context.Background(), repo, storages),
+				gocron.NewTask(func() { runStaggered(daemonCtx, func() error { return discussion.Sync(daemonCtx, repo, storages) }) }),
 			)
 			if err != nil {
 				ui.Errorf("Error scheduling download discussion of %s, %s", repo.Name, err)
