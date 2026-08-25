@@ -48,3 +48,20 @@ func TestObserveErrorSecondaryDefaultsToOneMinute(t *testing.T) {
 	require.True(t, obs.Secondary)
 	require.Equal(t, time.Minute, obs.RetryAfter)
 }
+
+func TestObserveRESTReadsRateHeaders(t *testing.T) {
+	reset := time.Now().Add(time.Hour).Unix()
+	r := &github.Response{Response: &http.Response{Header: http.Header{}}}
+	r.Header.Set("X-RateLimit-Resource", "core")
+	r.Header.Set("X-RateLimit-Limit", "5000")
+	r.Header.Set("X-RateLimit-Remaining", "99")
+	r.Header.Set("X-RateLimit-Used", "4901")
+	r.Header.Set("X-RateLimit-Reset", time.Unix(reset, 0).Format("150405"))
+	// Use the go-github parsed Rate values for numeric quota/reset data.
+	r.Rate = github.Rate{Limit: 5000, Remaining: 99, Reset: github.Timestamp{Time: time.Unix(reset, 0)}}
+	obs := ObserveREST(r, nil)
+	require.Equal(t, "core", obs.Resource)
+	require.Equal(t, 5000, obs.Limit)
+	require.Equal(t, 99, obs.Remaining)
+	require.Equal(t, time.Unix(reset, 0), obs.Reset)
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
@@ -152,8 +153,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			resp   *gh.Response
 		)
 		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+			permit, acquireErr := githubapi.Acquire(ctx, "core")
+			if acquireErr != nil {
+				return acquireErr
+			}
 			var apiErr error
 			issues, resp, apiErr = client.Issues.ListByRepo(ctx, r.Owner, r.Name, opt)
+			permit.Done(githubapi.ObserveREST(resp, apiErr))
 			return apiErr
 		})
 		if err != nil {
@@ -179,8 +185,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 					resp     *gh.Response
 				)
 				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+					permit, acquireErr := githubapi.Acquire(ctx, "core")
+					if acquireErr != nil {
+						return acquireErr
+					}
 					var apiErr error
 					comments, resp, apiErr = client.Issues.ListComments(ctx, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
+					permit.Done(githubapi.ObserveREST(resp, apiErr))
 					return apiErr
 				})
 				if err != nil {

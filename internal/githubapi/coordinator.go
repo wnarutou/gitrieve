@@ -3,6 +3,7 @@ package githubapi
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,4 +135,19 @@ func ObserveError(err error) Observation {
 		return Observation{Resource: "core", Remaining: 0, Reset: limited.Rate.Reset.Time}
 	}
 	return Observation{}
+}
+
+func ObserveREST(resp *github.Response, err error) Observation {
+	obs := ObserveError(err)
+	if resp == nil {
+		return obs
+	}
+	obs.Limit = resp.Rate.Limit
+	obs.Remaining = resp.Rate.Remaining
+	obs.Reset = resp.Rate.Reset.Time
+	if resp.Response != nil {
+		obs.Resource = resp.Header.Get("X-RateLimit-Resource")
+		obs.Used, _ = strconv.Atoi(resp.Header.Get("X-RateLimit-Used"))
+	}
+	return obs
 }

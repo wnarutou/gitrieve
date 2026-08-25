@@ -155,7 +155,7 @@ func Reload() error {
 		return err
 	}
 	vp = nv
-	ins = &next
+	SetIns(&next)
 	return nil
 }
 

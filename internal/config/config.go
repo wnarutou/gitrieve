@@ -46,6 +46,7 @@ func Init() {
 	if !vp.IsSet("githubScheduleJitter") {
 		ins.GitHubScheduleJitter = 30 * time.Second
 	}
+	githubapi.Configure(GetGitHubAPIConfig())
 	// 启动校验：每个仓库条目都必须有可用身份。身份键为空意味着永远无法被
 	// 匹配或执行，直接拒绝启动。
 	if err := validateIdentity(ins); err != nil {
@@ -96,6 +97,7 @@ func GetIns() *Config {
 // observe a complete old or complete new instance, never a torn one.
 func SetIns(cfg *Config) {
 	ins = cfg
+	githubapi.Configure(GetGitHubAPIConfig())
 }
 
 // GetViper returns the viper instance that loaded the config file. It is nil
