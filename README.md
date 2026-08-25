@@ -128,6 +128,17 @@ See the [Web UI guide](docs/web-ui.md) and the [API reference](docs/api.md) for 
 
 ## Configuration
 
+GitHub API traffic from issues, discussions, and releases is coordinated within each gitrieve process. Optional settings and defaults:
+
+```yaml
+githubApiConcurrency: 2
+githubMinRequestInterval: 200ms
+githubLowRemainingThreshold: 100
+githubScheduleJitter: 30s
+```
+
+`githubScheduleJitter: 0s` disables staggering. Staggering applies only to daemon cron jobs; manual commands and Web API jobs start immediately. These settings reduce bursts but do not increase GitHub quota and do not coordinate separate processes or hosts.
+
 For configuration, you can check out this [example](config/example.config.yaml).
 
 For more details, see [Configuration](https://github.com/wnarutou/gitrieve/wiki/Configuration) in wiki.
@@ -183,5 +194,4 @@ docker compose up -d
 
 The released image is a multi-arch manifest covering `linux/amd64` and
 `linux/arm64`, so it works on both x86_64 and Apple Silicon machines.
-
 

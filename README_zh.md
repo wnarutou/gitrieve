@@ -128,6 +128,17 @@ gitrieve server
 
 ## 配置
 
+Issue、Discussion 和 Release 使用的 GitHub API 请求会在每个 gitrieve 进程内统一协调。可选配置及默认值如下：
+
+```yaml
+githubApiConcurrency: 2
+githubMinRequestInterval: 200ms
+githubLowRemainingThreshold: 100
+githubScheduleJitter: 30s
+```
+
+设置 `githubScheduleJitter: 0s` 可关闭错峰。错峰仅应用于 daemon 的 cron 任务，手工命令和 Web API 任务仍会立即开始。这些配置用于降低请求突发，不会增加 GitHub 配额，也不会协调不同进程或主机。
+
 有关配置，你可以查看此[示例](config/example.config.yaml)。
 
 更多细节，可查看[配置文档](https://github.com/wnarutou/gitrieve/wiki/Configuration)。

@@ -89,6 +89,10 @@ releaseSizeLimit: <bytes>
 releaseNumLimit: <count>
 retryMaxCount: <int, default 3>    # per-call max retries on rate-limit/5xx/network errors
 retryBaseDelay: <duration, default 5s>  # exponential-backoff base (doubles per retry)
+githubApiConcurrency: <uint, default 2>
+githubMinRequestInterval: <duration, default 200ms>
+githubLowRemainingThreshold: <int, default 100>
+githubScheduleJitter: <duration, default 30s; 0s disables daemon staggering>
 ```
 
 ## Testing
