@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
@@ -156,6 +157,10 @@ func GetGitHubMinRequestInterval() time.Duration { return ins.GitHubMinRequestIn
 func GetGitHubLowRemainingThreshold() int { return ins.GitHubLowRemainingThreshold }
 
 func GetGitHubScheduleJitter() time.Duration { return ins.GitHubScheduleJitter }
+
+func GetGitHubAPIConfig() githubapi.Config {
+	return githubapi.Config{Concurrency: ins.GitHubAPIConcurrency, MinRequestInterval: ins.GitHubMinRequestInterval, LowRemainingThreshold: ins.GitHubLowRemainingThreshold}
+}
 
 // GetRetryConfig assembles the retry configuration used by every GitHub API
 // call site in the issue/discussion/release syncs.
