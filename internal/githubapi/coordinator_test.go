@@ -42,6 +42,24 @@ func TestCoordinatorPausesOnlyObservedResource(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestCoordinatorSpacesStartsAfterSemaphoreAcquisition(t *testing.T) {
+	c := newCoordinator(Config{Concurrency: 2, MinRequestInterval: 40 * time.Millisecond})
+	starts := make(chan time.Time, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			p, err := c.acquire(context.Background(), "core")
+			require.NoError(t, err)
+			starts <- time.Now()
+			p.Done(Observation{})
+		}()
+	}
+	a, b := <-starts, <-starts
+	if b.Before(a) {
+		a, b = b, a
+	}
+	require.GreaterOrEqual(t, b.Sub(a), 30*time.Millisecond)
+}
+
 func TestObserveErrorSecondaryDefaultsToOneMinute(t *testing.T) {
 	err := &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}
 	obs := ObserveError(err)

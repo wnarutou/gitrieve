@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/go-github/v56/github"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 type Config struct {
@@ -63,9 +64,23 @@ func Acquire(ctx context.Context, resource string) (Permit, error) {
 }
 
 func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, error) {
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	for {
 		c.mu.Lock()
 		now := time.Now()
+		resumed := false
+		if !c.secondaryPause.IsZero() && !c.secondaryPause.After(now) {
+			c.secondaryPause = time.Time{}
+			resumed = true
+		}
+		if r, ok := c.resourcePause[resource]; ok && !r.After(now) {
+			delete(c.resourcePause, resource)
+			resumed = true
+		}
 		until := c.secondaryPause
 		if r := c.resourcePause[resource]; r.After(until) {
 			until = r
@@ -73,27 +88,24 @@ func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, err
 		if c.nextStart.After(until) {
 			until = c.nextStart
 		}
-		c.mu.Unlock()
 		if !until.After(now) {
-			break
+			c.nextStart = now.Add(c.cfg.MinRequestInterval)
+			c.mu.Unlock()
+			if resumed {
+				ui.Printf("GitHub API traffic resumed for %s", resource)
+			}
+			return &permit{c: c}, nil
 		}
+		c.mu.Unlock()
 		t := time.NewTimer(time.Until(until))
 		select {
 		case <-ctx.Done():
 			t.Stop()
+			<-c.sem
 			return nil, ctx.Err()
 		case <-t.C:
 		}
 	}
-	select {
-	case c.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	c.mu.Lock()
-	c.nextStart = time.Now().Add(c.cfg.MinRequestInterval)
-	c.mu.Unlock()
-	return &permit{c: c}, nil
 }
 
 func (p *permit) Done(obs Observation) {
@@ -105,8 +117,10 @@ func (p *permit) Done(obs Observation) {
 
 func (c *coordinator) observe(obs Observation) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := time.Now()
+	secondaryExtended := false
+	var secondaryUntil time.Time
+	resourceExtended := false
 	if obs.Secondary {
 		d := obs.RetryAfter
 		if d <= 0 {
@@ -114,10 +128,20 @@ func (c *coordinator) observe(obs Observation) {
 		}
 		if until := now.Add(d); until.After(c.secondaryPause) {
 			c.secondaryPause = until
+			secondaryUntil = until
+			secondaryExtended = true
 		}
 	}
 	if obs.Resource != "" && !obs.Reset.IsZero() && obs.Remaining <= c.cfg.LowRemainingThreshold && obs.Reset.After(c.resourcePause[obs.Resource]) {
 		c.resourcePause[obs.Resource] = obs.Reset
+		resourceExtended = true
+	}
+	c.mu.Unlock()
+	if secondaryExtended {
+		ui.Printf("GitHub API secondary-limit pause active until %s", secondaryUntil.Format(time.RFC3339))
+	}
+	if resourceExtended {
+		ui.Printf("GitHub API %s quota low (%d remaining); paused until %s", obs.Resource, obs.Remaining, obs.Reset.Format(time.RFC3339))
 	}
 }
 
