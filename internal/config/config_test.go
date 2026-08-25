@@ -32,6 +32,29 @@ func TestGetRetryDefaults(t *testing.T) {
 	require.Equal(t, 5*time.Second, rc.BaseDelay)
 }
 
+func TestGetGitHubAPIDefaults(t *testing.T) {
+	writeTmpConfig(t, "githubtoken: test\n")
+	require.Equal(t, uint(2), GetGitHubAPIConcurrency())
+	require.Equal(t, 200*time.Millisecond, GetGitHubMinRequestInterval())
+	require.Equal(t, 100, GetGitHubLowRemainingThreshold())
+	require.Equal(t, 30*time.Second, GetGitHubScheduleJitter())
+}
+
+func TestExplicitZeroGitHubScheduleJitterDisablesStaggering(t *testing.T) {
+	writeTmpConfig(t, "githubtoken: test\ngithubScheduleJitter: 0s\n")
+	require.Zero(t, GetGitHubScheduleJitter())
+}
+
+func TestGitHubAPISettingsRoundTrip(t *testing.T) {
+	writeTmpConfig(t, "githubApiConcurrency: 4\ngithubMinRequestInterval: 750ms\ngithubLowRemainingThreshold: 250\ngithubScheduleJitter: 12s\n")
+	require.NoError(t, Save())
+	Init()
+	require.Equal(t, uint(4), GetGitHubAPIConcurrency())
+	require.Equal(t, 750*time.Millisecond, GetGitHubMinRequestInterval())
+	require.Equal(t, 250, GetGitHubLowRemainingThreshold())
+	require.Equal(t, 12*time.Second, GetGitHubScheduleJitter())
+}
+
 func TestGetRetryFromConfig(t *testing.T) {
 	writeTmpConfig(t, "githubtoken: test\nretryMaxCount: 7\nretryBaseDelay: 10s\n")
 	require.Equal(t, 7, GetRetryMaxCount())

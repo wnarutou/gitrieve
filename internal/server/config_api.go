@@ -206,6 +206,10 @@ func diffGlobals(cur *config.Config, imp *config.ExportConfig) []FieldChange {
 		{"releaseNumLimit", cur.ReleaseNumLimit, imp.ReleaseNumLimit},
 		{"retryMaxCount", cur.RetryMaxCount, imp.RetryMaxCount},
 		{"retryBaseDelay", cur.RetryBaseDelay.String(), time.Duration(imp.RetryBaseDelay).String()},
+		{"githubApiConcurrency", cur.GitHubAPIConcurrency, imp.GitHubAPIConcurrency},
+		{"githubMinRequestInterval", cur.GitHubMinRequestInterval.String(), time.Duration(imp.GitHubMinRequestInterval).String()},
+		{"githubLowRemainingThreshold", cur.GitHubLowRemainingThreshold, imp.GitHubLowRemainingThreshold},
+		{"githubScheduleJitter", cur.GitHubScheduleJitter.String(), time.Duration(imp.GitHubScheduleJitter).String()},
 	}
 	var out []FieldChange
 	for _, p := range pairs {
@@ -474,6 +478,28 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		d := time.Duration(doc.RetryBaseDelay)
 		if next.RetryBaseDelay != d {
 			next.RetryBaseDelay = d
+			result.GlobalsUpdated++
+		}
+	}
+	if choice(req.Choices.GlobalChoices, "githubApiConcurrency", "imported") == "imported" && next.GitHubAPIConcurrency != doc.GitHubAPIConcurrency {
+		next.GitHubAPIConcurrency = doc.GitHubAPIConcurrency
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "githubMinRequestInterval", "imported") == "imported" {
+		d := time.Duration(doc.GitHubMinRequestInterval)
+		if next.GitHubMinRequestInterval != d {
+			next.GitHubMinRequestInterval = d
+			result.GlobalsUpdated++
+		}
+	}
+	if choice(req.Choices.GlobalChoices, "githubLowRemainingThreshold", "imported") == "imported" && next.GitHubLowRemainingThreshold != doc.GitHubLowRemainingThreshold {
+		next.GitHubLowRemainingThreshold = doc.GitHubLowRemainingThreshold
+		result.GlobalsUpdated++
+	}
+	if choice(req.Choices.GlobalChoices, "githubScheduleJitter", "imported") == "imported" {
+		d := time.Duration(doc.GitHubScheduleJitter)
+		if next.GitHubScheduleJitter != d {
+			next.GitHubScheduleJitter = d
 			result.GlobalsUpdated++
 		}
 	}

@@ -178,6 +178,10 @@ func TestParseImportSeedsDefaults(t *testing.T) {
 	require.Equal(t, 3, doc.RetryMaxCount)
 	require.Equal(t, DurationString(5*time.Second), doc.RetryBaseDelay)
 	require.Equal(t, uint(3), doc.ConcurrencyNum)
+	require.Equal(t, uint(2), doc.GitHubAPIConcurrency)
+	require.Equal(t, DurationString(200*time.Millisecond), doc.GitHubMinRequestInterval)
+	require.Equal(t, 100, doc.GitHubLowRemainingThreshold)
+	require.Equal(t, DurationString(30*time.Second), doc.GitHubScheduleJitter)
 
 	// Missing/partial server section falls back to defaults so it does not force
 	// empty host/port/dbPath onto the config on apply.
@@ -185,6 +189,12 @@ func TestParseImportSeedsDefaults(t *testing.T) {
 	require.Equal(t, "8080", doc.Server.Port)
 	require.Equal(t, "gitrieve.db", doc.Server.DbPath)
 	require.False(t, doc.Server.AuthEnabled)
+}
+
+func TestParseImportPreservesExplicitZeroScheduleJitter(t *testing.T) {
+	doc, err := ParseImport("githubScheduleJitter: 0s\n")
+	require.NoError(t, err)
+	require.Zero(t, doc.GitHubScheduleJitter)
 }
 
 func TestParseImportInvalidYAML(t *testing.T) {
