@@ -4,20 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/wnarutou/gitrieve/internal/config"
-	"github.com/wnarutou/gitrieve/internal/db"
-	"github.com/wnarutou/gitrieve/internal/discussion"
-	"github.com/wnarutou/gitrieve/internal/issue"
-	"github.com/wnarutou/gitrieve/internal/logger"
-	"github.com/wnarutou/gitrieve/internal/release"
-	"github.com/wnarutou/gitrieve/internal/repository"
-	"github.com/wnarutou/gitrieve/internal/typedef"
-	"github.com/wnarutou/gitrieve/internal/ui"
-	"github.com/wnarutou/gitrieve/internal/wiki"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/db"
+	"github.com/wnarutou/gitrieve/internal/logger"
+	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
+	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 type ExecutionStatus string
@@ -38,11 +37,16 @@ type JobContext struct {
 type Executor struct {
 	db          *db.DB
 	cfg         atomic.Pointer[config.Config]
+	runners     Runners
 	runningJobs map[string]*JobContext
 	mu          sync.RWMutex
 }
 
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
+	return NewExecutorWithRunners(logger, db, cfg, defaultRunners())
+}
+
+func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config, runners Runners) *Executor {
 	// Side effect: re-points the package-global ui sink so executor log output
 	// is persisted to the DB. Only the server process constructs an Executor;
 	// the CLI and daemon never do, so their stdout-only ui output is unchanged.
@@ -51,6 +55,7 @@ func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor
 	}
 	exec := &Executor{
 		db:          db,
+		runners:     runners,
 		runningJobs: make(map[string]*JobContext),
 	}
 	exec.cfg.Store(cfg)
@@ -107,6 +112,7 @@ func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	// Generate job ID
 	jobID := uuid.New().String()
 	startTime := time.Now()
+	plan := componentPlan(job, e.runners)
 
 	// Create execution record: job_name 保存展示名快照，repo_key 是身份键。
 	_, err := e.db.Exec(`
@@ -115,6 +121,18 @@ func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	`, jobID, job.Name, job.Key(), startTime, string(StatusPending))
 	if err != nil {
 		return "", fmt.Errorf("failed to create execution record: %w", err)
+	}
+
+	componentNames := make([]db.ComponentName, len(plan))
+	for i := range plan {
+		componentNames[i] = plan[i].name
+	}
+	if err := e.db.CreateComponents(context.Background(), jobID, componentNames); err != nil {
+		message := fmt.Sprintf("create component records: %v", err)
+		if statusErr := e.updateJobStatus(jobID, string(StatusFailed), message); statusErr != nil {
+			return "", fmt.Errorf("%s; mark execution failed: %w", message, statusErr)
+		}
+		return "", errors.New(message)
 	}
 
 	// Create cancellable context
@@ -132,12 +150,12 @@ func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	e.updateJobStatus(jobID, string(StatusRunning), "")
 
 	// Execute async
-	go e.executeAsync(ctx, jobID, job)
+	go e.executeAsync(ctx, jobID, job, plan)
 
 	return jobID, nil
 }
 
-func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository) {
+func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository, plan []component) {
 	unbind := ui.Bind(jobID, job.Name)
 	defer unbind()
 
@@ -155,6 +173,7 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		// log stream (which emits "done" as soon as it sees a terminal status)
 		// does not flush before this row is committed and drop it.
 		ui.Printf("Job was cancelled")
+		e.cancelComponents(jobID, plan, 0, ctx.Err())
 		e.updateJobStatus(jobID, string(StatusCancelled), "")
 		return
 	}
@@ -176,57 +195,103 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		}
 	}
 
-	// Execute repository sync (code). The metadata/content components below run
-	// even if this fails, mirroring the daemon's independent per-repo jobs, so a
-	// partial archive is still attempted. When the caller cancels, Sync returns
-	// promptly with the context error; skip the "failed" log in that case.
-	codeErr := repository.Sync(ctx, job, false, storages)
-	if codeErr != nil && ctx.Err() == nil {
-		ui.Errorf("Code sync failed: %v", codeErr)
+	failures := make([]string, 0)
+	for i, planned := range plan {
+		if ctx.Err() != nil {
+			e.cancelComponents(jobID, plan, i, ctx.Err())
+			ui.Printf("Job was cancelled")
+			e.updateJobStatus(jobID, string(StatusCancelled), "")
+			return
+		}
+
+		if err := e.db.StartComponent(context.Background(), jobID, planned.name, time.Now()); err != nil {
+			message := fmt.Sprintf("persist running state: %v", err)
+			failures = append(failures, componentFailure(planned.name, message))
+			ui.Errorf("Failed to start %s: %v", planned.name, err)
+			e.finishAfterStoreFailure(jobID, planned.name, message)
+			continue
+		}
+
+		if planned.name != db.ComponentCode {
+			ui.Printf("Downloading %s", componentLogName(planned.name))
+		}
+		runErr := planned.run(ctx, job, storages)
+		if cancelErr := componentCancellation(ctx, runErr); cancelErr != nil {
+			e.cancelComponents(jobID, plan, i, cancelErr)
+			ui.Printf("Job was cancelled")
+			e.updateJobStatus(jobID, string(StatusCancelled), "")
+			return
+		}
+
+		status := db.ComponentCompleted
+		errorMessage := ""
+		if reason, skipped := syncresult.SkippedReason(runErr); skipped {
+			status = db.ComponentSkipped
+			errorMessage = reason
+			ui.Printf("Skipping %s: %s", componentLogName(planned.name), reason)
+		} else if runErr != nil {
+			status = db.ComponentFailed
+			errorMessage = runErr.Error()
+			failures = append(failures, componentFailure(planned.name, errorMessage))
+			ui.Errorf("Failed to download %s: %v", componentLogName(planned.name), runErr)
+		}
+
+		if err := e.db.FinishComponent(context.Background(), jobID, planned.name, status, time.Now(), errorMessage); err != nil {
+			message := fmt.Sprintf("persist %s state: %v", status, err)
+			failures = append(failures, componentFailure(planned.name, message))
+			ui.Errorf("Failed to finish %s: %v", planned.name, err)
+			e.finishAfterStoreFailure(jobID, planned.name, message)
+		}
 	}
 
-	// Download the configured metadata/content components. Best-effort: a
-	// component may legitimately fail (e.g. a repo with no wiki), so failures
-	// are logged as errors but the job status reflects only the code sync.
-	e.downloadComponents(ctx, job, storages)
+	if len(failures) != 0 {
+		e.updateJobStatus(jobID, string(StatusFailed), strings.Join(failures, "; "))
+		return
+	}
 
-	if ctx.Err() != nil {
-		// Final log line before the terminal status update (see note above).
-		ui.Printf("Job was cancelled")
-		e.updateJobStatus(jobID, string(StatusCancelled), "")
-		return
-	}
-	if codeErr != nil {
-		e.updateJobStatus(jobID, string(StatusFailed), codeErr.Error())
-		return
-	}
 	// Final log line before the terminal status update (see note above).
 	ui.Printf("Job completed successfully")
 	e.updateJobStatus(jobID, string(StatusCompleted), "")
 }
 
-// downloadComponents runs the per-repository metadata/content syncs enabled in
-// the config (releases, issues, wiki, discussions), mirroring what the daemon
-// schedules. Each runs independently; progress and failures are logged via ui
-// so they surface in the job's log stream.
-func (e *Executor) downloadComponents(ctx context.Context, job typedef.Repository, storages []typedef.MultiStorage) {
-	run := func(name string, enabled bool, fn func() error) {
-		if !enabled || ctx.Err() != nil {
-			return
-		}
-		ui.Printf("Downloading %s", name)
-		if err := fn(); err != nil {
-			if ctx.Err() != nil {
-				ui.Printf("%s download cancelled", name)
-			} else {
-				ui.Errorf("Failed to download %s: %v", name, err)
-			}
+func componentFailure(name db.ComponentName, message string) string {
+	label := string(name)
+	if name == db.ComponentIssue {
+		label = "issue"
+	}
+	return fmt.Sprintf("%s: %s", label, message)
+}
+
+func componentCancellation(ctx context.Context, runErr error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return runErr
+	}
+	return nil
+}
+
+func componentLogName(name db.ComponentName) string {
+	if name == db.ComponentRelease {
+		return "releases"
+	}
+	return string(name)
+}
+
+func (e *Executor) cancelComponents(jobID string, plan []component, first int, cancelErr error) {
+	message := cancelErr.Error()
+	for _, planned := range plan[first:] {
+		if err := e.db.FinishComponent(context.Background(), jobID, planned.name, db.ComponentCancelled, time.Now(), message); err != nil {
+			ui.Errorf("Failed to cancel %s: %v", planned.name, err)
 		}
 	}
-	run("releases", job.DownloadReleases, func() error { return release.DownloadAllAssets(ctx, job, storages) })
-	run("issues", job.DownloadIssues, func() error { return issue.Sync(ctx, job, storages) })
-	run("wiki", job.DownloadWiki, func() error { return wiki.Sync(ctx, job, storages) })
-	run("discussion", job.DownloadDiscussion, func() error { return discussion.Sync(ctx, job, storages) })
+}
+
+func (e *Executor) finishAfterStoreFailure(jobID string, name db.ComponentName, message string) {
+	if err := e.db.FinishComponent(context.Background(), jobID, name, db.ComponentFailed, time.Now(), message); err != nil {
+		ui.Errorf("Failed to record %s store failure: %v", name, err)
+	}
 }
 
 func (e *Executor) CancelJob(jobID string) error {
@@ -240,9 +305,7 @@ func (e *Executor) CancelJob(jobID string) error {
 	}
 
 	jobCtx.CancelFunc()
-
-	// Update status in database
-	return e.updateJobStatus(jobID, string(StatusCancelled), "")
+	return nil
 }
 
 func (e *Executor) updateJobStatus(jobID string, status string, errorMessage string) error {

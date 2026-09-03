@@ -1,7 +1,10 @@
 package executor
 
 import (
-	"os"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,22 +13,99 @@ import (
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/logger"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
 func newTestExecutor(t *testing.T) (*Executor, *db.DB) {
 	t.Helper()
+	return newTestExecutorForRepo(t, typedef.Repository{Name: "test-repo", URL: "github.com/test/repo"}, noOpRunners())
+}
+
+func newTestExecutorForRepo(t *testing.T, repo typedef.Repository, runners Runners) (*Executor, *db.DB) {
+	t.Helper()
 	testDB, err := db.Initialize(":memory:")
-	assert.NoError(t, err)
-	t.Cleanup(func() { testDB.Close() })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
 
 	log := logger.NewLogger(testDB)
-	cfg := &config.Config{
-		Repository: []typedef.Repository{
-			{Name: "test-repo", URL: "github.com/test/repo"},
-		},
+	cfg := &config.Config{Repository: []typedef.Repository{repo}}
+	return NewExecutorWithRunners(log, testDB, cfg, runners), testDB
+}
+
+func noOpRunners() Runners {
+	run := func(context.Context, typedef.Repository, []typedef.MultiStorage) error { return nil }
+	return Runners{Code: run, Release: run, Issue: run, Wiki: run, Discussion: run}
+}
+
+type runnerRecorder struct {
+	mu     sync.Mutex
+	calls  []string
+	errors map[string]error
+}
+
+func (r *runnerRecorder) runner(name string) SyncFunc {
+	return func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.calls = append(r.calls, name)
+		return r.errors[name]
 	}
-	return NewExecutor(log, testDB, cfg), testDB
+}
+
+func (r *runnerRecorder) runners() Runners {
+	return Runners{
+		Code:       r.runner("code"),
+		Release:    r.runner("release"),
+		Issue:      r.runner("issues"),
+		Wiki:       r.runner("wiki"),
+		Discussion: r.runner("discussion"),
+	}
+}
+
+func (r *runnerRecorder) recordedCalls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.calls...)
+}
+
+func waitForJob(t *testing.T, exec *Executor, jobID string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for exec.IsJobRunning(jobID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s did not finish", jobID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func requireExecution(t *testing.T, testDB *db.DB, jobID string, wantStatus ExecutionStatus, wantError string) {
+	t.Helper()
+	var status, errorMessage string
+	require.NoError(t, testDB.QueryRow(
+		"SELECT status, COALESCE(error_message, '') FROM executions WHERE id = ?", jobID,
+	).Scan(&status, &errorMessage))
+	require.Equal(t, string(wantStatus), status)
+	require.Equal(t, wantError, errorMessage)
+}
+
+type expectedComponent struct {
+	name         db.ComponentName
+	status       db.ComponentStatus
+	errorMessage string
+}
+
+func requireComponents(t *testing.T, testDB *db.DB, jobID string, want ...expectedComponent) {
+	t.Helper()
+	components, err := testDB.ListComponents(context.Background(), jobID)
+	require.NoError(t, err)
+	require.Len(t, components, len(want))
+	for i := range want {
+		require.Equal(t, want[i].name, components[i].Component)
+		require.Equal(t, want[i].status, components[i].Status)
+		require.Equal(t, want[i].errorMessage, components[i].ErrorMessage)
+	}
 }
 
 func TestExecuteJobWritesBoundLogs(t *testing.T) {
@@ -34,97 +114,238 @@ func TestExecuteJobWritesBoundLogs(t *testing.T) {
 	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	require.NoError(t, err)
 	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
 
-	// executeAsync binds the goroutine and ui.Printf("Starting job execution")
-	// is forwarded to the DB logs for this execution. Poll for that specific
-	// row rather than asserting a single snapshot's ordering: under parallel
-	// full-suite load a concurrent reader can transiently hold SQLite's write
-	// lock and an insert can be BUSY-dropped (sink errors are deliberately
-	// discarded), so the row is only guaranteed to appear eventually.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var count int
-		err := testDB.QueryRow(
-			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Starting job execution'", jobIDs[0],
-		).Scan(&count)
-		require.NoError(t, err)
-		if count >= 1 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected a 'Starting job execution' log row for execution %s", jobIDs[0])
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	var count int
+	err = testDB.QueryRow(
+		"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Starting job execution'", jobIDs[0],
+	).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestExecuteJobRunsConfiguredComponents(t *testing.T) {
-	// The component syncs (issue/release/wiki/discussion) read the package-global
-	// config via config.GetIns() and dereference cfg.GitHubToken, so mirror the
-	// server process (where cobra.OnInitialize runs config.Init) to avoid a nil
-	// pointer panic.
-	tmp, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
-	require.NoError(t, err)
-	_, err = tmp.WriteString("githubtoken: test-token\n")
-	require.NoError(t, err)
-	require.NoError(t, tmp.Close())
-	config.Path = tmp.Name()
-	config.Init()
-	t.Cleanup(func() { config.Path = "" })
-
-	testDB, err := db.Initialize(":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { testDB.Close() })
-
-	log := logger.NewLogger(testDB)
-	cfg := &config.Config{
-		Repository: []typedef.Repository{
-			{Name: "test-repo", URL: "github.com/test/repo", DownloadIssues: true},
-		},
-	}
-	exec := NewExecutor(log, testDB, cfg)
+	recorder := &runnerRecorder{errors: map[string]error{}}
+	exec, _ := newTestExecutorForRepo(t, typedef.Repository{
+		Name:               "test-repo",
+		URL:                "github.com/test/repo",
+		DownloadReleases:   true,
+		DownloadIssues:     true,
+		DownloadWiki:       true,
+		DownloadDiscussion: true,
+	}, recorder.runners())
 
 	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	require.NoError(t, err)
 	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+	require.Equal(t, []string{"code", "release", "issues", "wiki", "discussion"}, recorder.recordedCalls())
+}
 
-	// The executor must run the configured component syncs. "Downloading issues"
-	// is written only after repository.Sync returns, and that sync does a real
-	// clone of the (nonexistent) test repo that can take a while on a slow
-	// network — use a generous deadline.
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		var count int
-		err := testDB.QueryRow(
-			"SELECT COUNT(*) FROM logs WHERE execution_id = ? AND message = 'Downloading issues'", jobIDs[0],
-		).Scan(&count)
-		require.NoError(t, err)
-		if count >= 1 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected 'Downloading issues' log row for execution %s", jobIDs[0])
-		}
-		time.Sleep(50 * time.Millisecond)
+func TestExecuteJobComponentsArePlannedBeforeTheFirstRunner(t *testing.T) {
+	codeStarted := make(chan struct{})
+	releaseCode := make(chan struct{})
+	runners := noOpRunners()
+	runners.Code = func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
+		close(codeStarted)
+		<-releaseCode
+		return nil
 	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:               "test-repo",
+		URL:                "github.com/test/repo",
+		DownloadReleases:   true,
+		DownloadIssues:     true,
+		DownloadWiki:       true,
+		DownloadDiscussion: true,
+	}, runners)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	<-codeStarted
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentRunning, ""},
+		expectedComponent{db.ComponentRelease, db.ComponentPending, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentPending, ""},
+		expectedComponent{db.ComponentWiki, db.ComponentPending, ""},
+		expectedComponent{db.ComponentDiscussion, db.ComponentPending, ""},
+	)
+
+	close(releaseCode)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestExecuteJobComponentFailureRunsLaterComponentsAndFailsOverall(t *testing.T) {
+	recorder := &runnerRecorder{errors: map[string]error{"issues": errors.New("rate limit")}}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, recorder.runners())
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	require.Equal(t, []string{"code", "issues", "wiki"}, recorder.recordedCalls())
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, "issue: rate limit")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentFailed, "rate limit"},
+		expectedComponent{db.ComponentWiki, db.ComponentCompleted, ""},
+	)
+}
+
+func TestExecuteJobOverallFailureContinuesAfterCodeFailure(t *testing.T) {
+	recorder := &runnerRecorder{errors: map[string]error{"code": errors.New("clone failed")}}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+	}, recorder.runners())
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	require.Equal(t, []string{"code", "issues"}, recorder.recordedCalls())
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, "code: clone failed")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentFailed, "clone failed"},
+		expectedComponent{db.ComponentIssue, db.ComponentCompleted, ""},
+	)
+}
+
+func TestExecuteJobComponentFailuresUseSemicolonSeparatedSummary(t *testing.T) {
+	recorder := &runnerRecorder{errors: map[string]error{
+		"issues": errors.New("rate limit"),
+		"wiki":   errors.New("permission denied"),
+	}}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, recorder.runners())
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, "issue: rate limit; wiki: permission denied")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentFailed, "rate limit"},
+		expectedComponent{db.ComponentWiki, db.ComponentFailed, "permission denied"},
+	)
+}
+
+func TestExecuteJobSkipCompletesOverall(t *testing.T) {
+	recorder := &runnerRecorder{errors: map[string]error{
+		"wiki": syncresult.Skip("repository has no wiki"),
+	}}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:         "test-repo",
+		URL:          "github.com/test/repo",
+		DownloadWiki: true,
+	}, recorder.runners())
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	requireExecution(t, testDB, jobIDs[0], StatusCompleted, "")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentWiki, db.ComponentSkipped, "repository has no wiki"},
+	)
+}
+
+func TestExecuteJobCancelTerminalizesCurrentAndRemainingComponents(t *testing.T) {
+	issueStarted := make(chan struct{})
+	runners := noOpRunners()
+	runners.Issue = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(issueStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, runners)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	<-issueStarted
+	require.NoError(t, exec.CancelJob(jobIDs[0]))
+	waitForJob(t, exec, jobIDs[0])
+
+	requireExecution(t, testDB, jobIDs[0], StatusCancelled, "")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentCancelled, "context canceled"},
+		expectedComponent{db.ComponentWiki, db.ComponentCancelled, "context canceled"},
+	)
+}
+
+func TestExecuteJobComponentStoreFailurePreventsCompletedOverall(t *testing.T) {
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:         "test-repo",
+		URL:          "github.com/test/repo",
+		DownloadWiki: true,
+	}, noOpRunners())
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_wiki_completion
+		BEFORE UPDATE OF status ON execution_components
+		WHEN OLD.component = 'wiki' AND NEW.status = 'completed'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced component terminal update failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	storeMessage := fmt.Sprintf(
+		`persist completed state: finish component "wiki" for execution %q: constraint failed: forced component terminal update failure (1811)`,
+		jobIDs[0],
+	)
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, "wiki: "+storeMessage)
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentWiki, db.ComponentFailed, storeMessage},
+	)
 }
 
 func TestExecuteJobCreatesRecord(t *testing.T) {
-	exec, testDB := newTestExecutor(t)
+	codeStarted := make(chan struct{})
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(codeStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{Name: "test-repo", URL: "github.com/test/repo"}, runners)
 
 	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
 	assert.NoError(t, err)
 	require.Len(t, jobIDs, 1)
 	assert.NotEmpty(t, jobIDs[0])
+	<-codeStarted
 
-	// A pending/running execution record should exist in the database
 	var status string
 	err = testDB.QueryRow("SELECT status FROM executions WHERE id = ?", jobIDs[0]).Scan(&status)
 	assert.NoError(t, err)
-	assert.Contains(t, []string{"pending", "running"}, status)
-
-	// The job should be marked as running in memory
+	assert.Equal(t, "running", status)
 	assert.True(t, exec.IsJobRunning(jobIDs[0]))
+
+	require.NoError(t, exec.CancelJob(jobIDs[0]))
+	waitForJob(t, exec, jobIDs[0])
 }
 
 func TestExecuteJobUnknownRepository(t *testing.T) {
@@ -137,7 +358,6 @@ func TestExecuteJobUnknownRepository(t *testing.T) {
 func TestCancelNonRunningJob(t *testing.T) {
 	exec, _ := newTestExecutor(t)
 
-	// Cancelling a job that was never started should still update its status
 	err := exec.CancelJob("never-started")
 	assert.NoError(t, err)
 }
@@ -153,6 +373,7 @@ func TestExecuteJobWritesRepoKey(t *testing.T) {
 	err = testDB.QueryRow("SELECT repo_key FROM executions WHERE id = ?", jobIDs[0]).Scan(&repoKey)
 	assert.NoError(t, err)
 	assert.Equal(t, "github.com/test/repo", repoKey)
+	waitForJob(t, exec, jobIDs[0])
 }
 
 func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
@@ -179,6 +400,7 @@ func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 		var repoKey string
 		require.NoError(t, testDB.QueryRow("SELECT repo_key FROM executions WHERE id = ?", id).Scan(&repoKey))
 		keys[repoKey] = true
+		waitForJob(t, exec, id)
 	}
 	assert.True(t, keys["github.com/acme/alpha"])
 	assert.True(t, keys["github.com/acme/beta"])
@@ -191,12 +413,11 @@ func TestRefreshConfigRepointsExecutor(t *testing.T) {
 		{Name: "other", URL: "github.com/other/repo"},
 	}})
 
-	// The old key no longer resolves against the executor's config.
 	_, err := exec.ExecuteJob("github.com/test/repo")
 	require.Error(t, err)
 
-	// The new key resolves.
 	jobIDs, err := exec.ExecuteJob("github.com/other/repo")
 	require.NoError(t, err)
 	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
 }
