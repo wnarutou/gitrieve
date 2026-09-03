@@ -2,14 +2,23 @@ package wiki
 
 import (
 	"context"
+	"fmt"
 
 	gh "github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/repository"
 	"github.com/wnarutou/gitrieve/internal/scm"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
+
+func wikiAvailability(repoURL string, hasWiki bool) error {
+	if hasWiki {
+		return nil
+	}
+	return syncresult.Skip(fmt.Sprintf("repository %s has no wiki", repoURL))
+}
 
 func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if ctx.Err() != nil {
@@ -35,8 +44,10 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		return err
 	}
 
-	if !gitrepo.GetHasWiki() {
-		ui.Errorf("repository %s has no wiki", repo.URL)
+	if err := wikiAvailability(repo.URL, gitrepo.GetHasWiki()); err != nil {
+		reason, _ := syncresult.SkippedReason(err)
+		ui.Printf("Skipped: %s", reason)
+		return err
 	}
 
 	ui.Printf("Running %s's wiki", repo.Name)

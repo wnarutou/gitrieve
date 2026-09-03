@@ -12,6 +12,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/issue"
 	"github.com/wnarutou/gitrieve/internal/release"
 	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 	"github.com/wnarutou/gitrieve/internal/wiki"
@@ -44,6 +45,10 @@ func runStaggered(ctx context.Context, fn func() error) {
 		return
 	}
 	if err := fn(); err != nil {
+		if reason, ok := syncresult.SkippedReason(err); ok {
+			ui.Printf("Skipped: %s", reason)
+			return
+		}
 		ui.Errorf("Scheduled job failed: %s", err)
 	}
 }
