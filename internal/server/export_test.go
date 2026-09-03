@@ -61,6 +61,7 @@ func NewTestServer(db *db.DB) *TestServer {
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
 	s.router.GET("/api/jobs", api.GetJobs)
 	s.router.GET("/api/jobs/:id/logs", api.GetJobLogs)
+	s.router.GET("/api/jobs/:id/components", api.GetJobComponents)
 	return s
 }
 
@@ -75,6 +76,7 @@ func NewTestServerWithExecutor(db *db.DB, exec *executor.Executor) *TestServer {
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
 	s.router.GET("/api/jobs", api.GetJobs)
 	s.router.GET("/api/jobs/:id/logs", api.GetJobLogs)
+	s.router.GET("/api/jobs/:id/components", api.GetJobComponents)
 	return s
 }
 

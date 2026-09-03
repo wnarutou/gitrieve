@@ -1,7 +1,6 @@
 package server
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -381,109 +380,170 @@ func lookupStats(stats map[string]runStats, repo typedef.Repository) runStats {
 // GetRepositories returns repositories with per-repo execution stats, last/next
 // run times, search (fuzzy name or URL match) and pagination.
 func (a *API) GetRepositories(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	search := c.Query("search")
-
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 || limit > 100 {
-		limit = 20
+	now := time.Now()
+	filter, page, limit, err := parseRepositoryHealthQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid repository query: " + err.Error()})
+		return
 	}
 
-	// Aggregate per-repository execution stats from the DB.
-	stats := map[string]runStats{}
-
-	// Note: we select the bare start_time column (constrained to the max by
-	// HAVING) rather than MAX(start_time). The modernc.org/sqlite driver only
-	// converts TEXT to time.Time for columns with a declared DATETIME type;
-	// aggregate expressions like MAX(start_time) have no declared type and come
-	// back as a raw string that database/sql cannot scan into *time.Time.
-	rows, err := a.db.Query(`
-		SELECT repo_key,
-		       start_time AS last_run,
-		       COUNT(*)        AS total,
-		       COALESCE(SUM(status = 'completed'), 0) AS success,
-		       COALESCE(SUM(status = 'failed'), 0)    AS failed
-		FROM executions
-		GROUP BY repo_key
-		HAVING start_time = MAX(start_time)`)
+	stats, err := a.db.RepositoryRunStats(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query repository stats: " + err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var key string
-		var lastRun sql.NullTime
-		var a runStats
-		if err := rows.Scan(&key, &lastRun, &a.Total, &a.Success, &a.Failed); err != nil {
-			c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to scan repository stats: " + err.Error()})
-			return
-		}
-		if lastRun.Valid {
-			a.LastRun = &lastRun.Time
-		}
-		stats[key] = a
+	var repos []typedef.Repository
+	var overdueGrace, stuckThreshold time.Duration
+	if a.config != nil {
+		repos = a.config.Repository
+		overdueGrace = a.config.SyncOverdueGrace
+		stuckThreshold = a.config.SyncStuckThreshold
 	}
-	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to iterate repository stats: " + err.Error()})
-		return
-	}
-
-	// Fuzzy name or URL filter (in-memory equivalent of LIKE '%search%'). SQL
-	// LIKE is case-insensitive for ASCII, so match that by folding both sides to
-	// lower case before the Contains check.
-	filtered := make([]typedef.Repository, 0, len(a.config.Repository))
-	for _, repo := range a.config.Repository {
-		if search != "" {
-			inName := strings.Contains(strings.ToLower(repo.Name), strings.ToLower(search))
-			inURL := strings.Contains(strings.ToLower(repo.EffectiveURL()), strings.ToLower(search))
-			if !inName && !inURL {
-				continue
-			}
-		}
-		filtered = append(filtered, repo)
-	}
+	matched := searchRepositorySnapshot(buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), filter.Search)
+	summary := summarizeRepositorySnapshot(matched)
+	filtered := filterRepositorySnapshot(matched, filter)
+	sortRepositorySnapshot(filtered, filter.Sort, filter.Direction)
 
 	total := len(filtered)
-	start := (page - 1) * limit
-	if start > total {
-		start = total
+	start := total
+	if page <= 1+total/limit {
+		start = (page - 1) * limit
 	}
 	end := start + limit
 	if end > total {
 		end = total
 	}
 
-	now := time.Now()
-	overviews := make([]RepositoryOverview, 0, end-start)
-	for _, repo := range filtered[start:end] {
-		// Serve the effective URL (type=user/org with empty URL and an orgName
-		// synthesizes https://github.com/<orgName>). The frontend keys rows off
-		// r.URL, so a raw config entry without `url` would otherwise come back
-		// with URL=="" and its row buttons would no-op / 404. repo is a loop copy,
-		// so this neither mutates nor persists the config.
-		repo.URL = repo.EffectiveURL()
-		s := lookupStats(stats, repo)
-		overviews = append(overviews, RepositoryOverview{
-			Repository:  repo,
-			LastRunTime: s.LastRun,
-			NextRunTime: nextRunTime(repo.Cron, now),
-			TotalRuns:   s.Total,
-			SuccessRuns: s.Success,
-			FailedRuns:  s.Failed,
-		})
-	}
-
 	c.JSON(http.StatusOK, Response{Code: 200, Data: ListRepositoriesResponse{
-		Repositories: overviews,
+		Repositories: filtered[start:end],
+		Summary:      summary,
 		Total:        total,
 		Page:         page,
 		Limit:        limit,
 	}})
+}
+
+func parseRepositoryHealthQuery(c *gin.Context) (RepositoryHealthFilter, int, int, error) {
+	health, healthSet := c.GetQuery("health")
+	sortKey, sortSet := c.GetQuery("sort")
+	direction, directionSet := c.GetQuery("direction")
+	if !sortSet {
+		sortKey = "attention"
+	}
+	if !directionSet {
+		direction = "asc"
+	}
+	filter := RepositoryHealthFilter{
+		Search:    c.Query("search"),
+		Health:    health,
+		Sort:      sortKey,
+		Direction: direction,
+	}
+	if healthSet && !validRepositoryHealth(filter.Health) {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("health %q is not supported", filter.Health)
+	}
+	if !validRepositorySort(filter.Sort) {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("sort %q is not supported", filter.Sort)
+	}
+	if filter.Direction != "asc" && filter.Direction != "desc" {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("direction %q is not supported", filter.Direction)
+	}
+
+	var err error
+	if raw, ok := c.GetQuery("overdue"); ok {
+		filter.Overdue, err = strictQueryBool(raw)
+		if err != nil {
+			return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("overdue: %w", err)
+		}
+	}
+	if raw, ok := c.GetQuery("stuck"); ok {
+		filter.Stuck, err = strictQueryBool(raw)
+		if err != nil {
+			return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("stuck: %w", err)
+		}
+	}
+	page, err := strictQueryInt(c, "page", 1, 1, int(^uint(0)>>1))
+	if err != nil {
+		return RepositoryHealthFilter{}, 0, 0, err
+	}
+	limit, err := strictQueryInt(c, "limit", 20, 1, 100)
+	if err != nil {
+		return RepositoryHealthFilter{}, 0, 0, err
+	}
+	return filter, page, limit, nil
+}
+
+func validRepositoryHealth(health string) bool {
+	switch health {
+	case "healthy", "failed", "overdue", "stuck", "never_synced", "cancelled", "pending", "running", "syncing":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRepositorySort(sortKey string) bool {
+	switch sortKey {
+	case "attention", "name", "last_attempt", "last_success":
+		return true
+	default:
+		return false
+	}
+}
+
+func strictQueryBool(raw string) (*bool, error) {
+	switch raw {
+	case "true":
+		value := true
+		return &value, nil
+	case "false":
+		value := false
+		return &value, nil
+	default:
+		return nil, fmt.Errorf("must be true or false")
+	}
+}
+
+func strictQueryInt(c *gin.Context, name string, defaultValue, minimum, maximum int) (int, error) {
+	raw, ok := c.GetQuery(name)
+	if !ok {
+		return defaultValue, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return value, nil
+}
+
+// GetJobComponents returns the persisted component rows for one execution.
+func (a *API) GetJobComponents(c *gin.Context) {
+	jobID := c.Param("id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Job ID is required"})
+		return
+	}
+
+	exists, err := a.db.ExecutionExists(c.Request.Context(), jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to check job: " + err.Error()})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusNotFound, Response{Code: 404, Message: "Job not found"})
+		return
+	}
+
+	components, err := a.db.ListComponents(c.Request.Context(), jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query job components: " + err.Error()})
+		return
+	}
+	if components == nil {
+		components = []db.ComponentExecution{}
+	}
+	c.JSON(http.StatusOK, Response{Code: 200, Data: ListComponentsResponse{Components: components}})
 }
 
 // CreateRepository adds a new repository to the configuration.

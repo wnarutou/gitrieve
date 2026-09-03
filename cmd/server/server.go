@@ -113,6 +113,7 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	apiGroup.DELETE("/api/jobs/:id", api.CancelJob)
 	apiGroup.GET("/api/jobs", api.GetJobs)
 	apiGroup.GET("/api/jobs/:id/logs", api.GetJobLogs)
+	apiGroup.GET("/api/jobs/:id/components", api.GetJobComponents)
 	apiGroup.GET("/api/repositories", api.GetRepositories)
 	apiGroup.POST("/api/repositories", api.CreateRepository)
 	// *id catch-all: the identity key is a URL like github.com/owner/repo and
@@ -135,6 +136,10 @@ func (s *Server) setupTestRoutes(db *db.DB) {
 	s.router.GET("/api/jobs", func(c *gin.Context) {
 		api := internalserver.NewAPI(&config.Config{}, db, nil)
 		api.GetJobs(c)
+	})
+	s.router.GET("/api/jobs/:id/components", func(c *gin.Context) {
+		api := internalserver.NewAPI(&config.Config{}, db, nil)
+		api.GetJobComponents(c)
 	})
 }
 

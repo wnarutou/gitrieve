@@ -204,6 +204,23 @@ func TestRepositoryRunStatsReturnsLatestRowsSuccessTimesAndCumulativeCounts(t *t
 	require.Equal(t, int64(2), tied.TotalRuns)
 }
 
+func TestRepositoryRunStatsParsesSQLiteAggregateTimeWithMonotonicSuffix(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	start := time.Now()
+	end := start.Add(time.Minute)
+	insertRepositoryRun(t, testDB, "monotonic-success", "github.com/acme/monotonic", start, &end, "completed", nil)
+
+	stats, err := testDB.RepositoryRunStats(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, stats["github.com/acme/monotonic"].LastSuccess)
+	got := *stats["github.com/acme/monotonic"].LastSuccess
+	require.Equal(t, end.Round(0), got.Round(0))
+}
+
 func TestStartComponentRejectsMissingAndNonPendingRows(t *testing.T) {
 	ctx := context.Background()
 	testDB, err := Initialize(":memory:")

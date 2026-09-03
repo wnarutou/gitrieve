@@ -340,6 +340,13 @@ func nullableAggregateTime(value interface{}) (*time.Time, error) {
 	default:
 		return nil, fmt.Errorf("unsupported timestamp type %T", value)
 	}
+	// SQLite aggregate expressions lose the DATETIME column type that normally
+	// lets the driver scan directly into time.Time. A Go time.Time persisted by
+	// the driver can retain its optional monotonic annotation in that text form;
+	// it is not part of a wall-clock timestamp and time.Parse cannot read it.
+	if monotonic := strings.LastIndex(raw, " m="); monotonic >= 0 {
+		raw = raw[:monotonic]
+	}
 	for _, layout := range []string{
 		"2006-01-02 15:04:05.999999999 -0700 MST",
 		"2006-01-02 15:04:05.999999999-07:00",

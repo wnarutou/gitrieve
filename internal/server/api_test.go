@@ -20,6 +20,72 @@ import (
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
+func TestGetJobComponents(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
+
+	exec := executor.NewExecutor(logger.NewLogger(testDB), testDB, nil)
+	t.Cleanup(func() { require.NoError(t, exec.Close()) })
+	s := server.NewTestServerWithExecutor(testDB, exec)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err = testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, status) VALUES (?, ?, ?, ?, ?)`,
+		"components", "components", "github.com/test/components", now, "completed")
+	require.NoError(t, err)
+	require.NoError(t, testDB.CreateComponents(context.Background(), "components", []db.ComponentName{db.ComponentRelease, db.ComponentCode}))
+	_, err = testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, status) VALUES (?, ?, ?, ?, ?)`,
+		"historical", "historical", "github.com/test/historical", now, "completed")
+	require.NoError(t, err)
+
+	type componentView struct {
+		ExecutionID string     `json:"execution_id"`
+		Component   string     `json:"component"`
+		Status      string     `json:"status"`
+		StartTime   *time.Time `json:"start_time"`
+		EndTime     *time.Time `json:"end_time"`
+		Error       string     `json:"error_message"`
+	}
+	get := func(id string) (int, []componentView) {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs/"+id+"/components", nil)
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+		var response struct {
+			Data struct {
+				Components []componentView `json:"components"`
+			} `json:"data"`
+		}
+		if resp.Code == http.StatusOK {
+			require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		}
+		return resp.Code, response.Data.Components
+	}
+
+	t.Run("returns ordered component rows", func(t *testing.T) {
+		status, components := get("components")
+		require.Equal(t, http.StatusOK, status)
+		require.Len(t, components, 2)
+		require.Equal(t, []string{"code", "release"}, []string{components[0].Component, components[1].Component})
+		require.Equal(t, "components", components[0].ExecutionID)
+		require.Equal(t, "pending", components[0].Status)
+		require.Nil(t, components[0].StartTime)
+		require.Nil(t, components[0].EndTime)
+		require.Empty(t, components[0].Error)
+	})
+
+	t.Run("returns an empty array for a known historical execution", func(t *testing.T) {
+		status, components := get("historical")
+		require.Equal(t, http.StatusOK, status)
+		require.NotNil(t, components)
+		require.Empty(t, components)
+	})
+
+	t.Run("returns not found for unknown execution", func(t *testing.T) {
+		status, _ := get("unknown")
+		require.Equal(t, http.StatusNotFound, status)
+	})
+}
+
 func TestGetJobsAPI(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)

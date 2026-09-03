@@ -3,6 +3,7 @@ package server
 import (
 	"time"
 
+	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -106,10 +107,15 @@ type RepositoryHealthSummary struct {
 }
 
 type ListRepositoriesResponse struct {
-	Repositories []RepositoryOverview `json:"repositories"`
-	Total        int                  `json:"total"`
-	Page         int                  `json:"page"`
-	Limit        int                  `json:"limit"`
+	Repositories []RepositoryOverview    `json:"repositories"`
+	Summary      RepositoryHealthSummary `json:"summary"`
+	Total        int                     `json:"total"`
+	Page         int                     `json:"page"`
+	Limit        int                     `json:"limit"`
+}
+
+type ListComponentsResponse struct {
+	Components []db.ComponentExecution `json:"components"`
 }
 
 type ImportPreviewRequest struct {

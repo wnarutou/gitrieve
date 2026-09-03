@@ -152,6 +152,159 @@ func TestGetRepositories(t *testing.T) {
 	})
 }
 
+func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{
+		SyncStuckThreshold: 90 * time.Minute,
+		Repository: []typedef.Repository{
+			{Name: "match-failed", URL: "github.com/health/failed"},
+			{Name: "match-pending", URL: "github.com/health/pending"},
+			{Name: "match-running", URL: "github.com/health/running"},
+			{Name: "match-overdue", URL: "github.com/health/overdue", Cron: "0 * * * *"},
+			{Name: "match-stuck", URL: "github.com/health/stuck"},
+			{Name: "outside", URL: "github.com/health/outside"},
+		},
+	}
+	insertExecution := func(id, repoKey, status string, start time.Time, end *time.Time) {
+		_, err := testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, id, repoKey, start, end, status, "error-"+id)
+		require.NoError(t, err)
+	}
+	failedEnd := now.Add(-9 * time.Minute)
+	overdueEnd := now.Add(-3 * time.Hour)
+	insertExecution("failed", "github.com/health/failed", "failed", now.Add(-10*time.Minute), &failedEnd)
+	insertExecution("pending", "github.com/health/pending", "pending", now.Add(-8*time.Minute), nil)
+	insertExecution("running", "github.com/health/running", "running", now.Add(-7*time.Minute), nil)
+	insertExecution("overdue", "github.com/health/overdue", "completed", now.Add(-4*time.Hour), &overdueEnd)
+	insertExecution("stuck", "github.com/health/stuck", "running", now.Add(-2*time.Hour), nil)
+
+	s := server.NewRepoTestServer(cfg, testDB)
+	type repoView struct {
+		Name                string     `json:"Name"`
+		LastStatus          string     `json:"last_status"`
+		HealthStatus        string     `json:"health_status"`
+		LastAttemptTime     *time.Time `json:"last_attempt_time"`
+		LastSuccessTime     *time.Time `json:"last_success_time"`
+		LastDurationSeconds *int64     `json:"last_duration_seconds"`
+		LatestExecutionID   string     `json:"latest_execution_id"`
+		LastErrorMessage    string     `json:"last_error_message"`
+		Overdue             bool       `json:"overdue"`
+		Stuck               bool       `json:"stuck"`
+		ScheduleError       string     `json:"schedule_error"`
+	}
+	type healthSummary struct {
+		Total       int `json:"total"`
+		Healthy     int `json:"healthy"`
+		Failed      int `json:"failed"`
+		Pending     int `json:"pending"`
+		Running     int `json:"running"`
+		NeverSynced int `json:"never_synced"`
+		Cancelled   int `json:"cancelled"`
+		Overdue     int `json:"overdue"`
+		Stuck       int `json:"stuck"`
+	}
+	type listData struct {
+		Repositories []repoView    `json:"repositories"`
+		Summary      healthSummary `json:"summary"`
+		Total        int           `json:"total"`
+		Page         int           `json:"page"`
+		Limit        int           `json:"limit"`
+	}
+	get := func(query string) (int, listData) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repositories"+query, nil)
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+		var response struct {
+			Data listData `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		return resp.Code, response.Data
+	}
+	names := func(repositories []repoView) []string {
+		out := make([]string, len(repositories))
+		for i, repository := range repositories {
+			out[i] = repository.Name
+		}
+		return out
+	}
+
+	t.Run("returns health response fields and legacy fields together", func(t *testing.T) {
+		status, data := get("?search=match&health=failed")
+		require.Equal(t, http.StatusOK, status)
+		require.Len(t, data.Repositories, 1)
+		failed := data.Repositories[0]
+		require.Equal(t, "match-failed", failed.Name)
+		require.Equal(t, "failed", failed.LastStatus)
+		require.Equal(t, "failed", failed.HealthStatus)
+		require.NotNil(t, failed.LastAttemptTime)
+		require.NotNil(t, failed.LastDurationSeconds)
+		require.Equal(t, "failed", failed.LatestExecutionID)
+		require.Equal(t, "error-failed", failed.LastErrorMessage)
+		require.False(t, failed.Overdue)
+		require.False(t, failed.Stuck)
+		require.Empty(t, failed.ScheduleError)
+	})
+
+	t.Run("filters health booleans and paginates after filtering", func(t *testing.T) {
+		status, syncing := get("?search=match&health=syncing")
+		require.Equal(t, http.StatusOK, status)
+		require.ElementsMatch(t, []string{"match-pending", "match-running", "match-stuck"}, names(syncing.Repositories))
+
+		status, overdue := get("?search=match&overdue=true")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, []string{"match-overdue"}, names(overdue.Repositories))
+
+		status, stuck := get("?search=match&stuck=true")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, []string{"match-stuck"}, names(stuck.Repositories))
+
+		status, page := get("?search=match&health=syncing&sort=name&direction=asc&page=2&limit=1")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, 3, page.Total)
+		require.Equal(t, 2, page.Page)
+		require.Equal(t, 1, page.Limit)
+		require.Equal(t, []string{"match-running"}, names(page.Repositories))
+	})
+
+	t.Run("summarizes all search matches before current filters and page", func(t *testing.T) {
+		status, data := get("?search=match&health=failed&page=1&limit=1")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, 1, data.Total)
+		require.Equal(t, healthSummary{Total: 5, Healthy: 1, Failed: 1, Pending: 1, Running: 2, Overdue: 1, Stuck: 1}, data.Summary)
+	})
+
+	t.Run("sorts each supported key and direction", func(t *testing.T) {
+		for _, query := range []string{
+			"?search=match&sort=attention&direction=asc",
+			"?search=match&sort=attention&direction=desc",
+			"?search=match&sort=name&direction=asc",
+			"?search=match&sort=name&direction=desc",
+			"?search=match&sort=last_attempt&direction=asc",
+			"?search=match&sort=last_attempt&direction=desc",
+			"?search=match&sort=last_success&direction=asc",
+			"?search=match&sort=last_success&direction=desc",
+		} {
+			status, data := get(query)
+			require.Equal(t, http.StatusOK, status, query)
+			require.Len(t, data.Repositories, 5, query)
+		}
+	})
+
+	t.Run("rejects malformed filters sort pagination and direction", func(t *testing.T) {
+		for _, query := range []string{
+			"?health=unknown", "?health=", "?overdue=maybe", "?stuck=1", "?sort=unknown", "?sort=", "?direction=sideways", "?direction=",
+			"?page=0", "?page=not-a-number", "?limit=0", "?limit=101", "?limit=not-a-number",
+		} {
+			status, _ := get(query)
+			require.Equal(t, http.StatusBadRequest, status, query)
+		}
+	})
+}
+
 func TestGetRepositoriesSynthesizesOrgURL(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)
