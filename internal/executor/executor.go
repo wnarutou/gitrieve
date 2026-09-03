@@ -55,7 +55,7 @@ type preparedJob struct {
 type executionStore interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
 	ActiveExecutionExists(context.Context, string) (bool, error)
-	CreateComponents(context.Context, string, []db.ComponentName) error
+	CreatePendingExecutions(context.Context, []db.PendingExecution) error
 	StartComponent(context.Context, string, db.ComponentName, time.Time) error
 	FinishComponent(context.Context, string, db.ComponentName, db.ComponentStatus, time.Time, string) error
 }
@@ -78,6 +78,7 @@ type Executor struct {
 	dispatcherDone    chan struct{}
 	closeDone         chan struct{}
 	closeErr          error
+	closeWaiters      int
 	workers           sync.WaitGroup
 }
 
@@ -192,7 +193,8 @@ func (e *Executor) submitBatch(repositories []typedef.Repository) ([]string, err
 		return nil, err
 	}
 	if err := e.persistBatch(prepared); err != nil {
-		return nil, errors.Join(err, e.abortBatch(prepared, StatusFailed, err.Error()))
+		e.releaseBatch(prepared)
+		return nil, err
 	}
 
 	e.queueMu.Lock()
@@ -253,23 +255,25 @@ func (e *Executor) preflightBatch(prepared []*preparedJob) error {
 }
 
 func (e *Executor) persistBatch(prepared []*preparedJob) error {
-	for _, job := range prepared {
-		_, err := e.db.Exec(`
-			INSERT INTO executions (id, job_name, repo_key, start_time, status)
-			VALUES (?, ?, ?, ?, ?)
-		`, job.queued.id, job.queued.repo.Name, job.jobContext.repoKey, time.Now(), string(StatusPending))
-		if err != nil {
-			return fmt.Errorf("failed to create execution record: %w", err)
-		}
-		job.executionCreated = true
-
+	executions := make([]db.PendingExecution, len(prepared))
+	for i, job := range prepared {
 		componentNames := make([]db.ComponentName, len(job.queued.plan))
-		for i := range job.queued.plan {
-			componentNames[i] = job.queued.plan[i].name
+		for componentIndex := range job.queued.plan {
+			componentNames[componentIndex] = job.queued.plan[componentIndex].name
 		}
-		if err := e.db.CreateComponents(context.Background(), job.queued.id, componentNames); err != nil {
-			return fmt.Errorf("create component records: %w", err)
+		executions[i] = db.PendingExecution{
+			ID:         job.queued.id,
+			JobName:    job.queued.repo.Name,
+			RepoKey:    job.jobContext.repoKey,
+			StartTime:  time.Now(),
+			Components: componentNames,
 		}
+	}
+	if err := e.db.CreatePendingExecutions(context.Background(), executions); err != nil {
+		return fmt.Errorf("create pending execution batch: %w", err)
+	}
+	for _, job := range prepared {
+		job.executionCreated = true
 		job.componentsCreated = true
 	}
 	return nil
@@ -635,10 +639,13 @@ func (e *Executor) finishQueuedCancellation(job *queuedJob) {
 func (e *Executor) Close() error {
 	e.queueMu.Lock()
 	if e.closed {
+		e.closeWaiters++
+		e.queueCond.Broadcast()
 		done := e.closeDone
 		e.queueMu.Unlock()
 		<-done
 		e.queueMu.Lock()
+		e.closeWaiters--
 		err := e.closeErr
 		e.queueMu.Unlock()
 		return err

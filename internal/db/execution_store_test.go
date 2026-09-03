@@ -8,6 +8,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCreatePendingExecutionsRollsBackWholeBatchWhenLaterComponentInsertFails(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	_, err = testDB.Exec(`
+		CREATE TRIGGER reject_beta_component
+		BEFORE INSERT ON execution_components
+		WHEN NEW.execution_id = 'beta'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced beta component failure');
+		END;`)
+	require.NoError(t, err)
+	startedAt := time.Date(2026, time.September, 4, 9, 0, 0, 0, time.UTC)
+	err = testDB.CreatePendingExecutions(ctx, []PendingExecution{
+		{ID: "alpha", JobName: "alpha", RepoKey: "github.com/acme/alpha", StartTime: startedAt, Components: []ComponentName{ComponentCode}},
+		{ID: "beta", JobName: "beta", RepoKey: "github.com/acme/beta", StartTime: startedAt, Components: []ComponentName{ComponentCode}},
+	})
+	require.ErrorContains(t, err, "forced beta component failure")
+
+	var executionCount, componentCount int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&executionCount))
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM execution_components`).Scan(&componentCount))
+	require.Zero(t, executionCount)
+	require.Zero(t, componentCount)
+}
+
 func TestComponentStorePersistsTransitionsAndListsComponentsInDisplayOrder(t *testing.T) {
 	ctx := context.Background()
 	testDB, err := Initialize(":memory:")

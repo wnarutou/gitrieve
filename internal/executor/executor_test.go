@@ -99,6 +99,11 @@ type blockingExecutionStore struct {
 	componentsEntered chan struct{}
 	componentsRelease chan struct{}
 	componentsOnce    sync.Once
+
+	finishExecutionID string
+	finishEntered     chan struct{}
+	finishRelease     chan struct{}
+	finishOnce        sync.Once
 }
 
 func (s *blockingExecutionStore) Exec(query string, args ...interface{}) (sql.Result, error) {
@@ -117,8 +122,8 @@ func (s *blockingExecutionStore) ActiveExecutionExists(ctx context.Context, repo
 	return s.delegate.ActiveExecutionExists(ctx, repoKey)
 }
 
-func (s *blockingExecutionStore) CreateComponents(ctx context.Context, executionID string, components []db.ComponentName) error {
-	err := s.delegate.CreateComponents(ctx, executionID, components)
+func (s *blockingExecutionStore) CreatePendingExecutions(ctx context.Context, executions []db.PendingExecution) error {
+	err := s.delegate.CreatePendingExecutions(ctx, executions)
 	if err == nil && s.componentsEntered != nil {
 		s.componentsOnce.Do(func() { close(s.componentsEntered) })
 		<-s.componentsRelease
@@ -131,7 +136,12 @@ func (s *blockingExecutionStore) StartComponent(ctx context.Context, executionID
 }
 
 func (s *blockingExecutionStore) FinishComponent(ctx context.Context, executionID string, component db.ComponentName, status db.ComponentStatus, finishedAt time.Time, errorMessage string) error {
-	return s.delegate.FinishComponent(ctx, executionID, component, status, finishedAt, errorMessage)
+	err := s.delegate.FinishComponent(ctx, executionID, component, status, finishedAt, errorMessage)
+	if err == nil && executionID == s.finishExecutionID {
+		s.finishOnce.Do(func() { close(s.finishEntered) })
+		<-s.finishRelease
+	}
+	return err
 }
 
 func newBlockingRunner(capacity int) *blockingRunner {
@@ -187,6 +197,19 @@ func executorClosedSignal(exec *Executor) <-chan struct{} {
 		close(closed)
 	}()
 	return closed
+}
+
+func executorCloseWaiterSignal(exec *Executor) <-chan struct{} {
+	waiting := make(chan struct{})
+	go func() {
+		exec.queueMu.Lock()
+		for exec.closeWaiters == 0 {
+			exec.queueCond.Wait()
+		}
+		exec.queueMu.Unlock()
+		close(waiting)
+	}()
+	return waiting
 }
 
 func repositoryConfig(limit uint, count int) *config.Config {
@@ -1149,7 +1172,7 @@ func TestExecuteJobExpandedBatchIsAtomicWhenSecondRepositoryIsActive(t *testing.
 	}
 }
 
-func TestExecuteJobExpandedBatchTerminalizesEarlierRowsWhenLaterPersistenceFails(t *testing.T) {
+func TestExecuteJobExpandedBatchRollsBackAllRowsWhenLaterPersistenceFails(t *testing.T) {
 	runnerEntered := make(chan string, 2)
 	runners := noOpRunners()
 	runners.Code = func(ctx context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
@@ -1181,16 +1204,27 @@ func TestExecuteJobExpandedBatchTerminalizesEarlierRowsWhenLaterPersistenceFails
 	jobIDs, err := exec.ExecuteJob("github.com/acme")
 	require.ErrorContains(t, err, "forced beta component failure")
 	require.Empty(t, jobIDs)
-	require.Equal(t, map[string]int{"failed": 2}, executionStatusCounts(t, testDB))
-	var activeComponents int
-	require.NoError(t, testDB.QueryRow(`
-		SELECT COUNT(*) FROM execution_components WHERE status IN ('pending', 'running')`).Scan(&activeComponents))
-	require.Zero(t, activeComponents)
+	require.Empty(t, executionStatusCounts(t, testDB))
+	var componentCount int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM execution_components`).Scan(&componentCount))
+	require.Zero(t, componentCount)
+	exec.queueMu.Lock()
+	require.Empty(t, exec.activeByRepo)
+	require.Zero(t, exec.inflight)
+	exec.queueMu.Unlock()
 	select {
 	case repoKey := <-runnerEntered:
 		t.Fatalf("failed expanded batch started hidden work for %s", repoKey)
 	default:
 	}
+
+	_, err = testDB.Exec(`DROP TRIGGER reject_beta_component`)
+	require.NoError(t, err)
+	retryIDs, err := exec.ExecuteJob("github.com/acme")
+	require.NoError(t, err)
+	require.Len(t, retryIDs, 2)
+	requireRunnerEntry(t, runnerEntered)
+	requireRunnerEntry(t, runnerEntered)
 }
 
 func TestExecuteJobRejectsDuplicateKeysWithinExpandedBatchBeforePersistence(t *testing.T) {
@@ -1281,16 +1315,11 @@ func TestConcurrentCloseCallersWaitForSameCompletion(t *testing.T) {
 	require.NoError(t, err)
 	<-runnerEntered
 
-	start := make(chan struct{})
 	results := make(chan error, 2)
-	for i := 0; i < 2; i++ {
-		go func() {
-			<-start
-			results <- exec.Close()
-		}()
-	}
-	close(start)
+	go func() { results <- exec.Close() }()
 	<-runnerCancelled
+	go func() { results <- exec.Close() }()
+	<-executorCloseWaiterSignal(exec)
 	select {
 	case err := <-results:
 		t.Fatalf("Close returned before worker completion: %v", err)
@@ -1299,6 +1328,58 @@ func TestConcurrentCloseCallersWaitForSameCompletion(t *testing.T) {
 	close(releaseRunner)
 	require.NoError(t, <-results)
 	require.NoError(t, <-results)
+}
+
+func TestClosePreventsDispatcherAdmissionWhileRunningWorkerFinishes(t *testing.T) {
+	runnerEntered := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	runners := noOpRunners()
+	runners.Code = func(_ context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
+		runnerEntered <- repo.Key()
+		if repo.Key() == "github.com/test/repo-0" {
+			<-releaseFirst
+		}
+		return nil
+	}
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 2), runners)
+	firstIDs, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	require.Equal(t, "github.com/test/repo-0", requireRunnerEntry(t, runnerEntered))
+	secondIDs, err := exec.ExecuteJob("github.com/test/repo-1")
+	require.NoError(t, err)
+
+	finishRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(finishRelease) }) })
+	store := &blockingExecutionStore{
+		delegate:          testDB,
+		finishExecutionID: firstIDs[0],
+		finishEntered:     make(chan struct{}),
+		finishRelease:     finishRelease,
+	}
+	exec.db = store
+	close(releaseFirst)
+	<-store.finishEntered
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exec.Close() }()
+	<-executorClosedSignal(exec)
+	select {
+	case repoKey := <-runnerEntered:
+		t.Fatalf("queued repository entered runner after Close won: %s", repoKey)
+	default:
+	}
+	releaseOnce.Do(func() { close(finishRelease) })
+	require.NoError(t, <-closeResult)
+	require.Equal(t, map[string]int{"cancelled": 1, "completed": 1}, executionStatusCounts(t, testDB))
+	for _, jobID := range append(firstIDs, secondIDs...) {
+		require.False(t, exec.IsJobRunning(jobID))
+	}
+	select {
+	case repoKey := <-runnerEntered:
+		t.Fatalf("queued repository entered runner during shutdown: %s", repoKey)
+	default:
+	}
 }
 
 func TestCloseWinningAfterPersistencePreventsPostCloseRunner(t *testing.T) {

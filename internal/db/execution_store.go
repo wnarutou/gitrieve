@@ -9,6 +9,47 @@ import (
 
 const interruptedExecutionMessage = "previous server process ended before completion"
 
+// PendingExecution describes one execution and its component rows for atomic creation.
+type PendingExecution struct {
+	ID         string
+	JobName    string
+	RepoKey    string
+	StartTime  time.Time
+	Components []ComponentName
+}
+
+// CreatePendingExecutions creates a batch of pending executions and all of
+// their component rows atomically.
+func (d *DB) CreatePendingExecutions(ctx context.Context, executions []PendingExecution) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create pending executions: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, execution := range executions {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO executions (id, job_name, repo_key, start_time, status)
+			VALUES (?, ?, ?, ?, ?)`,
+			execution.ID, execution.JobName, execution.RepoKey, execution.StartTime, ComponentPending,
+		); err != nil {
+			return fmt.Errorf("create pending execution %q: %w", execution.ID, err)
+		}
+		for _, component := range execution.Components {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO execution_components (execution_id, component, status) VALUES (?, ?, ?)`,
+				execution.ID, component, ComponentPending,
+			); err != nil {
+				return fmt.Errorf("create component %q for execution %q: %w", component, execution.ID, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit create pending executions: %w", err)
+	}
+	return nil
+}
+
 // CreateComponents creates pending component records for an execution.
 func (d *DB) CreateComponents(ctx context.Context, executionID string, components []ComponentName) error {
 	tx, err := d.BeginTx(ctx, nil)
