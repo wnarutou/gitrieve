@@ -175,7 +175,9 @@ func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.
 		require.NoError(t, err)
 	}
 	failedEnd := now.Add(-9 * time.Minute)
+	failedSuccessEnd := now.Add(-time.Hour)
 	overdueEnd := now.Add(-3 * time.Hour)
+	insertExecution("failed-success", "github.com/health/failed", "completed", now.Add(-2*time.Hour), &failedSuccessEnd)
 	insertExecution("failed", "github.com/health/failed", "failed", now.Add(-10*time.Minute), &failedEnd)
 	insertExecution("pending", "github.com/health/pending", "pending", now.Add(-8*time.Minute), nil)
 	insertExecution("running", "github.com/health/running", "running", now.Add(-7*time.Minute), nil)
@@ -278,19 +280,22 @@ func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.
 	})
 
 	t.Run("sorts each supported key and direction", func(t *testing.T) {
-		for _, query := range []string{
-			"?search=match&sort=attention&direction=asc",
-			"?search=match&sort=attention&direction=desc",
-			"?search=match&sort=name&direction=asc",
-			"?search=match&sort=name&direction=desc",
-			"?search=match&sort=last_attempt&direction=asc",
-			"?search=match&sort=last_attempt&direction=desc",
-			"?search=match&sort=last_success&direction=asc",
-			"?search=match&sort=last_success&direction=desc",
+		for _, tc := range []struct {
+			query string
+			want  []string
+		}{
+			{query: "?search=match&sort=attention&direction=asc", want: []string{"match-stuck", "match-failed", "match-overdue", "match-pending", "match-running"}},
+			{query: "?search=match&sort=attention&direction=desc", want: []string{"match-running", "match-pending", "match-overdue", "match-failed", "match-stuck"}},
+			{query: "?search=match&sort=name&direction=asc", want: []string{"match-failed", "match-overdue", "match-pending", "match-running", "match-stuck"}},
+			{query: "?search=match&sort=name&direction=desc", want: []string{"match-stuck", "match-running", "match-pending", "match-overdue", "match-failed"}},
+			{query: "?search=match&sort=last_attempt&direction=asc", want: []string{"match-overdue", "match-stuck", "match-failed", "match-pending", "match-running"}},
+			{query: "?search=match&sort=last_attempt&direction=desc", want: []string{"match-running", "match-pending", "match-failed", "match-stuck", "match-overdue"}},
+			{query: "?search=match&sort=last_success&direction=asc", want: []string{"match-overdue", "match-failed", "match-pending", "match-running", "match-stuck"}},
+			{query: "?search=match&sort=last_success&direction=desc", want: []string{"match-failed", "match-overdue", "match-pending", "match-running", "match-stuck"}},
 		} {
-			status, data := get(query)
-			require.Equal(t, http.StatusOK, status, query)
-			require.Len(t, data.Repositories, 5, query)
+			status, data := get(tc.query)
+			require.Equal(t, http.StatusOK, status, tc.query)
+			require.Equal(t, tc.want, names(data.Repositories), tc.query)
 		}
 	})
 

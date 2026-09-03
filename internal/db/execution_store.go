@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var monotonicTimeSuffix = regexp.MustCompile(` m=[+-][0-9]+(\.[0-9]+)?$`)
 
 const interruptedExecutionMessage = "previous server process ended before completion"
 
@@ -344,8 +347,8 @@ func nullableAggregateTime(value interface{}) (*time.Time, error) {
 	// lets the driver scan directly into time.Time. A Go time.Time persisted by
 	// the driver can retain its optional monotonic annotation in that text form;
 	// it is not part of a wall-clock timestamp and time.Parse cannot read it.
-	if monotonic := strings.LastIndex(raw, " m="); monotonic >= 0 {
-		raw = raw[:monotonic]
+	if suffix := monotonicTimeSuffix.FindStringIndex(raw); suffix != nil {
+		raw = raw[:suffix[0]]
 	}
 	for _, layout := range []string{
 		"2006-01-02 15:04:05.999999999 -0700 MST",

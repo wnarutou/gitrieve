@@ -221,6 +221,37 @@ func TestRepositoryRunStatsParsesSQLiteAggregateTimeWithMonotonicSuffix(t *testi
 	require.Equal(t, end.Round(0), got.Round(0))
 }
 
+func TestNullableAggregateTimeAcceptsOnlyCompleteMonotonicSuffixes(t *testing.T) {
+	base := time.Date(2026, time.September, 4, 12, 34, 56, 789000000, time.FixedZone("CST", 8*60*60))
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "positive integer", raw: "2026-09-04 12:34:56.789 +0800 CST m=+123"},
+		{name: "positive fractional", raw: "2026-09-04 12:34:56.789 +0800 CST m=+123.45"},
+		{name: "negative integer", raw: "2026-09-04 12:34:56.789 +0800 CST m=-123"},
+		{name: "negative fractional", raw: "2026-09-04 12:34:56.789 +0800 CST m=-123.45"},
+		{name: "missing sign", raw: "2026-09-04 12:34:56.789 +0800 CST m=123", wantErr: true},
+		{name: "missing digits", raw: "2026-09-04 12:34:56.789 +0800 CST m=+", wantErr: true},
+		{name: "trailing text", raw: "2026-09-04 12:34:56.789 +0800 CST m=+123 trailing", wantErr: true},
+		{name: "extra decimal", raw: "2026-09-04 12:34:56.789 +0800 CST m=+123.4.5", wantErr: true},
+		{name: "embedded annotation", raw: "2026-09-04 12:34:56.789 +0800 CST m=+123 extra", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := nullableAggregateTime(tc.raw)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, base.Equal(*got))
+		})
+	}
+}
+
 func TestStartComponentRejectsMissingAndNonPendingRows(t *testing.T) {
 	ctx := context.Background()
 	testDB, err := Initialize(":memory:")

@@ -339,44 +339,6 @@ func (a *API) GetJobLogs(c *gin.Context) {
 	})
 }
 
-// runStats 是单仓库/单组织的聚合运行统计。
-type runStats struct {
-	LastRun *time.Time
-	Total   int64
-	Success int64
-	Failed  int64
-}
-
-// lookupStats 返回配置条目的运行统计。type=repo 直接取自身键；type=org/user
-// 对「路径边界前缀」（entry.Key()+"/"）命中的成员求和，last_run 取成员最大值。
-// 前缀以 "/" 结尾，避免 github.com/acme 误吞 github.com/acme2/x。
-func lookupStats(stats map[string]runStats, repo typedef.Repository) runStats {
-	key := repo.Key()
-	if key == "" {
-		return runStats{}
-	}
-	switch repo.GetType() {
-	case typedef.TypeOrg, typedef.TypeUser:
-		prefix := key + "/"
-		var sum runStats
-		for k, s := range stats {
-			if !strings.HasPrefix(k, prefix) {
-				continue
-			}
-			sum.Total += s.Total
-			sum.Success += s.Success
-			sum.Failed += s.Failed
-			if s.LastRun != nil && (sum.LastRun == nil || s.LastRun.After(*sum.LastRun)) {
-				t := *s.LastRun
-				sum.LastRun = &t
-			}
-		}
-		return sum
-	default:
-		return stats[key]
-	}
-}
-
 // GetRepositories returns repositories with per-repo execution stats, last/next
 // run times, search (fuzzy name or URL match) and pagination.
 func (a *API) GetRepositories(c *gin.Context) {
