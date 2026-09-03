@@ -217,6 +217,38 @@ func TestExecuteJobOverallFailureContinuesAfterCodeFailure(t *testing.T) {
 	)
 }
 
+func TestExecuteJobComponentContextErrorWithoutJobCancellationIsFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "runner cancelled", err: context.Canceled},
+		{name: "runner deadline exceeded", err: context.DeadlineExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &runnerRecorder{errors: map[string]error{"code": tt.err}}
+			exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+				Name:           "test-repo",
+				URL:            "github.com/test/repo",
+				DownloadIssues: true,
+			}, recorder.runners())
+
+			jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+			require.NoError(t, err)
+			waitForJob(t, exec, jobIDs[0])
+
+			require.Equal(t, []string{"code", "issues"}, recorder.recordedCalls())
+			requireExecution(t, testDB, jobIDs[0], StatusFailed, "code: "+tt.err.Error())
+			requireComponents(t, testDB, jobIDs[0],
+				expectedComponent{db.ComponentCode, db.ComponentFailed, tt.err.Error()},
+				expectedComponent{db.ComponentIssue, db.ComponentCompleted, ""},
+			)
+		})
+	}
+}
+
 func TestExecuteJobComponentFailuresUseSemicolonSeparatedSummary(t *testing.T) {
 	recorder := &runnerRecorder{errors: map[string]error{
 		"issues": errors.New("rate limit"),
@@ -243,7 +275,7 @@ func TestExecuteJobComponentFailuresUseSemicolonSeparatedSummary(t *testing.T) {
 
 func TestExecuteJobSkipCompletesOverall(t *testing.T) {
 	recorder := &runnerRecorder{errors: map[string]error{
-		"wiki": syncresult.Skip("repository has no wiki"),
+		"wiki": fmt.Errorf("wiki preflight: %w", syncresult.Skip("repository has no wiki")),
 	}}
 	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
 		Name:         "test-repo",
@@ -291,6 +323,48 @@ func TestExecuteJobCancelTerminalizesCurrentAndRemainingComponents(t *testing.T)
 	)
 }
 
+func TestExecuteJobCancelStoreFailureFallsBackToFailedComponentAndOverall(t *testing.T) {
+	issueStarted := make(chan struct{})
+	runners := noOpRunners()
+	runners.Issue = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(issueStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, runners)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_issue_cancellation
+		BEFORE UPDATE OF status ON execution_components
+		WHEN OLD.component = 'issues' AND NEW.status = 'cancelled'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced cancellation terminal update failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	<-issueStarted
+	require.NoError(t, exec.CancelJob(jobIDs[0]))
+	waitForJob(t, exec, jobIDs[0])
+
+	persistenceMessage := fmt.Sprintf(
+		`persist cancelled state: finish component "issues" for execution %q: constraint failed: forced cancellation terminal update failure (1811)`,
+		jobIDs[0],
+	)
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, "issue: "+persistenceMessage)
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentFailed, persistenceMessage},
+		expectedComponent{db.ComponentWiki, db.ComponentCancelled, "context canceled"},
+	)
+}
+
 func TestExecuteJobComponentStoreFailurePreventsCompletedOverall(t *testing.T) {
 	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
 		Name:         "test-repo",
@@ -319,6 +393,32 @@ func TestExecuteJobComponentStoreFailurePreventsCompletedOverall(t *testing.T) {
 	requireComponents(t, testDB, jobIDs[0],
 		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
 		expectedComponent{db.ComponentWiki, db.ComponentFailed, storeMessage},
+	)
+}
+
+func TestExecuteJobOverallTerminalStoreFailureFallsBackToFailed(t *testing.T) {
+	exec, testDB := newTestExecutor(t)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_execution_completion
+		BEFORE UPDATE OF status ON executions
+		WHEN NEW.status = 'completed'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced overall completion failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	persistenceMessage := fmt.Sprintf(
+		`persist completed execution state: update execution %q to "completed": constraint failed: forced overall completion failure (1811)`,
+		jobIDs[0],
+	)
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, persistenceMessage)
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
 	)
 }
 
@@ -359,7 +459,7 @@ func TestCancelNonRunningJob(t *testing.T) {
 	exec, _ := newTestExecutor(t)
 
 	err := exec.CancelJob("never-started")
-	assert.NoError(t, err)
+	require.EqualError(t, err, `update execution "never-started" to "cancelled": expected one row, updated 0`)
 }
 
 func TestExecuteJobWritesRepoKey(t *testing.T) {

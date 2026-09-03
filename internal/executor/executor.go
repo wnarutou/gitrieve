@@ -172,9 +172,7 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		// Write the final log line BEFORE the terminal status update so the SSE
 		// log stream (which emits "done" as soon as it sees a terminal status)
 		// does not flush before this row is committed and drop it.
-		ui.Printf("Job was cancelled")
-		e.cancelComponents(jobID, plan, 0, ctx.Err())
-		e.updateJobStatus(jobID, string(StatusCancelled), "")
+		e.finishCancellation(jobID, plan, 0, ctx.Err())
 		return
 	}
 
@@ -196,11 +194,10 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 	}
 
 	failures := make([]string, 0)
+	allComponentsTerminal := true
 	for i, planned := range plan {
 		if ctx.Err() != nil {
-			e.cancelComponents(jobID, plan, i, ctx.Err())
-			ui.Printf("Job was cancelled")
-			e.updateJobStatus(jobID, string(StatusCancelled), "")
+			e.finishCancellation(jobID, plan, i, ctx.Err())
 			return
 		}
 
@@ -208,7 +205,12 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 			message := fmt.Sprintf("persist running state: %v", err)
 			failures = append(failures, componentFailure(planned.name, message))
 			ui.Errorf("Failed to start %s: %v", planned.name, err)
-			e.finishAfterStoreFailure(jobID, planned.name, message)
+			if fallbackErr := e.finishAfterStoreFailure(jobID, planned.name, message); fallbackErr != nil {
+				fallbackMessage := fmt.Sprintf("persist failed fallback: %v", fallbackErr)
+				failures = append(failures, componentFailure(planned.name, fallbackMessage))
+				ui.Errorf("Failed to record %s store failure: %v", planned.name, fallbackErr)
+				allComponentsTerminal = false
+			}
 			continue
 		}
 
@@ -216,10 +218,8 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 			ui.Printf("Downloading %s", componentLogName(planned.name))
 		}
 		runErr := planned.run(ctx, job, storages)
-		if cancelErr := componentCancellation(ctx, runErr); cancelErr != nil {
-			e.cancelComponents(jobID, plan, i, cancelErr)
-			ui.Printf("Job was cancelled")
-			e.updateJobStatus(jobID, string(StatusCancelled), "")
+		if cancelErr := componentCancellation(ctx); cancelErr != nil {
+			e.finishCancellation(jobID, plan, i, cancelErr)
 			return
 		}
 
@@ -240,18 +240,27 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 			message := fmt.Sprintf("persist %s state: %v", status, err)
 			failures = append(failures, componentFailure(planned.name, message))
 			ui.Errorf("Failed to finish %s: %v", planned.name, err)
-			e.finishAfterStoreFailure(jobID, planned.name, message)
+			if fallbackErr := e.finishAfterStoreFailure(jobID, planned.name, message); fallbackErr != nil {
+				fallbackMessage := fmt.Sprintf("persist failed fallback: %v", fallbackErr)
+				failures = append(failures, componentFailure(planned.name, fallbackMessage))
+				ui.Errorf("Failed to record %s store failure: %v", planned.name, fallbackErr)
+				allComponentsTerminal = false
+			}
 		}
 	}
 
+	if !allComponentsTerminal {
+		ui.Errorf("Job cannot be finalized while component rows remain active")
+		return
+	}
 	if len(failures) != 0 {
-		e.updateJobStatus(jobID, string(StatusFailed), strings.Join(failures, "; "))
+		e.finishExecution(jobID, StatusFailed, strings.Join(failures, "; "))
 		return
 	}
 
 	// Final log line before the terminal status update (see note above).
 	ui.Printf("Job completed successfully")
-	e.updateJobStatus(jobID, string(StatusCompleted), "")
+	e.finishExecution(jobID, StatusCompleted, "")
 }
 
 func componentFailure(name db.ComponentName, message string) string {
@@ -262,14 +271,8 @@ func componentFailure(name db.ComponentName, message string) string {
 	return fmt.Sprintf("%s: %s", label, message)
 }
 
-func componentCancellation(ctx context.Context, runErr error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-		return runErr
-	}
-	return nil
+func componentCancellation(ctx context.Context) error {
+	return ctx.Err()
 }
 
 func componentLogName(name db.ComponentName) string {
@@ -279,18 +282,55 @@ func componentLogName(name db.ComponentName) string {
 	return string(name)
 }
 
-func (e *Executor) cancelComponents(jobID string, plan []component, first int, cancelErr error) {
+func (e *Executor) finishCancellation(jobID string, plan []component, first int, cancelErr error) {
+	failures, allTerminal := e.cancelComponents(jobID, plan, first, cancelErr)
+	ui.Printf("Job was cancelled")
+	if !allTerminal {
+		ui.Errorf("Job cannot be finalized while component rows remain active")
+		return
+	}
+	if len(failures) != 0 {
+		e.finishExecution(jobID, StatusFailed, strings.Join(failures, "; "))
+		return
+	}
+	e.finishExecution(jobID, StatusCancelled, "")
+}
+
+func (e *Executor) cancelComponents(jobID string, plan []component, first int, cancelErr error) ([]string, bool) {
+	failures := make([]string, 0)
+	allTerminal := true
 	message := cancelErr.Error()
 	for _, planned := range plan[first:] {
 		if err := e.db.FinishComponent(context.Background(), jobID, planned.name, db.ComponentCancelled, time.Now(), message); err != nil {
 			ui.Errorf("Failed to cancel %s: %v", planned.name, err)
+			persistenceMessage := fmt.Sprintf("persist cancelled state: %v", err)
+			failures = append(failures, componentFailure(planned.name, persistenceMessage))
+			if fallbackErr := e.finishAfterStoreFailure(jobID, planned.name, persistenceMessage); fallbackErr != nil {
+				fallbackMessage := fmt.Sprintf("persist failed fallback: %v", fallbackErr)
+				failures = append(failures, componentFailure(planned.name, fallbackMessage))
+				ui.Errorf("Failed to record %s cancellation store failure: %v", planned.name, fallbackErr)
+				allTerminal = false
+			}
 		}
 	}
+	return failures, allTerminal
 }
 
-func (e *Executor) finishAfterStoreFailure(jobID string, name db.ComponentName, message string) {
-	if err := e.db.FinishComponent(context.Background(), jobID, name, db.ComponentFailed, time.Now(), message); err != nil {
-		ui.Errorf("Failed to record %s store failure: %v", name, err)
+func (e *Executor) finishAfterStoreFailure(jobID string, name db.ComponentName, message string) error {
+	return e.db.FinishComponent(context.Background(), jobID, name, db.ComponentFailed, time.Now(), message)
+}
+
+func (e *Executor) finishExecution(jobID string, status ExecutionStatus, errorMessage string) {
+	if err := e.updateJobStatus(jobID, string(status), errorMessage); err != nil {
+		ui.Errorf("Failed to finish job as %s: %v", status, err)
+		if status == StatusFailed {
+			return
+		}
+
+		failureMessage := fmt.Sprintf("persist %s execution state: %v", status, err)
+		if fallbackErr := e.updateJobStatus(jobID, string(StatusFailed), failureMessage); fallbackErr != nil {
+			ui.Errorf("Failed to record overall execution store failure: %v", fallbackErr)
+		}
 	}
 }
 
@@ -309,21 +349,35 @@ func (e *Executor) CancelJob(jobID string) error {
 }
 
 func (e *Executor) updateJobStatus(jobID string, status string, errorMessage string) error {
-	var err error
+	var (
+		result interface {
+			RowsAffected() (int64, error)
+		}
+		err error
+	)
 	if status == string(StatusPending) || status == string(StatusRunning) {
-		_, err = e.db.Exec(`
+		result, err = e.db.Exec(`
 			UPDATE executions SET status = ?, error_message = ?
 			WHERE id = ?
 		`, status, errorMessage, jobID)
 	} else {
 		endTime := time.Now()
-		_, err = e.db.Exec(`
+		result, err = e.db.Exec(`
 			UPDATE executions SET status = ?, error_message = ?, end_time = ?
 			WHERE id = ?
 		`, status, errorMessage, endTime, jobID)
 	}
-
-	return err
+	if err != nil {
+		return fmt.Errorf("update execution %q to %q: %w", jobID, status, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update execution %q to %q: inspect affected rows: %w", jobID, status, err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("update execution %q to %q: expected one row, updated %d", jobID, status, rows)
+	}
+	return nil
 }
 
 func (e *Executor) IsJobRunning(jobID string) bool {
