@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -75,17 +76,17 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
+					Code    int    `json:"code"`
 					Message string `json:"message"`
 					Data    struct {
-						Jobs  []struct {
-							ID          string     `json:"id"`
-							Name        string     `json:"name"`
-							URL         string     `json:"url"`
-							Status      string     `json:"status"`
-							StartTime   *time.Time `json:"start_time"`
-							EndTime     *time.Time `json:"end_time"`
-							ErrorMessage string    `json:"error_message"`
+						Jobs []struct {
+							ID           string     `json:"id"`
+							Name         string     `json:"name"`
+							URL          string     `json:"url"`
+							Status       string     `json:"status"`
+							StartTime    *time.Time `json:"start_time"`
+							EndTime      *time.Time `json:"end_time"`
+							ErrorMessage string     `json:"error_message"`
 						} `json:"jobs"`
 						Total int64 `json:"total"`
 						Page  int   `json:"page"`
@@ -111,17 +112,17 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
+					Code    int    `json:"code"`
 					Message string `json:"message"`
 					Data    struct {
-						Jobs  []struct {
-							ID          string     `json:"id"`
-							Name        string     `json:"name"`
-							URL         string     `json:"url"`
-							Status      string     `json:"status"`
-							StartTime   *time.Time `json:"start_time"`
-							EndTime     *time.Time `json:"end_time"`
-							ErrorMessage string    `json:"error_message"`
+						Jobs []struct {
+							ID           string     `json:"id"`
+							Name         string     `json:"name"`
+							URL          string     `json:"url"`
+							Status       string     `json:"status"`
+							StartTime    *time.Time `json:"start_time"`
+							EndTime      *time.Time `json:"end_time"`
+							ErrorMessage string     `json:"error_message"`
 						} `json:"jobs"`
 						Total int64 `json:"total"`
 						Page  int   `json:"page"`
@@ -143,17 +144,17 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
+					Code    int    `json:"code"`
 					Message string `json:"message"`
 					Data    struct {
-						Jobs  []struct {
-							ID          string     `json:"id"`
-							Name        string     `json:"name"`
-							URL         string     `json:"url"`
-							Status      string     `json:"status"`
-							StartTime   *time.Time `json:"start_time"`
-							EndTime     *time.Time `json:"end_time"`
-							ErrorMessage string    `json:"error_message"`
+						Jobs []struct {
+							ID           string     `json:"id"`
+							Name         string     `json:"name"`
+							URL          string     `json:"url"`
+							Status       string     `json:"status"`
+							StartTime    *time.Time `json:"start_time"`
+							EndTime      *time.Time `json:"end_time"`
+							ErrorMessage string     `json:"error_message"`
 						} `json:"jobs"`
 						Total int64 `json:"total"`
 						Page  int   `json:"page"`
@@ -175,11 +176,13 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
+					Code    int    `json:"code"`
 					Message string `json:"message"`
 					Data    struct {
-						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
-						Total int64                               `json:"total"`
+						Jobs []struct {
+							Name string `json:"name"`
+						} `json:"jobs"`
+						Total int64 `json:"total"`
 					} `json:"data"`
 				}
 				err := json.Unmarshal(resp.Body.Bytes(), &response)
@@ -195,11 +198,13 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
+					Code    int    `json:"code"`
 					Message string `json:"message"`
 					Data    struct {
-						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
-						Total int64                               `json:"total"`
+						Jobs []struct {
+							Name string `json:"name"`
+						} `json:"jobs"`
+						Total int64 `json:"total"`
 					} `json:"data"`
 				}
 				err := json.Unmarshal(resp.Body.Bytes(), &response)
@@ -215,10 +220,12 @@ func TestGetJobs(t *testing.T) {
 			expectedStatus: 200,
 			checkResponse: func(t *testing.T, resp *httptest.ResponseRecorder) {
 				var response struct {
-					Code    int `json:"code"`
-					Data    struct {
-						Jobs  []struct{ Name string `json:"name"` } `json:"jobs"`
-						Total int64                               `json:"total"`
+					Code int `json:"code"`
+					Data struct {
+						Jobs []struct {
+							Name string `json:"name"`
+						} `json:"jobs"`
+						Total int64 `json:"total"`
 					} `json:"data"`
 				}
 				require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
@@ -245,7 +252,7 @@ func TestGetJobs(t *testing.T) {
 func TestCreateJob(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)
-	defer testDB.Close()
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
 
 	cfg := &config.Config{
 		Repository: []typedef.Repository{
@@ -257,7 +264,13 @@ func TestCreateJob(t *testing.T) {
 	}
 
 	log := logger.NewLogger(testDB)
-	exec := executor.NewExecutor(log, testDB, cfg)
+	exec := executor.NewExecutorWithRunners(log, testDB, cfg, executor.Runners{
+		Code: func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	t.Cleanup(func() { require.NoError(t, exec.Close()) })
 
 	s := server.NewTestServerWithExecutor(testDB, exec)
 
@@ -324,7 +337,26 @@ func TestCreateJob(t *testing.T) {
 		assert.Equal(t, 200, response.Code)
 		require.Len(t, response.Data.JobIDs, 1)
 		assert.NotEmpty(t, response.Data.JobIDs[0])
-		assert.Equal(t, "running", response.Data.Status)
+		assert.Equal(t, "pending", response.Data.Status)
+	})
+
+	t.Run("active_repository", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{
+			"repository_key": "github.com/test/repo",
+		})
+		req, _ := http.NewRequest("POST", "/api/jobs", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		s.ServeHTTP(resp, req)
+
+		assert.Equal(t, http.StatusConflict, resp.Code)
+		var response struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &response))
+		assert.Equal(t, http.StatusConflict, response.Code)
+		assert.Contains(t, response.Message, "already active")
 	})
 }
 

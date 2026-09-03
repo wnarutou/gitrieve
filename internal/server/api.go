@@ -71,6 +71,13 @@ func (a *API) CreateJob(c *gin.Context) {
 
 	jobIDs, err := a.executor.ExecuteJob(req.RepositoryKey)
 	if err != nil {
+		if errors.Is(err, executor.ErrRepositoryActive) {
+			c.JSON(http.StatusConflict, Response{
+				Code:    http.StatusConflict,
+				Message: "Repository is already active",
+			})
+			return
+		}
 		if errors.Is(err, executor.ErrRepositoryNotFound) {
 			c.JSON(http.StatusNotFound, Response{
 				Code:    404,
@@ -89,7 +96,7 @@ func (a *API) CreateJob(c *gin.Context) {
 		Code: 200,
 		Data: CreateJobResponse{
 			JobIDs: jobIDs,
-			Status: string(executor.StatusRunning),
+			Status: string(executor.StatusPending),
 		},
 	})
 }
@@ -108,6 +115,14 @@ func (a *API) CancelJob(c *gin.Context) {
 	// Cancel the job
 	err := a.executor.CancelJob(jobID)
 	if err != nil {
+		exists, lookupErr := a.db.ExecutionExists(c.Request.Context(), jobID)
+		if lookupErr == nil && !exists {
+			c.JSON(http.StatusOK, Response{
+				Code: 200,
+				Data: CancelJobResponse{Status: string(executor.StatusCancelled)},
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
 			Message: "Failed to cancel job: " + err.Error(),

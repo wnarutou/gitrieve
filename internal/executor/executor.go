@@ -32,14 +32,36 @@ const (
 type JobContext struct {
 	Ctx        context.Context
 	CancelFunc context.CancelFunc
+	done       chan struct{}
+	repoKey    string
+	cancelled  bool
+}
+
+type queuedJob struct {
+	id   string
+	repo typedef.Repository
+	ctx  context.Context
+	plan []component
 }
 
 type Executor struct {
-	db          *db.DB
-	cfg         atomic.Pointer[config.Config]
-	runners     Runners
-	runningJobs map[string]*JobContext
-	mu          sync.RWMutex
+	db      *db.DB
+	cfg     atomic.Pointer[config.Config]
+	runners Runners
+
+	queueMu           sync.Mutex
+	queueCond         *sync.Cond
+	pending           []*queuedJob
+	jobs              map[string]*JobContext
+	activeByRepo      map[string]string
+	running           int
+	limit             int
+	closed            bool
+	dispatcherStarted bool
+	dispatcherDone    chan struct{}
+	closeDone         chan struct{}
+	closeErr          error
+	workers           sync.WaitGroup
 }
 
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
@@ -54,12 +76,24 @@ func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config
 		ui.SetSink(logger)
 	}
 	exec := &Executor{
-		db:          db,
-		runners:     runners,
-		runningJobs: make(map[string]*JobContext),
+		db:             db,
+		runners:        runners,
+		jobs:           make(map[string]*JobContext),
+		activeByRepo:   make(map[string]string),
+		limit:          concurrencyLimit(cfg),
+		dispatcherDone: make(chan struct{}),
+		closeDone:      make(chan struct{}),
 	}
+	exec.queueCond = sync.NewCond(&exec.queueMu)
 	exec.cfg.Store(cfg)
 	return exec
+}
+
+func concurrencyLimit(cfg *config.Config) int {
+	if cfg == nil || cfg.ConcurrencyNum == 0 {
+		return 3
+	}
+	return int(cfg.ConcurrencyNum)
 }
 
 // RefreshConfig repoints the executor at a new config instance. Called by the
@@ -69,11 +103,17 @@ func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config
 // new config in its entirety, never a torn read, so this is safe to call while
 // jobs are running.
 func (e *Executor) RefreshConfig(cfg *config.Config) {
+	e.queueMu.Lock()
 	e.cfg.Store(cfg)
+	e.limit = concurrencyLimit(cfg)
+	e.queueCond.Broadcast()
+	e.queueMu.Unlock()
 }
 
 // ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
 var ErrRepositoryNotFound = errors.New("repository not found in configuration")
+var ErrRepositoryActive = errors.New("repository is already active")
+var ErrExecutorClosed = errors.New("executor is closed")
 
 // expandRepos 是把 user/org 条目展开为具体仓库的 seam：生产用 repository.Expand，
 // 测试注入 fake，避免真实 GitHub 调用。
@@ -85,11 +125,13 @@ var expandRepos = repository.Expand
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
 	var repo typedef.Repository
 	found := false
-	for _, r := range e.cfg.Load().Repository {
-		if r.Matches(repoKey) {
-			repo = r
-			found = true
-			break
+	if cfg := e.cfg.Load(); cfg != nil {
+		for _, r := range cfg.Repository {
+			if r.Matches(repoKey) {
+				repo = r
+				found = true
+				break
+			}
 		}
 	}
 	if !found {
@@ -113,13 +155,32 @@ func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	jobID := uuid.New().String()
 	startTime := time.Now()
 	plan := componentPlan(job, e.runners)
+	repoKey := job.Key()
+
+	e.queueMu.Lock()
+	defer e.queueMu.Unlock()
+	if e.closed {
+		return "", ErrExecutorClosed
+	}
+	if _, active := e.activeByRepo[repoKey]; active {
+		return "", ErrRepositoryActive
+	}
+	active, err := e.db.ActiveExecutionExists(context.Background(), repoKey)
+	if err != nil {
+		return "", fmt.Errorf("check active execution: %w", err)
+	}
+	if active {
+		return "", ErrRepositoryActive
+	}
+	e.activeByRepo[repoKey] = jobID
 
 	// Create execution record: job_name 保存展示名快照，repo_key 是身份键。
-	_, err := e.db.Exec(`
+	_, err = e.db.Exec(`
 		INSERT INTO executions (id, job_name, repo_key, start_time, status)
 		VALUES (?, ?, ?, ?, ?)
-	`, jobID, job.Name, job.Key(), startTime, string(StatusPending))
+	`, jobID, job.Name, repoKey, startTime, string(StatusPending))
 	if err != nil {
+		delete(e.activeByRepo, repoKey)
 		return "", fmt.Errorf("failed to create execution record: %w", err)
 	}
 
@@ -130,40 +191,104 @@ func (e *Executor) launchJob(job typedef.Repository) (string, error) {
 	if err := e.db.CreateComponents(context.Background(), jobID, componentNames); err != nil {
 		message := fmt.Sprintf("create component records: %v", err)
 		if statusErr := e.updateJobStatus(jobID, string(StatusFailed), message); statusErr != nil {
+			delete(e.activeByRepo, repoKey)
 			return "", fmt.Errorf("%s; mark execution failed: %w", message, statusErr)
 		}
+		delete(e.activeByRepo, repoKey)
 		return "", errors.New(message)
 	}
 
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Store job context
-	e.mu.Lock()
-	e.runningJobs[jobID] = &JobContext{
+	// Store the context and enqueue while the repository reservation is held.
+	e.jobs[jobID] = &JobContext{
 		Ctx:        ctx,
 		CancelFunc: cancel,
+		done:       make(chan struct{}),
+		repoKey:    repoKey,
 	}
-	e.mu.Unlock()
-
-	// Update status to running
-	e.updateJobStatus(jobID, string(StatusRunning), "")
-
-	// Execute async
-	go e.executeAsync(ctx, jobID, job, plan)
+	e.pending = append(e.pending, &queuedJob{id: jobID, repo: job, ctx: ctx, plan: plan})
+	e.startDispatcherLocked()
+	e.queueCond.Broadcast()
 
 	return jobID, nil
+}
+
+func (e *Executor) startDispatcherLocked() {
+	if e.dispatcherStarted {
+		return
+	}
+	e.dispatcherStarted = true
+	go e.dispatch()
+}
+
+func (e *Executor) dispatch() {
+	defer close(e.dispatcherDone)
+	for {
+		e.queueMu.Lock()
+		for !e.closed && (len(e.pending) == 0 || e.running >= e.limit) {
+			e.queueCond.Wait()
+		}
+		if e.closed {
+			e.queueMu.Unlock()
+			return
+		}
+
+		job := e.pending[0]
+		e.pending[0] = nil
+		e.pending = e.pending[1:]
+		e.running++
+		e.workers.Add(1)
+		e.queueMu.Unlock()
+
+		go e.runAdmitted(job)
+	}
+}
+
+func (e *Executor) runAdmitted(job *queuedJob) {
+	defer e.workers.Done()
+	defer e.completeRunningJob(job.id, job.repo.Key())
+
+	if err := e.updateJobStatus(job.id, string(StatusRunning), ""); err != nil {
+		e.finishAdmissionFailure(job, err)
+		return
+	}
+	e.executeAsync(job.ctx, job.id, job.repo, job.plan)
+}
+
+func (e *Executor) finishAdmissionFailure(job *queuedJob, admissionErr error) {
+	message := fmt.Sprintf("persist running execution state: %v", admissionErr)
+	allTerminal := true
+	for _, planned := range job.plan {
+		if err := e.db.FinishComponent(context.Background(), job.id, planned.name, db.ComponentFailed, time.Now(), message); err != nil {
+			allTerminal = false
+			ui.Errorf("Failed to record %s admission failure: %v", planned.name, err)
+		}
+	}
+	if allTerminal {
+		e.finishExecution(job.id, StatusFailed, message)
+	}
+}
+
+func (e *Executor) completeRunningJob(jobID, repoKey string) {
+	e.queueMu.Lock()
+	jobCtx := e.jobs[jobID]
+	delete(e.jobs, jobID)
+	if e.activeByRepo[repoKey] == jobID {
+		delete(e.activeByRepo, repoKey)
+	}
+	e.running--
+	if jobCtx != nil {
+		close(jobCtx.done)
+	}
+	e.queueCond.Broadcast()
+	e.queueMu.Unlock()
 }
 
 func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository, plan []component) {
 	unbind := ui.Bind(jobID, job.Name)
 	defer unbind()
-
-	defer func() {
-		e.mu.Lock()
-		delete(e.runningJobs, jobID)
-		e.mu.Unlock()
-	}()
 
 	ui.Printf("Starting job execution")
 
@@ -178,17 +303,19 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 
 	// Get storages
 	var storages []typedef.MultiStorage
-	for _, storageName := range job.Storage {
-		for _, s := range e.cfg.Load().Storage {
-			if s.Name == storageName {
-				storages = append(storages, typedef.MultiStorage{
-					Storage: typedef.Storage{
-						Name: s.Name,
-						Type: s.Type,
-						Path: s.Path,
-					},
-				})
-				break
+	if cfg := e.cfg.Load(); cfg != nil {
+		for _, storageName := range job.Storage {
+			for _, s := range cfg.Storage {
+				if s.Name == storageName {
+					storages = append(storages, typedef.MultiStorage{
+						Storage: typedef.Storage{
+							Name: s.Name,
+							Type: s.Type,
+							Path: s.Path,
+						},
+					})
+					break
+				}
 			}
 		}
 	}
@@ -335,17 +462,112 @@ func (e *Executor) finishExecution(jobID string, status ExecutionStatus, errorMe
 }
 
 func (e *Executor) CancelJob(jobID string) error {
-	e.mu.RLock()
-	jobCtx, exists := e.runningJobs[jobID]
-	e.mu.RUnlock()
-
+	e.queueMu.Lock()
+	if e.closed {
+		e.queueMu.Unlock()
+		return ErrExecutorClosed
+	}
+	jobCtx, exists := e.jobs[jobID]
 	if !exists {
 		// Job might not be running, try to update status anyway
-		return e.updateJobStatus(jobID, string(StatusCancelled), "")
+		err := e.updateJobStatus(jobID, string(StatusCancelled), "")
+		e.queueMu.Unlock()
+		return err
 	}
 
-	jobCtx.CancelFunc()
+	for i, pending := range e.pending {
+		if pending.id != jobID {
+			continue
+		}
+		e.pending = append(e.pending[:i], e.pending[i+1:]...)
+		e.signalCancellationLocked(jobCtx)
+		delete(e.jobs, jobID)
+		if e.activeByRepo[jobCtx.repoKey] == jobID {
+			delete(e.activeByRepo, jobCtx.repoKey)
+		}
+		e.workers.Add(1)
+		e.queueCond.Broadcast()
+		e.queueMu.Unlock()
+
+		defer e.workers.Done()
+		e.finishQueuedCancellation(pending)
+		close(jobCtx.done)
+		return nil
+	}
+
+	e.signalCancellationLocked(jobCtx)
+	e.queueMu.Unlock()
 	return nil
+}
+
+func (e *Executor) signalCancellationLocked(jobCtx *JobContext) {
+	if jobCtx.cancelled {
+		return
+	}
+	jobCtx.cancelled = true
+	jobCtx.CancelFunc()
+}
+
+func (e *Executor) finishQueuedCancellation(job *queuedJob) {
+	unbind := ui.Bind(job.id, job.repo.Name)
+	defer unbind()
+	e.finishCancellation(job.id, job.plan, 0, context.Canceled)
+}
+
+// Close stops admission, terminalizes queued jobs without invoking their
+// runners, signals every running job once, and waits for all executor-owned
+// goroutines and persistence work to finish.
+func (e *Executor) Close() error {
+	e.queueMu.Lock()
+	if e.closed {
+		done := e.closeDone
+		e.queueMu.Unlock()
+		<-done
+		e.queueMu.Lock()
+		err := e.closeErr
+		e.queueMu.Unlock()
+		return err
+	}
+
+	e.closed = true
+	pending := e.pending
+	e.pending = nil
+	pendingContexts := make(map[string]*JobContext, len(pending))
+	for _, job := range pending {
+		jobCtx := e.jobs[job.id]
+		if jobCtx == nil {
+			continue
+		}
+		pendingContexts[job.id] = jobCtx
+		e.signalCancellationLocked(jobCtx)
+		delete(e.jobs, job.id)
+		if e.activeByRepo[jobCtx.repoKey] == job.id {
+			delete(e.activeByRepo, jobCtx.repoKey)
+		}
+	}
+	for _, jobCtx := range e.jobs {
+		e.signalCancellationLocked(jobCtx)
+	}
+	dispatcherStarted := e.dispatcherStarted
+	e.queueCond.Broadcast()
+	e.queueMu.Unlock()
+
+	for _, job := range pending {
+		e.finishQueuedCancellation(job)
+		if jobCtx := pendingContexts[job.id]; jobCtx != nil {
+			close(jobCtx.done)
+		}
+	}
+	if dispatcherStarted {
+		<-e.dispatcherDone
+	}
+	e.workers.Wait()
+
+	e.queueMu.Lock()
+	close(e.closeDone)
+	err := e.closeErr
+	e.queueMu.Unlock()
+	return err
 }
 
 func (e *Executor) updateJobStatus(jobID string, status string, errorMessage string) error {
@@ -381,8 +603,8 @@ func (e *Executor) updateJobStatus(jobID string, status string, errorMessage str
 }
 
 func (e *Executor) IsJobRunning(jobID string) bool {
-	e.mu.RLock()
-	_, exists := e.runningJobs[jobID]
-	e.mu.RUnlock()
+	e.queueMu.Lock()
+	_, exists := e.jobs[jobID]
+	e.queueMu.Unlock()
 	return exists
 }

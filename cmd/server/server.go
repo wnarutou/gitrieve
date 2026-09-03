@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -60,6 +61,9 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	// 迁移旧库（新增 repo_key 列）。失败宁可起不来，也不在坏 schema 上跑。
 	if err := db.Migrate(database); err != nil {
 		ui.ErrorfExit("Failed to migrate database: %s", err)
+	}
+	if err := database.ReconcileInterrupted(context.Background(), time.Now()); err != nil {
+		ui.ErrorfExit("Failed to reconcile interrupted executions: %s", err)
 	}
 
 	// Initialize logger
@@ -192,14 +196,17 @@ func (s *Server) Close() error {
 	s.schedulerMu.Lock()
 	defer s.schedulerMu.Unlock()
 
-	var schedulerErr, databaseErr error
+	var schedulerErr, executorErr, databaseErr error
 	if s.scheduler != nil {
 		schedulerErr = s.scheduler.Shutdown()
+	}
+	if s.executor != nil {
+		executorErr = s.executor.Close()
 	}
 	if s.database != nil {
 		databaseErr = s.database.Close()
 	}
-	return errors.Join(schedulerErr, databaseErr)
+	return errors.Join(schedulerErr, executorErr, databaseErr)
 }
 
 var Cmd = &cobra.Command{

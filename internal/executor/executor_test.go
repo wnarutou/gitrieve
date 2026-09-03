@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,13 +25,19 @@ func newTestExecutor(t *testing.T) (*Executor, *db.DB) {
 
 func newTestExecutorForRepo(t *testing.T, repo typedef.Repository, runners Runners) (*Executor, *db.DB) {
 	t.Helper()
+	return newTestExecutorForConfig(t, &config.Config{Repository: []typedef.Repository{repo}}, runners)
+}
+
+func newTestExecutorForConfig(t *testing.T, cfg *config.Config, runners Runners) (*Executor, *db.DB) {
+	t.Helper()
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
 
 	log := logger.NewLogger(testDB)
-	cfg := &config.Config{Repository: []typedef.Repository{repo}}
-	return NewExecutorWithRunners(log, testDB, cfg, runners), testDB
+	exec := NewExecutorWithRunners(log, testDB, cfg, runners)
+	t.Cleanup(func() { require.NoError(t, exec.Close()) })
+	return exec, testDB
 }
 
 func noOpRunners() Runners {
@@ -69,14 +76,94 @@ func (r *runnerRecorder) recordedCalls() []string {
 	return append([]string(nil), r.calls...)
 }
 
+type blockingRunner struct {
+	entered    chan string
+	release    chan struct{}
+	running    atomic.Int32
+	maxRunning atomic.Int32
+}
+
+func newBlockingRunner(capacity int) *blockingRunner {
+	return &blockingRunner{
+		entered: make(chan string, capacity),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *blockingRunner) run(ctx context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
+	running := r.running.Add(1)
+	defer r.running.Add(-1)
+	for {
+		maxRunning := r.maxRunning.Load()
+		if running <= maxRunning || r.maxRunning.CompareAndSwap(maxRunning, running) {
+			break
+		}
+	}
+	r.entered <- repo.Key()
+	select {
+	case <-r.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *blockingRunner) runners() Runners {
+	runners := noOpRunners()
+	runners.Code = r.run
+	return runners
+}
+
+func requireRunnerEntry(t *testing.T, entered <-chan string) string {
+	t.Helper()
+	select {
+	case repoKey := <-entered:
+		return repoKey
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not start")
+		return ""
+	}
+}
+
+func repositoryConfig(limit uint, count int) *config.Config {
+	repos := make([]typedef.Repository, count)
+	for i := range repos {
+		repos[i] = typedef.Repository{
+			Name: fmt.Sprintf("repo-%d", i),
+			URL:  fmt.Sprintf("github.com/test/repo-%d", i),
+		}
+	}
+	return &config.Config{ConcurrencyNum: limit, Repository: repos}
+}
+
+func executionStatusCounts(t *testing.T, testDB *db.DB) map[string]int {
+	t.Helper()
+	rows, err := testDB.Query(`SELECT status, COUNT(*) FROM executions GROUP BY status`)
+	require.NoError(t, err)
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		require.NoError(t, rows.Scan(&status, &count))
+		counts[status] = count
+	}
+	require.NoError(t, rows.Err())
+	return counts
+}
+
 func waitForJob(t *testing.T, exec *Executor, jobID string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for exec.IsJobRunning(jobID) {
-		if time.Now().After(deadline) {
-			t.Fatalf("job %s did not finish", jobID)
-		}
-		time.Sleep(10 * time.Millisecond)
+	exec.queueMu.Lock()
+	jobCtx := exec.jobs[jobID]
+	exec.queueMu.Unlock()
+	if jobCtx == nil {
+		return
+	}
+	select {
+	case <-jobCtx.done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("job %s did not finish", jobID)
 	}
 }
 
@@ -655,4 +742,229 @@ func TestRefreshConfigRepointsExecutor(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, jobIDs, 1)
 	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestExecuteJobLimitsActualRunnerConcurrencyAndKeepsOverflowPending(t *testing.T) {
+	blocker := newBlockingRunner(6)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(2, 6), blocker.runners())
+
+	jobIDs := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		ids, err := exec.ExecuteJob(fmt.Sprintf("github.com/test/repo-%d", i))
+		require.NoError(t, err)
+		require.Len(t, ids, 1)
+		jobIDs = append(jobIDs, ids[0])
+	}
+
+	requireRunnerEntry(t, blocker.entered)
+	requireRunnerEntry(t, blocker.entered)
+	require.Equal(t, map[string]int{"pending": 4, "running": 2}, executionStatusCounts(t, testDB))
+	require.Equal(t, int32(2), blocker.running.Load())
+	require.Equal(t, int32(2), blocker.maxRunning.Load())
+
+	close(blocker.release)
+	for _, jobID := range jobIDs {
+		waitForJob(t, exec, jobID)
+	}
+	require.Equal(t, int32(2), blocker.maxRunning.Load())
+}
+
+func TestExecuteJobDefaultsZeroConcurrencyToThree(t *testing.T) {
+	blocker := newBlockingRunner(4)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(0, 4), blocker.runners())
+	for i := 0; i < 4; i++ {
+		_, err := exec.ExecuteJob(fmt.Sprintf("github.com/test/repo-%d", i))
+		require.NoError(t, err)
+	}
+
+	requireRunnerEntry(t, blocker.entered)
+	requireRunnerEntry(t, blocker.entered)
+	requireRunnerEntry(t, blocker.entered)
+	require.Equal(t, map[string]int{"pending": 1, "running": 3}, executionStatusCounts(t, testDB))
+	require.Equal(t, int32(3), blocker.maxRunning.Load())
+}
+
+func TestExecuteJobRejectsDuplicateRepositoryReservedInThisProcess(t *testing.T) {
+	blocker := newBlockingRunner(1)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), blocker.runners())
+
+	_, err := exec.ExecuteJob("https://github.com/test/repo-0")
+	require.NoError(t, err)
+	requireRunnerEntry(t, blocker.entered)
+
+	_, err = exec.ExecuteJob("github.com/test/repo-0")
+	require.ErrorIs(t, err, ErrRepositoryActive)
+	var count int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
+	require.Equal(t, 1, count)
+}
+
+func TestExecuteJobAtomicallyReservesRepositoryAcrossConcurrentRequests(t *testing.T) {
+	blocker := newBlockingRunner(1)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), blocker.runners())
+	start := make(chan struct{})
+	results := make(chan error, 8)
+	var callers sync.WaitGroup
+	for i := 0; i < cap(results); i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			_, err := exec.ExecuteJob("https://github.com/test/repo-0")
+			results <- err
+		}()
+	}
+	close(start)
+	callers.Wait()
+	close(results)
+
+	succeeded := 0
+	active := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrRepositoryActive):
+			active++
+		default:
+			t.Fatalf("unexpected enqueue error: %v", err)
+		}
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 7, active)
+	var count int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
+	require.Equal(t, 1, count)
+}
+
+func TestExecuteJobRejectsDuplicateRepositoryAlreadyActiveInSQLite(t *testing.T) {
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), noOpRunners())
+	_, err := testDB.Exec(`
+		INSERT INTO executions (id, job_name, repo_key, start_time, status)
+		VALUES (?, ?, ?, ?, ?)`, "existing", "repo-0", "github.com/test/repo-0", time.Now(), StatusPending)
+	require.NoError(t, err)
+
+	_, err = exec.ExecuteJob("github.com/test/repo-0")
+	require.ErrorIs(t, err, ErrRepositoryActive)
+	var count int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
+	require.Equal(t, 1, count)
+}
+
+func TestExecuteJobReleasesRepositoryReservationAfterExecutionInsertFails(t *testing.T) {
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), noOpRunners())
+	_, err := testDB.Exec(`
+		CREATE TRIGGER reject_execution_insert
+		BEFORE INSERT ON executions
+		BEGIN
+			SELECT RAISE(FAIL, 'forced execution insert failure');
+		END;`)
+	require.NoError(t, err)
+
+	_, err = exec.ExecuteJob("github.com/test/repo-0")
+	require.ErrorContains(t, err, "forced execution insert failure")
+	_, err = testDB.Exec(`DROP TRIGGER reject_execution_insert`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestExecuteJobReleasesRepositoryReservationAfterComponentInsertFails(t *testing.T) {
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), noOpRunners())
+	_, err := testDB.Exec(`
+		CREATE TRIGGER reject_component_insert
+		BEFORE INSERT ON execution_components
+		BEGIN
+			SELECT RAISE(FAIL, 'forced component insert failure');
+		END;`)
+	require.NoError(t, err)
+
+	_, err = exec.ExecuteJob("github.com/test/repo-0")
+	require.ErrorContains(t, err, "forced component insert failure")
+	_, err = testDB.Exec(`DROP TRIGGER reject_component_insert`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestCancelJobRemovesQueuedWorkWithoutCallingRunner(t *testing.T) {
+	blocker := newBlockingRunner(2)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 2), blocker.runners())
+
+	firstIDs, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	requireRunnerEntry(t, blocker.entered)
+	queuedIDs, err := exec.ExecuteJob("github.com/test/repo-1")
+	require.NoError(t, err)
+
+	require.NoError(t, exec.CancelJob(queuedIDs[0]))
+	requireExecution(t, testDB, queuedIDs[0], StatusCancelled, "")
+	requireComponents(t, testDB, queuedIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCancelled, "context canceled"},
+	)
+	require.Equal(t, int32(1), blocker.running.Load())
+	select {
+	case repoKey := <-blocker.entered:
+		t.Fatalf("queued repository entered runner: %s", repoKey)
+	default:
+	}
+
+	close(blocker.release)
+	waitForJob(t, exec, firstIDs[0])
+}
+
+func TestRefreshConfigRaisesLiveAdmissionLimit(t *testing.T) {
+	blocker := newBlockingRunner(3)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 3), blocker.runners())
+	for i := 0; i < 3; i++ {
+		_, err := exec.ExecuteJob(fmt.Sprintf("github.com/test/repo-%d", i))
+		require.NoError(t, err)
+	}
+	requireRunnerEntry(t, blocker.entered)
+	require.Equal(t, map[string]int{"pending": 2, "running": 1}, executionStatusCounts(t, testDB))
+
+	exec.RefreshConfig(repositoryConfig(2, 3))
+	requireRunnerEntry(t, blocker.entered)
+	require.Equal(t, map[string]int{"pending": 1, "running": 2}, executionStatusCounts(t, testDB))
+	require.Equal(t, int32(2), blocker.maxRunning.Load())
+}
+
+func TestCloseCancelsQueuedAndRunningWorkAndIsIdempotent(t *testing.T) {
+	blocker := newBlockingRunner(3)
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 3), blocker.runners())
+	jobIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		ids, err := exec.ExecuteJob(fmt.Sprintf("github.com/test/repo-%d", i))
+		require.NoError(t, err)
+		jobIDs = append(jobIDs, ids[0])
+	}
+	requireRunnerEntry(t, blocker.entered)
+
+	require.NoError(t, exec.Close())
+	require.NoError(t, exec.Close())
+	require.Equal(t, map[string]int{"cancelled": 3}, executionStatusCounts(t, testDB))
+	require.Equal(t, int32(0), blocker.running.Load())
+	select {
+	case repoKey := <-blocker.entered:
+		t.Fatalf("queued repository entered runner during close: %s", repoKey)
+	default:
+	}
+	for _, jobID := range jobIDs {
+		require.False(t, exec.IsJobRunning(jobID))
+	}
+
+	_, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.ErrorIs(t, err, ErrExecutorClosed)
+}
+
+func TestCloseBeforeFirstEnqueueIsIdempotent(t *testing.T) {
+	exec, _ := newTestExecutorForConfig(t, nil, noOpRunners())
+	require.NoError(t, exec.Close())
+	require.NoError(t, exec.Close())
 }
