@@ -365,6 +365,87 @@ func TestExecuteJobCancelStoreFailureFallsBackToFailedComponentAndOverall(t *tes
 	)
 }
 
+func TestExecuteJobCancelFailedFallbackRejectionLeavesOverallActive(t *testing.T) {
+	issueStarted := make(chan struct{})
+	runners := noOpRunners()
+	runners.Issue = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(issueStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, runners)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_issue_cancellation_and_fallback
+		BEFORE UPDATE OF status ON execution_components
+		WHEN OLD.component = 'issues' AND NEW.status IN ('cancelled', 'failed')
+		BEGIN
+			SELECT RAISE(FAIL, 'forced cancellation and fallback failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	<-issueStarted
+	require.NoError(t, exec.CancelJob(jobIDs[0]))
+	waitForJob(t, exec, jobIDs[0])
+
+	require.False(t, exec.IsJobRunning(jobIDs[0]))
+	requireExecution(t, testDB, jobIDs[0], StatusRunning, "")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentRunning, ""},
+		expectedComponent{db.ComponentWiki, db.ComponentCancelled, "context canceled"},
+	)
+}
+
+func TestExecuteJobCancelledOverallStoreFailureFallsBackToFailed(t *testing.T) {
+	issueStarted := make(chan struct{})
+	runners := noOpRunners()
+	runners.Issue = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(issueStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name:           "test-repo",
+		URL:            "github.com/test/repo",
+		DownloadIssues: true,
+		DownloadWiki:   true,
+	}, runners)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_execution_cancellation
+		BEFORE UPDATE OF status ON executions
+		WHEN NEW.status = 'cancelled'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced overall cancellation failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	<-issueStarted
+	require.NoError(t, exec.CancelJob(jobIDs[0]))
+	waitForJob(t, exec, jobIDs[0])
+
+	persistenceMessage := fmt.Sprintf(
+		`persist cancelled execution state: update execution %q to "cancelled": constraint failed: forced overall cancellation failure (1811)`,
+		jobIDs[0],
+	)
+	requireExecution(t, testDB, jobIDs[0], StatusFailed, persistenceMessage)
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+		expectedComponent{db.ComponentIssue, db.ComponentCancelled, "context canceled"},
+		expectedComponent{db.ComponentWiki, db.ComponentCancelled, "context canceled"},
+	)
+}
+
 func TestExecuteJobComponentStoreFailurePreventsCompletedOverall(t *testing.T) {
 	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
 		Name:         "test-repo",
@@ -420,6 +501,48 @@ func TestExecuteJobOverallTerminalStoreFailureFallsBackToFailed(t *testing.T) {
 	requireComponents(t, testDB, jobIDs[0],
 		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
 	)
+}
+
+func TestExecuteJobFailedOverallFallbackRejectionIsDurablyLogged(t *testing.T) {
+	exec, testDB := newTestExecutor(t)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER fail_execution_completion_before_fallback
+		BEFORE UPDATE OF status ON executions
+		WHEN NEW.status = 'completed'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced overall completion failure');
+		END;
+
+		CREATE TRIGGER fail_execution_failed_fallback
+		BEFORE UPDATE OF status ON executions
+		WHEN NEW.status = 'failed'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced overall failed fallback failure');
+		END;
+	`)
+	require.NoError(t, err)
+
+	jobIDs, err := exec.ExecuteJob("github.com/test/repo")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+
+	require.False(t, exec.IsJobRunning(jobIDs[0]))
+	requireExecution(t, testDB, jobIDs[0], StatusRunning, "")
+	requireComponents(t, testDB, jobIDs[0],
+		expectedComponent{db.ComponentCode, db.ComponentCompleted, ""},
+	)
+
+	wantLog := fmt.Sprintf(
+		`Failed to record overall execution store failure: update execution %q to "failed": constraint failed: forced overall failed fallback failure (1811)`,
+		jobIDs[0],
+	)
+	var count int
+	require.NoError(t, testDB.QueryRow(`
+		SELECT COUNT(*) FROM logs
+		WHERE execution_id = ? AND level = 'error' AND message = ?`,
+		jobIDs[0], wantLog,
+	).Scan(&count))
+	require.Equal(t, 1, count)
 }
 
 func TestExecuteJobCreatesRecord(t *testing.T) {
