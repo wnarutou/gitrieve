@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sync"
@@ -83,6 +84,56 @@ type blockingRunner struct {
 	maxRunning atomic.Int32
 }
 
+type blockingExecutionStore struct {
+	delegate *db.DB
+
+	activeKey     string
+	activeEntered chan struct{}
+	activeRelease chan struct{}
+	activeOnce    sync.Once
+
+	execEntered chan struct{}
+	execRelease chan struct{}
+	execOnce    sync.Once
+
+	componentsEntered chan struct{}
+	componentsRelease chan struct{}
+	componentsOnce    sync.Once
+}
+
+func (s *blockingExecutionStore) Exec(query string, args ...interface{}) (sql.Result, error) {
+	if s.execEntered != nil {
+		s.execOnce.Do(func() { close(s.execEntered) })
+		<-s.execRelease
+	}
+	return s.delegate.Exec(query, args...)
+}
+
+func (s *blockingExecutionStore) ActiveExecutionExists(ctx context.Context, repoKey string) (bool, error) {
+	if repoKey == s.activeKey {
+		s.activeOnce.Do(func() { close(s.activeEntered) })
+		<-s.activeRelease
+	}
+	return s.delegate.ActiveExecutionExists(ctx, repoKey)
+}
+
+func (s *blockingExecutionStore) CreateComponents(ctx context.Context, executionID string, components []db.ComponentName) error {
+	err := s.delegate.CreateComponents(ctx, executionID, components)
+	if err == nil && s.componentsEntered != nil {
+		s.componentsOnce.Do(func() { close(s.componentsEntered) })
+		<-s.componentsRelease
+	}
+	return err
+}
+
+func (s *blockingExecutionStore) StartComponent(ctx context.Context, executionID string, component db.ComponentName, startedAt time.Time) error {
+	return s.delegate.StartComponent(ctx, executionID, component, startedAt)
+}
+
+func (s *blockingExecutionStore) FinishComponent(ctx context.Context, executionID string, component db.ComponentName, status db.ComponentStatus, finishedAt time.Time, errorMessage string) error {
+	return s.delegate.FinishComponent(ctx, executionID, component, status, finishedAt, errorMessage)
+}
+
 func newBlockingRunner(capacity int) *blockingRunner {
 	return &blockingRunner{
 		entered: make(chan string, capacity),
@@ -123,6 +174,19 @@ func requireRunnerEntry(t *testing.T, entered <-chan string) string {
 		t.Fatal("runner did not start")
 		return ""
 	}
+}
+
+func executorClosedSignal(exec *Executor) <-chan struct{} {
+	closed := make(chan struct{})
+	go func() {
+		exec.queueMu.Lock()
+		for !exec.closed {
+			exec.queueCond.Wait()
+		}
+		exec.queueMu.Unlock()
+		close(closed)
+	}()
+	return closed
 }
 
 func repositoryConfig(limit uint, count int) *config.Config {
@@ -967,4 +1031,331 @@ func TestCloseBeforeFirstEnqueueIsIdempotent(t *testing.T) {
 	exec, _ := newTestExecutorForConfig(t, nil, noOpRunners())
 	require.NoError(t, exec.Close())
 	require.NoError(t, exec.Close())
+}
+
+func TestBlockedSubmissionDoesNotPreventCloseFromCancellingRunningWork(t *testing.T) {
+	runnerEntered := make(chan struct{})
+	runnerCancelled := make(chan struct{})
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(runnerEntered)
+		<-ctx.Done()
+		close(runnerCancelled)
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 2), runners)
+	_, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	<-runnerEntered
+
+	activeRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(activeRelease) }) })
+	store := &blockingExecutionStore{
+		delegate:      testDB,
+		activeKey:     "github.com/test/repo-1",
+		activeEntered: make(chan struct{}),
+		activeRelease: activeRelease,
+	}
+	exec.db = store
+	submitResult := make(chan error, 1)
+	go func() {
+		_, submitErr := exec.ExecuteJob("github.com/test/repo-1")
+		submitResult <- submitErr
+	}()
+	<-store.activeEntered
+
+	closed := executorClosedSignal(exec)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exec.Close() }()
+	<-closed
+	<-runnerCancelled
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned before the in-flight submission completed: %v", err)
+	default:
+	}
+
+	releaseOnce.Do(func() { close(activeRelease) })
+	require.ErrorIs(t, <-submitResult, ErrExecutorClosed)
+	require.NoError(t, <-closeResult)
+}
+
+func TestUnknownJobCancellationPersistenceDoesNotHoldQueueLock(t *testing.T) {
+	exec, testDB := newTestExecutorForConfig(t, nil, noOpRunners())
+	execRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(execRelease) }) })
+	store := &blockingExecutionStore{
+		delegate:    testDB,
+		execEntered: make(chan struct{}),
+		execRelease: execRelease,
+	}
+	exec.db = store
+	cancelResult := make(chan error, 1)
+	go func() { cancelResult <- exec.CancelJob("unknown") }()
+	<-store.execEntered
+
+	closed := executorClosedSignal(exec)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exec.Close() }()
+	<-closed
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned before unknown-job persistence completed: %v", err)
+	default:
+	}
+
+	releaseOnce.Do(func() { close(execRelease) })
+	require.Error(t, <-cancelResult)
+	require.NoError(t, <-closeResult)
+}
+
+func TestExecuteJobExpandedBatchIsAtomicWhenSecondRepositoryIsActive(t *testing.T) {
+	runnerEntered := make(chan string, 2)
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
+		runnerEntered <- repo.Key()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForConfig(t, &config.Config{Repository: []typedef.Repository{{
+		Name: "acme", URL: "github.com/acme", Type: typedef.TypeOrg, OrgName: "acme",
+	}}}, runners)
+	_, err := testDB.Exec(`
+		INSERT INTO executions (id, job_name, repo_key, start_time, status)
+		VALUES (?, ?, ?, ?, ?)`, "active-beta", "beta", "github.com/acme/beta", time.Now(), StatusRunning)
+	require.NoError(t, err)
+
+	old := expandRepos
+	t.Cleanup(func() { expandRepos = old })
+	expandRepos = func(typedef.Repository) []typedef.Repository {
+		return []typedef.Repository{
+			{Name: "alpha", URL: "github.com/acme/alpha"},
+			{Name: "beta", URL: "github.com/acme/beta"},
+		}
+	}
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme")
+	require.ErrorIs(t, err, ErrRepositoryActive)
+	require.Empty(t, jobIDs)
+	var count int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
+	require.Equal(t, 1, count)
+	select {
+	case repoKey := <-runnerEntered:
+		t.Fatalf("expanded batch started hidden work for %s", repoKey)
+	default:
+	}
+}
+
+func TestExecuteJobExpandedBatchTerminalizesEarlierRowsWhenLaterPersistenceFails(t *testing.T) {
+	runnerEntered := make(chan string, 2)
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
+		runnerEntered <- repo.Key()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exec, testDB := newTestExecutorForConfig(t, &config.Config{Repository: []typedef.Repository{{
+		Name: "acme", URL: "github.com/acme", Type: typedef.TypeOrg, OrgName: "acme",
+	}}}, runners)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER reject_beta_component
+		BEFORE INSERT ON execution_components
+		WHEN (SELECT repo_key FROM executions WHERE id = NEW.execution_id) = 'github.com/acme/beta'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced beta component failure');
+		END;`)
+	require.NoError(t, err)
+
+	old := expandRepos
+	t.Cleanup(func() { expandRepos = old })
+	expandRepos = func(typedef.Repository) []typedef.Repository {
+		return []typedef.Repository{
+			{Name: "alpha", URL: "github.com/acme/alpha"},
+			{Name: "beta", URL: "github.com/acme/beta"},
+		}
+	}
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme")
+	require.ErrorContains(t, err, "forced beta component failure")
+	require.Empty(t, jobIDs)
+	require.Equal(t, map[string]int{"failed": 2}, executionStatusCounts(t, testDB))
+	var activeComponents int
+	require.NoError(t, testDB.QueryRow(`
+		SELECT COUNT(*) FROM execution_components WHERE status IN ('pending', 'running')`).Scan(&activeComponents))
+	require.Zero(t, activeComponents)
+	select {
+	case repoKey := <-runnerEntered:
+		t.Fatalf("failed expanded batch started hidden work for %s", repoKey)
+	default:
+	}
+}
+
+func TestExecuteJobRejectsDuplicateKeysWithinExpandedBatchBeforePersistence(t *testing.T) {
+	exec, testDB := newTestExecutorForConfig(t, &config.Config{Repository: []typedef.Repository{{
+		Name: "acme", URL: "github.com/acme", Type: typedef.TypeOrg, OrgName: "acme",
+	}}}, noOpRunners())
+	old := expandRepos
+	t.Cleanup(func() { expandRepos = old })
+	expandRepos = func(typedef.Repository) []typedef.Repository {
+		return []typedef.Repository{
+			{Name: "alpha", URL: "https://github.com/acme/alpha"},
+			{Name: "alpha-copy", URL: "github.com/acme/alpha/"},
+		}
+	}
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme")
+	require.ErrorIs(t, err, ErrRepositoryActive)
+	require.Empty(t, jobIDs)
+	var count int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
+	require.Zero(t, count)
+}
+
+func TestRefreshConfigDownsizeWaitsUntilRunningFallsBelowNewLimit(t *testing.T) {
+	cfg := repositoryConfig(3, 4)
+	entered := make(chan string, 4)
+	gates := make(map[string]chan struct{}, 4)
+	for _, repo := range cfg.Repository {
+		gates[repo.Key()] = make(chan struct{})
+	}
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, repo typedef.Repository, _ []typedef.MultiStorage) error {
+		entered <- repo.Key()
+		select {
+		case <-gates[repo.Key()]:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	exec, _ := newTestExecutorForConfig(t, cfg, runners)
+	jobByRepo := make(map[string]string, 4)
+	for _, repo := range cfg.Repository {
+		ids, err := exec.ExecuteJob(repo.Key())
+		require.NoError(t, err)
+		jobByRepo[repo.Key()] = ids[0]
+	}
+	first := requireRunnerEntry(t, entered)
+	second := requireRunnerEntry(t, entered)
+	third := requireRunnerEntry(t, entered)
+
+	exec.RefreshConfig(repositoryConfig(2, 4))
+	close(gates[first])
+	waitForJob(t, exec, jobByRepo[first])
+	exec.queueMu.Lock()
+	require.Equal(t, 2, exec.running)
+	require.Len(t, exec.pending, 1)
+	exec.queueMu.Unlock()
+	select {
+	case repoKey := <-entered:
+		t.Fatalf("replacement %s started while running equalled downsized limit", repoKey)
+	default:
+	}
+
+	close(gates[second])
+	fourth := requireRunnerEntry(t, entered)
+	close(gates[third])
+	close(gates[fourth])
+	for _, jobID := range jobByRepo {
+		waitForJob(t, exec, jobID)
+	}
+}
+
+func TestConcurrentCloseCallersWaitForSameCompletion(t *testing.T) {
+	runnerEntered := make(chan struct{})
+	runnerCancelled := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	runners := noOpRunners()
+	runners.Code = func(ctx context.Context, _ typedef.Repository, _ []typedef.MultiStorage) error {
+		close(runnerEntered)
+		<-ctx.Done()
+		close(runnerCancelled)
+		<-releaseRunner
+		return ctx.Err()
+	}
+	exec, _ := newTestExecutorForConfig(t, repositoryConfig(1, 1), runners)
+	_, err := exec.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	<-runnerEntered
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			results <- exec.Close()
+		}()
+	}
+	close(start)
+	<-runnerCancelled
+	select {
+	case err := <-results:
+		t.Fatalf("Close returned before worker completion: %v", err)
+	default:
+	}
+	close(releaseRunner)
+	require.NoError(t, <-results)
+	require.NoError(t, <-results)
+}
+
+func TestCloseWinningAfterPersistencePreventsPostCloseRunner(t *testing.T) {
+	runnerEntered := make(chan struct{}, 1)
+	runners := noOpRunners()
+	runners.Code = func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
+		runnerEntered <- struct{}{}
+		return nil
+	}
+	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), runners)
+	componentsRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(componentsRelease) }) })
+	store := &blockingExecutionStore{
+		delegate:          testDB,
+		componentsEntered: make(chan struct{}),
+		componentsRelease: componentsRelease,
+	}
+	exec.db = store
+	type executeResult struct {
+		ids []string
+		err error
+	}
+	submitResult := make(chan executeResult, 1)
+	go func() {
+		ids, submitErr := exec.ExecuteJob("github.com/test/repo-0")
+		submitResult <- executeResult{ids: ids, err: submitErr}
+	}()
+	<-store.componentsEntered
+
+	closed := executorClosedSignal(exec)
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exec.Close() }()
+	<-closed
+	select {
+	case <-runnerEntered:
+		t.Fatal("runner started before persisted submission was published")
+	default:
+	}
+	releaseOnce.Do(func() { close(componentsRelease) })
+
+	result := <-submitResult
+	require.ErrorIs(t, result.err, ErrExecutorClosed)
+	require.Empty(t, result.ids)
+	require.NoError(t, <-closeResult)
+	var active int
+	require.NoError(t, testDB.QueryRow(`
+		SELECT COUNT(*) FROM executions WHERE status IN ('pending', 'running')`).Scan(&active))
+	require.Zero(t, active)
+	select {
+	case <-runnerEntered:
+		t.Fatal("runner started after Close won the publish race")
+	default:
+	}
+}
+
+func TestConcurrencyLimitClampsMaxUintToMaxInt(t *testing.T) {
+	want := int(^uint(0) >> 1)
+	require.Equal(t, want, concurrencyLimit(&config.Config{ConcurrencyNum: ^uint(0)}))
 }
