@@ -16,8 +16,14 @@ func Skip(reason string) error {
 
 func SkippedReason(err error) (string, bool) {
 	var skipped SkippedError
-	if !errors.As(err, &skipped) {
-		return "", false
+	if errors.As(err, &skipped) {
+		return skipped.Reason, true
 	}
-	return skipped.Reason, true
+
+	var skippedPointer *SkippedError
+	if errors.As(err, &skippedPointer) && skippedPointer != nil {
+		return skippedPointer.Reason, true
+	}
+
+	return "", false
 }

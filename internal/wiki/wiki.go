@@ -45,8 +45,6 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	}
 
 	if err := wikiAvailability(repo.URL, gitrepo.GetHasWiki()); err != nil {
-		reason, _ := syncresult.SkippedReason(err)
-		ui.Printf("Skipped: %s", reason)
 		return err
 	}
 
