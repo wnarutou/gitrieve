@@ -93,4 +93,4 @@ retryBaseDelay: <duration, default 5s>  # exponential-backoff base (doubles per 
 
 ## Testing
 
-Tests live alongside the code they test as `_test.go` files (e.g. `internal/retry/retry_test.go`, `internal/lock/lock_test.go`), following Go conventions. Run the full suite with `go test ./...`.
+Go tests live alongside the code they test as `_test.go` files (e.g. `internal/retry/retry_test.go`, `internal/lock/lock_test.go`), following Go conventions. Run the full Go and web suite with `make test`; the underlying commands are `go test ./...` and `node --test web/main.test.cjs`.
