@@ -81,6 +81,8 @@ const state = {
     reposDirection: 'asc',
     reposRenderSerial: 0,
     componentDetailSerial: 0,
+    activeRoute: '',
+    routeEpoch: 0,
     es: null,
     logJob: null,
     logIds: {}
@@ -98,13 +100,21 @@ function setActiveNav(route) {
     $$('.nav-links a').forEach(a => a.classList.toggle('active', a.dataset.route === route));
 }
 
+function routeFromHash() {
+    const hash = (location.hash || '#/jobs').replace(/^#\/?/, '');
+    return (hash.split('?')[0].split('/')[0]) || 'jobs';
+}
+
 function renderApp() {
     const hash = (location.hash || '#/jobs').replace(/^#\/?/, '');
-    const route = (hash.split('?')[0].split('/')[0]) || 'jobs';
+    const route = routeFromHash();
+    const routeEpoch = ++state.routeEpoch;
+    state.activeRoute = route;
+    state.componentDetailSerial++;
     setActiveNav(route);
     if (route === 'repositories') {
         applyRepositoryRoute(hash);
-        renderRepositories();
+        renderRepositories(routeEpoch);
     }
     else {
         state.reposRenderSerial++;
@@ -118,6 +128,11 @@ window.addEventListener('hashchange', renderApp);
 
 const repositoryHealthValues = ['healthy', 'failed', 'overdue', 'stuck', 'never_synced', 'cancelled', 'pending', 'running', 'syncing'];
 const repositorySortValues = ['attention', 'name', 'last_attempt', 'last_success'];
+
+function isActiveRepositoryRoute(routeEpoch) {
+    if (routeEpoch !== state.routeEpoch) return false;
+    return state.activeRoute === 'repositories' && routeFromHash() === 'repositories';
+}
 
 function applyRepositoryRoute(hash) {
     const query = (hash || '').split('?')[1] || '';
@@ -295,9 +310,11 @@ async function cancelJob(jobId) {
 
 async function runRepo(key, name, btn) {
     if (!key) return;
+    const routeEpoch = state.routeEpoch;
     btn.disabled = true;
     try {
         const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ repository_key: key }) });
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         const jobIDs = (data && data.job_ids) || [];
         if (jobIDs.length === 1) {
             toast('Job started (' + jobIDs[0].slice(0, 8) + '…)');
@@ -305,8 +322,9 @@ async function runRepo(key, name, btn) {
         } else {
             toast('Started ' + jobIDs.length + ' jobs (org expansion)');
         }
-        renderRepositories();
+        renderRepositories(routeEpoch);
     } catch (e) {
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         toast('Failed to start job: ' + e.message, true);
         btn.disabled = false;
     }
@@ -321,13 +339,17 @@ function openLogModal(jobId, jobName, showComponents) {
     $('#log-modal-state').textContent = '';
     const consoleEl = $('#log-console');
     consoleEl.innerHTML = '<div class="log-line muted">Waiting for logs\u2026</div>';
-    if (!showComponents) $('#component-details').classList.add('hidden');
+    if (!showComponents) {
+        $('#execution-details').classList.add('hidden');
+        $('#component-details').classList.add('hidden');
+    }
     $('#log-modal').classList.remove('hidden');
 
     const es = new EventSource('/api/jobs/' + encodeURIComponent(jobId) + '/logs');
     state.es = es;
 
     es.addEventListener('done', (ev) => {
+        if (state.es !== es) return;
         let status = '';
         try { status = (JSON.parse(ev.data) || {}).status || ''; } catch (e) { /* ignore */ }
         appendLogLine({ level: 'info', message: 'Job finished (status: ' + status + ')' });
@@ -337,6 +359,7 @@ function openLogModal(jobId, jobName, showComponents) {
     });
 
     es.onmessage = (ev) => {
+        if (state.es !== es) return;
         let entry = null;
         try { entry = JSON.parse(ev.data); } catch (e) { return; }
         if (entry && entry.id && state.logIds[entry.id]) return;
@@ -368,8 +391,55 @@ function renderComponentDetails(components) {
         </div>`).join('');
 }
 
-async function openExecutionDetails(executionID, name) {
+function repositoryCanRetry(repository) {
+    const status = repository.last_status || '';
+    return !repository.stuck && !['pending', 'running'].includes(status) &&
+        (status === 'failed' || status === 'cancelled' || repository.overdue);
+}
+
+function renderExecutionDetails(repository, detailSerial, routeEpoch) {
+    $('#execution-details').classList.remove('hidden');
+    $('#execution-status').textContent = repository.last_status || repository.health_status || 'unknown';
+    $('#execution-attempt').textContent = fmtTime(repository.last_attempt_time);
+    $('#execution-duration').textContent = repository.last_duration_seconds === null ||
+        repository.last_duration_seconds === undefined ? '-' : repository.last_duration_seconds + 's';
+    $('#execution-error').textContent = repository.last_error_message || '-';
+    const retry = $('#btn-retry-execution');
+    retry.onclick = null;
+    retry.classList.toggle('hidden', !repositoryCanRetry(repository));
+    if (repositoryCanRetry(repository)) {
+        retry.onclick = () => retryExecutionRepository(repository, detailSerial, routeEpoch);
+    }
+}
+
+async function retryExecutionRepository(repository, detailSerial, routeEpoch) {
+    if (!isActiveRepositoryRoute(routeEpoch) || detailSerial !== state.componentDetailSerial) return;
+    const retry = $('#btn-retry-execution');
+    retry.disabled = true;
+    try {
+        const data = await api('/api/jobs', {
+            method: 'POST',
+            body: JSON.stringify({ repository_key: repoKey(repository) })
+        });
+        if (!isActiveRepositoryRoute(routeEpoch) || detailSerial !== state.componentDetailSerial) return;
+        const jobIDs = (data && data.job_ids) || [];
+        toast('Repository retry started');
+        renderRepositories(routeEpoch);
+        if (jobIDs.length === 1) openLogModal(jobIDs[0], repository.Name);
+    } catch (e) {
+        if (isActiveRepositoryRoute(routeEpoch) && detailSerial === state.componentDetailSerial) {
+            toast('Repository retry failed: ' + e.message, true);
+            retry.disabled = false;
+        }
+    }
+}
+
+async function openExecutionDetails(executionID, name, repository) {
+    const routeEpoch = state.routeEpoch;
+    if (!isActiveRepositoryRoute(routeEpoch)) return;
     const detailSerial = ++state.componentDetailSerial;
+    const snapshot = Object.freeze(Object.assign({}, repository));
+    renderExecutionDetails(snapshot, detailSerial, routeEpoch);
     $('#component-details').classList.remove('hidden');
     $('#component-list').textContent = 'Loading component details…';
     let components = [];
@@ -379,7 +449,7 @@ async function openExecutionDetails(executionID, name) {
     } catch (e) {
         components = null;
     }
-    if (detailSerial !== state.componentDetailSerial) return;
+    if (detailSerial !== state.componentDetailSerial || !isActiveRepositoryRoute(routeEpoch)) return;
     if (components === null) $('#component-list').textContent = 'Component details unavailable';
     else renderComponentDetails(components);
     openLogModal(executionID, name, true);
@@ -440,6 +510,7 @@ function openRepoForm(repo) {
 
 async function saveRepo(ev) {
     ev.preventDefault();
+    const routeEpoch = state.routeEpoch;
     const originalKey = $('#repo-original-key').value;
     const name = $('#repo-name').value.trim();
     if (!name) { toast('Name is required', true); return; }
@@ -469,20 +540,25 @@ async function saveRepo(ev) {
             await api('/api/repositories', { method: 'POST', body: JSON.stringify(repo) });
             toast('Repository added');
         }
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         $('#repo-modal').classList.add('hidden');
-        renderRepositories();
+        renderRepositories(routeEpoch);
     } catch (e) {
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         toast('Failed to save repository: ' + e.message, true);
     }
 }
 
 async function deleteRepo(key) {
     if (!confirm('Delete repository?')) return;
+    const routeEpoch = state.routeEpoch;
     try {
         await api('/api/repositories/' + encodeURIComponent(key), { method: 'DELETE' });
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         toast('Repository deleted');
-        renderRepositories();
+        renderRepositories(routeEpoch);
     } catch (e) {
+        if (!isActiveRepositoryRoute(routeEpoch)) return;
         toast('Failed to delete repository: ' + e.message, true);
     }
 }
@@ -516,52 +592,87 @@ function repositoryBulkSelector() {
     return selector;
 }
 
+function selectorsEqual(left, right) {
+    return left.search === right.search && left.health === right.health &&
+        Boolean(left.overdue) === Boolean(right.overdue);
+}
+
+function freezeBulkRetryAttempt(selector, expectedCount, routeEpoch) {
+    const frozenSelector = { search: selector.search || '', health: selector.health || '' };
+    if (selector.overdue) frozenSelector.overdue = true;
+    return Object.freeze({
+        selector: Object.freeze(frozenSelector),
+        expectedCount: Number(expectedCount) || 0,
+        routeEpoch: routeEpoch
+    });
+}
+
+function bulkRetryAttemptIsCurrent(attempt) {
+    return isActiveRepositoryRoute(attempt.routeEpoch) &&
+        selectorsEqual(attempt.selector, repositoryBulkSelector());
+}
+
 function canRetryFilteredRepositories() {
     return state.reposHealth === 'failed' || state.reposHealth === 'cancelled' ||
         state.reposHealth === 'overdue' || state.reposOverdue;
 }
 
-async function retryFilteredRepositories(expectedCount, retryAfterConflict) {
-    const count = Number(expectedCount) || 0;
-    if (!count) {
+async function retryFilteredRepositories(attempt, retryAfterConflict) {
+    if (!attempt.expectedCount) {
         toast('No eligible repositories to retry');
         return;
     }
-    const wording = retryAfterConflict ? 'The eligible set changed. Retry ' + count + ' repositories?' :
-        'Retry ' + count + ' eligible repositories?';
+    if (!bulkRetryAttemptIsCurrent(attempt)) {
+        toast('Repository filters changed. Retry from the current view.', true);
+        return;
+    }
+    const wording = retryAfterConflict ? 'The eligible set changed. Retry ' + attempt.expectedCount + ' repositories?' :
+        'Retry ' + attempt.expectedCount + ' eligible repositories?';
     if (!confirm(wording)) return;
+    if (!bulkRetryAttemptIsCurrent(attempt)) {
+        toast('Repository filters changed. Retry from the current view.', true);
+        return;
+    }
     try {
         const data = await api('/api/jobs/bulk', {
             method: 'POST',
-            body: JSON.stringify({ selector: repositoryBulkSelector(), expected_count: count })
+            body: JSON.stringify({ selector: attempt.selector, expected_count: attempt.expectedCount })
         });
+        if (!bulkRetryAttemptIsCurrent(attempt)) return;
         const result = data || {};
         toast('Bulk retry: requested ' + (result.requested || 0) + ', queued ' + (result.queued || 0) +
             ', skipped active ' + (result.skipped_active || 0) + ', no longer eligible ' +
             (result.no_longer_eligible || 0) + ', failed to enqueue ' + (result.failed_to_enqueue || 0));
-        renderRepositories();
+        renderRepositories(attempt.routeEpoch);
     } catch (e) {
-        const actual = e && e.data && e.data.actual_count;
+        const actual = e && e.data ? e.data.actual_count : null;
         if (e.status === 409 && Number.isInteger(actual) && !retryAfterConflict) {
-            retryFilteredRepositories(actual, true);
+            if (!bulkRetryAttemptIsCurrent(attempt)) {
+                toast('Repository filters changed. Retry from the current view.', true);
+                return;
+            }
+            retryFilteredRepositories(freezeBulkRetryAttempt(attempt.selector, actual, attempt.routeEpoch), true);
             return;
         }
-        toast('Bulk retry failed: ' + e.message, true);
+        if (bulkRetryAttemptIsCurrent(attempt)) toast('Bulk retry failed: ' + e.message, true);
     }
 }
 
-async function renderRepositories() {
+async function renderRepositories(expectedRouteEpoch) {
+    const routeEpoch = expectedRouteEpoch === undefined ? state.routeEpoch : expectedRouteEpoch;
+    if (!isActiveRepositoryRoute(routeEpoch)) return;
     const renderSerial = ++state.reposRenderSerial;
+    if (!isActiveRepositoryRoute(routeEpoch)) return;
     $('#app').innerHTML = '<div class="loading">Loading repositories\u2026</div>';
     let data = null;
     try {
         data = await api('/api/repositories?' + repositoryParams().toString());
     } catch (e) {
-        if (renderSerial !== state.reposRenderSerial) return;
+        if (renderSerial !== state.reposRenderSerial || !isActiveRepositoryRoute(routeEpoch)) return;
         $('#app').innerHTML = '<div class="empty error-text">Failed to load repositories: ' + esc(e.message) + '</div>';
         return;
     }
-    if (renderSerial !== state.reposRenderSerial) return;
+    if (renderSerial !== state.reposRenderSerial || !isActiveRepositoryRoute(routeEpoch)) return;
     const repos = (data && data.repositories) || [];
     const total = (data && data.total) || 0;
     const pages = Math.max(1, Math.ceil(total / 20));
@@ -569,8 +680,7 @@ async function renderRepositories() {
     const rows = repos.map(r => {
         const nextRun = r.schedule_error ? 'Schedule error: ' + r.schedule_error : fmtTime(r.next_run_time);
         const detail = r.latest_execution_id
-            ? '<button class="btn btn-sm btn-execution-details" data-jobid="' + esc(r.latest_execution_id) +
-                '" data-jobname="' + esc(r.Name) + '">Details</button>' : '';
+            ? '<button class="btn btn-sm btn-execution-details" data-key="' + esc(repoKey(r)) + '">Details</button>' : '';
         return `<tr>
             <td>${repositoryHealthBadge(r)}</td>
             <td><strong>${esc(r.Name)}</strong><br><span class="muted">${esc(r.URL || '-')}</span></td>
@@ -635,7 +745,10 @@ async function renderRepositories() {
         reposHealth: button.dataset.health || '', reposOverdue: button.dataset.overdue === 'true', reposPage: 1
     })));
     const retry = $('#btn-retry-filtered');
-    if (retry) retry.addEventListener('click', () => retryFilteredRepositories(total, false));
+    if (retry) {
+        const retryAttempt = freezeBulkRetryAttempt(repositoryBulkSelector(), total, routeEpoch);
+        retry.addEventListener('click', () => retryFilteredRepositories(retryAttempt, false));
+    }
     const prev = $('#pg-prev-repos');
     const next = $('#pg-next-repos');
     if (prev) prev.addEventListener('click', () => { if (state.reposPage > 1) setRepositoryRoute({ reposPage: state.reposPage - 1 }); });
@@ -649,7 +762,10 @@ async function renderRepositories() {
         if (r) openRepoForm(r);
     }));
     $$('.btn-del-repo').forEach(b => b.addEventListener('click', () => deleteRepo(b.dataset.key)));
-    $$('.btn-execution-details').forEach(b => b.addEventListener('click', () => openExecutionDetails(b.dataset.jobid, b.dataset.jobname)));
+    $$('.btn-execution-details').forEach(b => b.addEventListener('click', () => {
+        const r = repos.find(x => repoKey(x) === b.dataset.key);
+        if (r) openExecutionDetails(r.latest_execution_id, r.Name, r);
+    }));
 }
 
 function openStorageForm(storage) {

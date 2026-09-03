@@ -30,6 +30,16 @@
                 <span id="log-modal-state" class="log-state"></span>
                 <button id="log-modal-close" class="btn btn-sm">Close</button>
             </div>
+            <section id="execution-details" class="execution-details hidden" aria-live="polite">
+                <h3>Latest execution</h3>
+                <dl class="execution-summary">
+                    <div><dt>Status</dt><dd id="execution-status"></dd></div>
+                    <div><dt>Last attempt</dt><dd id="execution-attempt"></dd></div>
+                    <div><dt>Duration</dt><dd id="execution-duration"></dd></div>
+                    <div class="execution-error"><dt>Error</dt><dd id="execution-error"></dd></div>
+                </dl>
+                <button id="btn-retry-execution" class="btn btn-sm btn-primary hidden">Retry repository</button>
+            </section>
             <section id="component-details" class="component-details hidden" aria-live="polite">
                 <h3>Components</h3>
                 <div id="component-list"></div>

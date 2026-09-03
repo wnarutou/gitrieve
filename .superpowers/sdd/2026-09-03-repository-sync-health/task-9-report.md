@@ -30,3 +30,26 @@
 ## Concerns
 
 - Browser-level interaction testing was not run in this worktree; embedded static checks and Go API tests cover the required contracts. Existing mojibake in unrelated JavaScript text was left untouched to keep the diff scoped.
+
+## Fix Round 1
+
+### RED / GREEN
+
+- RED: the expanded embedded-asset test failed because bulk retry rebuilt the selector instead of posting a frozen `{selector, expected_count}` attempt and did not have route-epoch guards.
+- GREEN: the focused static test now validates frozen selector posting, 409 `actual_count` reconfirmation, route/detail epochs, execution detail controls, EventSource identity checks, and the single allowed metrics interval.
+
+### Fixes
+
+- Bulk retry snapshots the exact selector, expected count, and repository route epoch. A changed route/filter aborts both response handling and the second 409 confirmation.
+- Navigation tracks `activeRoute` and a monotonic `routeEpoch`; repository renders, CRUD/run continuations, component details, and detail retry refuse stale updates.
+- Execution details now show latest status, attempt time, duration, error, components, logs, and a single-repository retry control only for failed/cancelled/overdue work.
+- Closed/replaced EventSources cannot append or update the current log modal.
+
+### Verification
+
+- `node --check web/static/js/main.js`
+- `go test ./cmd/server -run 'TestStatic|TestRepositoryHealthAssets' -count=1`
+- `go test ./cmd/server ./internal/server -count=1`
+- `go test ./... -count=1`
+- `go vet ./cmd/server ./internal/server`
+- `git diff --check`

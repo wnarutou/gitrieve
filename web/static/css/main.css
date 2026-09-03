@@ -404,6 +404,22 @@ select:focus, input:focus {
 }
 
 .component-details h3 { margin: 0 0 8px; font-size: 14px; }
+.execution-details {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+}
+.execution-details h3 { margin: 0 0 8px; font-size: 14px; }
+.execution-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 0 0 10px;
+}
+.execution-summary div { min-width: 0; }
+.execution-summary dt { color: var(--muted); font-size: 12px; }
+.execution-summary dd { margin: 1px 0 0; overflow-wrap: anywhere; }
+.execution-summary .execution-error { grid-column: 1 / -1; color: var(--danger); }
 .component-row {
     display: grid;
     grid-template-columns: minmax(90px, 0.8fr) auto minmax(72px, 0.5fr) minmax(0, 2fr);
@@ -435,4 +451,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     .toolbar-group input[type="text"] { min-width: 0; flex: 1 1 180px; }
     .component-row { grid-template-columns: 1fr auto; }
     .component-row .component-error { grid-column: 1 / -1; }
+    .execution-summary { grid-template-columns: 1fr 1fr; }
+    .execution-summary .execution-error { grid-column: 1 / -1; }
 }
