@@ -416,6 +416,11 @@ async function renderRepositories() {
 
     const rows = repos.map(r => `
         <tr>
+            <td class="actions">
+                <button class="btn btn-sm btn-primary btn-run-repo" data-key="${esc(repoKey(r))}">Execute</button>
+                <button class="btn btn-sm btn-edit-repo" data-key="${esc(repoKey(r))}">Edit</button>
+                <button class="btn btn-sm btn-danger btn-del-repo" data-key="${esc(repoKey(r))}">Delete</button>
+            </td>
             <td><strong>${esc(r.Name)}</strong></td>
             <td class="muted">${esc(r.URL || '-')}</td>
             <td>${esc(r.Type || 'repo')}</td>
@@ -425,11 +430,6 @@ async function renderRepositories() {
             <td class="muted">${r.total_runs} total \u00b7 ${r.success_runs} ok \u00b7 ${r.failed_runs} fail</td>
             <td class="muted">${esc((r.Storage || []).join(', ') || '-')}</td>
             <td class="muted">${optionsCell(r)}</td>
-            <td class="actions">
-                <button class="btn btn-sm btn-primary btn-run-repo" data-key="${esc(repoKey(r))}">Execute</button>
-                <button class="btn btn-sm btn-edit-repo" data-key="${esc(repoKey(r))}">Edit</button>
-                <button class="btn btn-sm btn-danger btn-del-repo" data-key="${esc(repoKey(r))}">Delete</button>
-            </td>
         </tr>`).join('');
 
     $('#app').innerHTML = `
@@ -444,7 +444,7 @@ async function renderRepositories() {
         </div>
         <div class="panel">
             ${repos.length
-                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>URL</th><th>Type</th><th>Cron</th><th>Next Run</th><th>Last Run</th><th>Stats</th><th>Storage</th><th>Options</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                ? '<div class="table-wrap"><table class="table"><thead><tr><th></th><th>Name</th><th>URL</th><th>Type</th><th>Cron</th><th>Next Run</th><th>Last Run</th><th>Stats</th><th>Storage</th><th>Options</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
                 : (state.reposSearch
                     ? '<div class="empty">No repositories match your search.</div>'
                     : '<div class="empty">No repositories configured. Click <strong>Add Repository</strong>.</div>')}
