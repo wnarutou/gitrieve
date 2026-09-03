@@ -406,6 +406,7 @@ function renderExecutionDetails(repository, detailSerial, routeEpoch) {
     $('#execution-error').textContent = repository.last_error_message || '-';
     const retry = $('#btn-retry-execution');
     retry.onclick = null;
+    retry.disabled = false;
     retry.classList.toggle('hidden', !repositoryCanRetry(repository));
     if (repositoryCanRetry(repository)) {
         retry.onclick = () => retryExecutionRepository(repository, detailSerial, routeEpoch);
@@ -423,9 +424,16 @@ async function retryExecutionRepository(repository, detailSerial, routeEpoch) {
         });
         if (!isActiveRepositoryRoute(routeEpoch) || detailSerial !== state.componentDetailSerial) return;
         const jobIDs = (data && data.job_ids) || [];
-        toast('Repository retry started');
-        renderRepositories(routeEpoch);
-        if (jobIDs.length === 1) openLogModal(jobIDs[0], repository.Name);
+        if (jobIDs.length === 1) {
+            toast('Repository retry started');
+            renderRepositories(routeEpoch);
+            openLogModal(jobIDs[0], repository.Name);
+        } else {
+            closeLogModal();
+            if (jobIDs.length > 1) toast('Started ' + jobIDs.length + ' jobs (repository expansion)');
+            else toast('Repository retry accepted; no execution log was returned');
+            renderRepositories(routeEpoch);
+        }
     } catch (e) {
         if (isActiveRepositoryRoute(routeEpoch) && detailSerial === state.componentDetailSerial) {
             toast('Repository retry failed: ' + e.message, true);
@@ -535,12 +543,11 @@ async function saveRepo(ev) {
     try {
         if (originalKey) {
             await api('/api/repositories/' + encodeURIComponent(originalKey), { method: 'PUT', body: JSON.stringify(repo) });
-            toast('Repository updated');
         } else {
             await api('/api/repositories', { method: 'POST', body: JSON.stringify(repo) });
-            toast('Repository added');
         }
         if (!isActiveRepositoryRoute(routeEpoch)) return;
+        toast(originalKey ? 'Repository updated' : 'Repository added');
         $('#repo-modal').classList.add('hidden');
         renderRepositories(routeEpoch);
     } catch (e) {

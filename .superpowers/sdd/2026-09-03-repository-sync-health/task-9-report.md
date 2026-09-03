@@ -53,3 +53,18 @@
 - `go test ./... -count=1`
 - `go vet ./cmd/server ./internal/server`
 - `git diff --check`
+
+## Fix Round 2
+
+- RED: function-scoped static checks exposed the missing stale-modal close path for expanded detail retries.
+- GREEN: `renderExecutionDetails` resets the shared retry button, one execution opens its log, expanded results report the exact count and close the stale modal, and zero results report no returned log.
+- Static checks now scope repository async guards to each mutating function, validate the `total`-based frozen retry binding, forbid repository renders in the log stream function, and inspect balanced interval/timeout call expressions for forbidden callbacks.
+
+### Verification
+
+- `node --check web/static/js/main.js`
+- `go test ./cmd/server -run 'TestStatic|TestRepositoryHealthAssets' -count=1`
+- `go test ./cmd/server ./internal/server -count=1`
+- `go test ./... -count=1`
+- `go vet ./cmd/server ./internal/server`
+- `git diff --check`

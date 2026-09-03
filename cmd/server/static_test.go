@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -62,8 +63,6 @@ func TestRepositoryHealthAssets(t *testing.T) {
 	require.Contains(t, script, "function isActiveRepositoryRoute(routeEpoch)")
 	require.Contains(t, script, "routeEpoch !== state.routeEpoch")
 	require.Contains(t, script, "if (state.es !== es) return")
-	require.Equal(t, 1, strings.Count(script, "setInterval("))
-	require.Contains(t, script, "setInterval(refreshMetrics, 15000)")
 	require.Contains(t, script, "btn-refresh-repos")
 	require.Contains(t, string(template), "id=\"component-details\"")
 	require.Contains(t, string(template), "id=\"execution-details\"")
@@ -72,15 +71,71 @@ func TestRepositoryHealthAssets(t *testing.T) {
 	require.Contains(t, string(css), ".summary-grid")
 	require.Contains(t, string(css), ".component-row")
 
-	bulkStart := strings.Index(script, "async function retryFilteredRepositories")
-	bulkEnd := strings.Index(script, "async function renderRepositories")
-	require.NotEqual(t, -1, bulkStart)
-	require.Greater(t, bulkEnd, bulkStart)
-	require.NotContains(t, script[bulkStart:bulkEnd], "job_ids")
+	bulk := jsFunctionSection(t, script, "async function retryFilteredRepositories", "async function renderRepositories")
+	require.NotContains(t, bulk, "job_ids")
+	require.Contains(t, bulk, "bulkRetryAttemptIsCurrent(attempt)")
+	require.Contains(t, bulk, "JSON.stringify({ selector: attempt.selector, expected_count: attempt.expectedCount })")
 
-	logStart := strings.Index(script, "function openLogModal")
-	logEnd := strings.Index(script, "function componentBadge")
-	require.NotEqual(t, -1, logStart)
-	require.Greater(t, logEnd, logStart)
-	require.NotContains(t, script[logStart:logEnd], "renderApp(")
+	render := jsFunctionSection(t, script, "async function renderRepositories", "function openStorageForm")
+	require.Contains(t, render, "isActiveRepositoryRoute(routeEpoch)")
+	require.Contains(t, render, "freezeBulkRetryAttempt(repositoryBulkSelector(), total, routeEpoch)")
+
+	detail := jsFunctionSection(t, script, "async function openExecutionDetails", "function appendLogLine")
+	require.Contains(t, detail, "isActiveRepositoryRoute(routeEpoch)")
+	require.Contains(t, detail, "detailSerial !== state.componentDetailSerial")
+
+	detailRetry := jsFunctionSection(t, script, "async function retryExecutionRepository", "async function openExecutionDetails")
+	require.Contains(t, detailRetry, "isActiveRepositoryRoute(routeEpoch)")
+	require.Contains(t, detailRetry, "if (jobIDs.length === 1)")
+	require.Contains(t, detailRetry, "closeLogModal()")
+
+	renderDetail := jsFunctionSection(t, script, "function renderExecutionDetails", "async function retryExecutionRepository")
+	require.Contains(t, renderDetail, "retry.disabled = false")
+
+	for _, name := range []string{"async function runRepo", "async function saveRepo", "async function deleteRepo"} {
+		require.Contains(t, jsFunctionSection(t, script, name, "\n}"), "isActiveRepositoryRoute(routeEpoch)")
+	}
+
+	log := jsFunctionSection(t, script, "function openLogModal", "function componentBadge")
+	require.NotContains(t, log, "renderApp(")
+	require.NotContains(t, log, "renderRepositories(")
+	require.Contains(t, log, "if (state.es !== es) return")
+	for _, timer := range jsTimerCalls(script) {
+		require.NotContains(t, timer, "renderRepositories")
+		require.NotContains(t, timer, "renderApp")
+	}
+}
+
+func jsFunctionSection(t *testing.T, script, start, end string) string {
+	t.Helper()
+	startAt := strings.Index(script, start)
+	require.NotEqual(t, -1, startAt, start)
+	endAt := strings.Index(script[startAt+len(start):], end)
+	require.NotEqual(t, -1, endAt, end)
+	return script[startAt : startAt+len(start)+endAt]
+}
+
+func jsTimerCalls(script string) []string {
+	var calls []string
+	timerStart := regexp.MustCompile(`\b(?:setInterval|setTimeout)\s*\(`)
+	for _, match := range timerStart.FindAllStringIndex(script, -1) {
+		start := match[0]
+		open := strings.Index(script[start:match[1]], "(") + start
+		depth, end := 0, open
+	foundEnd:
+		for ; end < len(script); end++ {
+			switch script[end] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					end++
+					calls = append(calls, script[start:end])
+					break foundEnd
+				}
+			}
+		}
+	}
+	return calls
 }
