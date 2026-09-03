@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ func TestInitializeCreatesTables(t *testing.T) {
 	testDB, err := Initialize(":memory:")
 	assert.NoError(t, err)
 	defer testDB.Close()
+	assertComponentSchemaObjects(t, testDB)
 	require.NoError(t, Migrate(testDB))
 	require.NoError(t, Migrate(testDB))
 	assertComponentSchemaObjects(t, testDB)
@@ -100,6 +103,33 @@ func TestMigrateAddsRepoKeyColumn(t *testing.T) {
 	_, err = testDB.Exec(`INSERT INTO executions (id, job_name, repo_key, start_time, status) VALUES (?, ?, ?, ?, ?)`,
 		"new", "repo-b", "github.com/b/b", time.Now(), "running")
 	assert.NoError(t, err)
+}
+
+func TestInitializeThenMigrateUpgradesLegacyFileDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacyDB, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = legacyDB.Exec(`
+		CREATE TABLE executions (
+			id TEXT PRIMARY KEY,
+			job_name TEXT NOT NULL,
+			start_time DATETIME NOT NULL,
+			end_time DATETIME,
+			status TEXT NOT NULL,
+			error_message TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`)
+	require.NoError(t, err)
+	require.NoError(t, legacyDB.Close())
+
+	testDB, err := Initialize(path)
+	if testDB != nil {
+		defer testDB.Close()
+	}
+	require.NoError(t, err)
+	require.NoError(t, Migrate(testDB))
+	require.NoError(t, Migrate(testDB))
+	assertComponentSchemaObjects(t, testDB)
 }
 
 // TestMigrateIsIdempotent verifies Migrate on a fresh (already current) DB is a no-op.

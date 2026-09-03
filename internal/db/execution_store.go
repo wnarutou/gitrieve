@@ -33,28 +33,52 @@ func (d *DB) CreateComponents(ctx context.Context, executionID string, component
 
 // StartComponent marks a component as running at startedAt.
 func (d *DB) StartComponent(ctx context.Context, executionID string, component ComponentName, startedAt time.Time) error {
-	_, err := d.ExecContext(ctx, `
+	result, err := d.ExecContext(ctx, `
 		UPDATE execution_components
 		SET status = ?, start_time = ?, end_time = NULL, error_message = NULL
-		WHERE execution_id = ? AND component = ?`,
-		ComponentRunning, startedAt, executionID, component,
+		WHERE execution_id = ? AND component = ? AND status = ?`,
+		ComponentRunning, startedAt, executionID, component, ComponentPending,
 	)
 	if err != nil {
 		return fmt.Errorf("start component %q for execution %q: %w", component, executionID, err)
 	}
-	return nil
+	return requireOneComponentRow(result, "start", executionID, component)
 }
 
 // FinishComponent records a component's terminal status and outcome details.
 func (d *DB) FinishComponent(ctx context.Context, executionID string, component ComponentName, status ComponentStatus, finishedAt time.Time, errorMessage string) error {
-	_, err := d.ExecContext(ctx, `
+	if !isTerminalComponentStatus(status) {
+		return fmt.Errorf("finish component %q for execution %q: invalid terminal status %q", component, executionID, status)
+	}
+
+	result, err := d.ExecContext(ctx, `
 		UPDATE execution_components
 		SET status = ?, end_time = ?, error_message = ?
-		WHERE execution_id = ? AND component = ?`,
-		status, finishedAt, errorMessage, executionID, component,
+		WHERE execution_id = ? AND component = ? AND status IN (?, ?)`,
+		status, finishedAt, errorMessage, executionID, component, ComponentPending, ComponentRunning,
 	)
 	if err != nil {
 		return fmt.Errorf("finish component %q for execution %q: %w", component, executionID, err)
+	}
+	return requireOneComponentRow(result, "finish", executionID, component)
+}
+
+func isTerminalComponentStatus(status ComponentStatus) bool {
+	switch status {
+	case ComponentCompleted, ComponentFailed, ComponentSkipped, ComponentCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireOneComponentRow(result sql.Result, action, executionID string, component ComponentName) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s component %q for execution %q: inspect affected rows: %w", action, component, executionID, err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("%s component %q for execution %q: expected one pending or running row, updated %d", action, component, executionID, rows)
 	}
 	return nil
 }

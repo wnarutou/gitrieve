@@ -105,6 +105,37 @@ func TestExecutionExistenceQueriesUseExactExecutionAndRepositoryKeys(t *testing.
 	require.False(t, active)
 }
 
+func TestStartComponentRejectsMissingAndNonPendingRows(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	startedAt := time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC)
+	insertExecution(t, testDB, "exec-start-transitions", "github.com/acme/widgets", ComponentPending)
+
+	require.Error(t, testDB.StartComponent(ctx, "exec-start-transitions", ComponentCode, startedAt))
+	require.NoError(t, testDB.CreateComponents(ctx, "exec-start-transitions", []ComponentName{ComponentCode}))
+	require.NoError(t, testDB.StartComponent(ctx, "exec-start-transitions", ComponentCode, startedAt))
+	require.Error(t, testDB.StartComponent(ctx, "exec-start-transitions", ComponentCode, startedAt.Add(time.Minute)))
+}
+
+func TestFinishComponentRejectsMissingNonterminalAndAlreadyTerminalRows(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	finishedAt := time.Date(2026, time.September, 3, 10, 2, 0, 0, time.UTC)
+	insertExecution(t, testDB, "exec-finish-transitions", "github.com/acme/widgets", ComponentPending)
+	require.NoError(t, testDB.CreateComponents(ctx, "exec-finish-transitions", []ComponentName{ComponentCode}))
+
+	require.Error(t, testDB.FinishComponent(ctx, "exec-finish-transitions", ComponentWiki, ComponentCompleted, finishedAt, ""))
+	require.Error(t, testDB.FinishComponent(ctx, "exec-finish-transitions", ComponentCode, ComponentRunning, finishedAt, ""))
+	require.NoError(t, testDB.FinishComponent(ctx, "exec-finish-transitions", ComponentCode, ComponentFailed, finishedAt, "interrupted"))
+	require.Error(t, testDB.FinishComponent(ctx, "exec-finish-transitions", ComponentCode, ComponentCompleted, finishedAt, ""))
+}
+
 func insertExecution(t *testing.T, testDB *DB, id, repoKey string, status ComponentStatus) {
 	t.Helper()
 	_, err := testDB.Exec(

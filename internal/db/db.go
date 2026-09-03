@@ -18,14 +18,17 @@ const componentSchema = `
 		FOREIGN KEY (execution_id) REFERENCES executions(id)
 	);
 
+	CREATE INDEX IF NOT EXISTS idx_execution_components_execution
+		ON execution_components(execution_id);
+`
+
+const executionIndexSchema = `
 	CREATE INDEX IF NOT EXISTS idx_executions_repo_start
 		ON executions(repo_key, start_time DESC);
 	CREATE INDEX IF NOT EXISTS idx_executions_repo_status_end
 		ON executions(repo_key, status, end_time DESC);
 	CREATE INDEX IF NOT EXISTS idx_executions_status
 		ON executions(status);
-	CREATE INDEX IF NOT EXISTS idx_execution_components_execution
-		ON execution_components(execution_id);
 `
 
 type DB struct {
@@ -84,6 +87,17 @@ func Initialize(path string) (*DB, error) {
 			FOREIGN KEY (execution_id) REFERENCES executions(id)
 		);
 	` + componentSchema)
+	if err != nil {
+		return &DB{db}, err
+	}
+
+	hasRepoKey, err := columnExists(&DB{db}, "executions", "repo_key")
+	if err != nil {
+		return &DB{db}, err
+	}
+	if hasRepoKey {
+		_, err = db.Exec(executionIndexSchema)
+	}
 
 	return &DB{db}, err
 }
