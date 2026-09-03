@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	server "github.com/wnarutou/gitrieve/internal/server"
@@ -18,6 +19,86 @@ const (
 	benchmarkRepositoryCount = 6000
 	benchmarkHistoryCount    = 100
 )
+
+func TestRepositoryBenchmarkFixtureIsOverdueEarlyInTheHour(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	now := time.Date(2026, time.September, 4, 12, 5, 0, 0, time.UTC)
+	repositories := []typedef.Repository{{
+		Name: "repository-0000",
+		URL:  "github.com/benchmark/repository-0000",
+		Cron: "0 * * * *",
+	}}
+	insertRepositoryBenchmarkHistory(t, testDB, repositories, benchmarkHistoryCount, now)
+
+	var latestStart time.Time
+	require.NoError(t, testDB.QueryRow(
+		`SELECT start_time FROM executions WHERE repo_key = ? ORDER BY start_time DESC LIMIT 1`,
+		repositories[0].Key(),
+	).Scan(&latestStart))
+	require.Equal(t, now.Add(-2*time.Hour), latestStart)
+	latestEligibleOccurrence := now.Add(-30 * time.Minute).Truncate(time.Hour)
+	require.True(t, latestStart.Before(latestEligibleOccurrence))
+}
+
+func insertRepositoryBenchmarkHistory(
+	tb testing.TB,
+	testDB *db.DB,
+	repositories []typedef.Repository,
+	historyCount int,
+	now time.Time,
+) {
+	tb.Helper()
+	tx, err := testDB.Begin()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	statement, err := tx.Prepare(`
+		INSERT INTO executions
+			(id, job_name, repo_key, start_time, end_time, status, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		tb.Fatal(err)
+	}
+	for repositoryIndex, repository := range repositories {
+		for historyIndex := 0; historyIndex < historyCount; historyIndex++ {
+			// Keep the newest execution at least two hours old. With an hourly
+			// schedule and a 30-minute grace period this is overdue even during
+			// the first half-hour, when the eligible occurrence is in the
+			// preceding hour.
+			start := now.Add(-time.Duration(historyCount-historyIndex+1) * time.Hour)
+			end := start.Add(5 * time.Minute)
+			status := "completed"
+			message := ""
+			if historyIndex == historyCount-1 {
+				switch repositoryIndex % 4 {
+				case 0:
+					status = "failed"
+					message = "benchmark failure"
+				case 3:
+					status = "cancelled"
+					message = "benchmark cancellation"
+				}
+			}
+			id := fmt.Sprintf("benchmark-%04d-%03d", repositoryIndex, historyIndex)
+			if _, err := statement.Exec(id, repository.Name, repository.Key(), start, end, status, message); err != nil {
+				_ = statement.Close()
+				_ = tx.Rollback()
+				tb.Fatal(err)
+			}
+		}
+	}
+	if err := statement.Close(); err != nil {
+		_ = tx.Rollback()
+		tb.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		tb.Fatal(err)
+	}
+}
 
 func BenchmarkGetRepositories6000(b *testing.B) {
 	b.StopTimer()
@@ -37,49 +118,7 @@ func BenchmarkGetRepositories6000(b *testing.B) {
 		}
 	}
 
-	tx, err := testDB.Begin()
-	if err != nil {
-		b.Fatal(err)
-	}
-	statement, err := tx.Prepare(`
-		INSERT INTO executions
-			(id, job_name, repo_key, start_time, end_time, status, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		_ = tx.Rollback()
-		b.Fatal(err)
-	}
-	for repositoryIndex, repository := range repositories {
-		for historyIndex := 0; historyIndex < benchmarkHistoryCount; historyIndex++ {
-			start := now.Add(-time.Duration(benchmarkHistoryCount-historyIndex) * time.Hour)
-			end := start.Add(5 * time.Minute)
-			status := "completed"
-			message := ""
-			if historyIndex == benchmarkHistoryCount-1 {
-				switch repositoryIndex % 4 {
-				case 0:
-					status = "failed"
-					message = "benchmark failure"
-				case 3:
-					status = "cancelled"
-					message = "benchmark cancellation"
-				}
-			}
-			id := fmt.Sprintf("benchmark-%04d-%03d", repositoryIndex, historyIndex)
-			if _, err := statement.Exec(id, repository.Name, repository.Key(), start, end, status, message); err != nil {
-				_ = statement.Close()
-				_ = tx.Rollback()
-				b.Fatal(err)
-			}
-		}
-	}
-	if err := statement.Close(); err != nil {
-		_ = tx.Rollback()
-		b.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
-		b.Fatal(err)
-	}
+	insertRepositoryBenchmarkHistory(b, testDB, repositories, benchmarkHistoryCount, now)
 
 	handler := server.NewRepoTestServer(&config.Config{
 		SyncOverdueGrace:   30 * time.Minute,

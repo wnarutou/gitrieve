@@ -514,7 +514,7 @@ GET /api/repositories
 | `repositories[].latest_execution_id` | string | ID used by logs and component-detail endpoints |
 | `repositories[].last_error_message` | string | Concise latest execution error summary |
 | `repositories[].overdue` | bool | Whether the latest accepted attempt predates the latest cron occurrence outside the grace window |
-| `repositories[].stuck` | bool | Whether the latest execution has run beyond the stuck threshold |
+| `repositories[].stuck` | bool | Whether the latest execution has remained `pending` or `running` beyond the stuck threshold |
 | `repositories[].schedule_error` | string | Invalid cron diagnostic; such a row cannot be classified overdue |
 | `summary` | object | Fleet counts across all `search` matches, before health/overdue/stuck filters and pagination |
 | `total` | int | Total matching repositories (before pagination) |
@@ -891,8 +891,9 @@ syncStuckThreshold: 24h
 ```
 
 `syncOverdueGrace` delays missed-schedule classification until a cron
-occurrence is outside its grace window. `syncStuckThreshold` flags a running
-execution whose elapsed time is abnormally long. These are also the defaults;
+occurrence is outside its grace window. `syncStuckThreshold` flags a `pending`
+or `running` execution whose elapsed time is abnormally long. These are also
+the defaults;
 non-positive values select the defaults. Both settings participate in config
 load/save, export/import, apply, and reload.
 

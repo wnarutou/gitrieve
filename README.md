@@ -127,6 +127,8 @@ From the UI you can trigger archive jobs, view real-time logs, and edit reposito
 The Repositories page provides server-side health counts, failed/never/overdue/
 stuck filters, attention-first sorting, component detail, and safe bulk retry.
 It distinguishes the latest attempt from the latest fully successful backup.
+Stuck includes executions that remain either pending or running beyond
+`syncStuckThreshold`.
 An unsupported enabled component is recorded as skipped; a real component
 failure makes the overall execution fail. The page **never refreshes
 automatically** from polling, timers, or job-completion SSE events: use its
@@ -151,6 +153,7 @@ cocurrencyNum: 6
 `githubScheduleJitter: 0s` disables staggering. Staggering applies only to daemon cron jobs; manual commands and Web API jobs start immediately. These settings reduce bursts but do not increase GitHub quota and do not coordinate separate processes or hosts.
 
 `syncOverdueGrace` and `syncStuckThreshold` default to `30m` and `24h`;
+the stuck threshold applies to both pending and running executions, and
 non-positive values select those defaults. The existing, intentionally spelled
 `cocurrencyNum` setting limits actual running executor work across server cron,
 manual, and bulk requests. Extra work remains pending, and duplicate active

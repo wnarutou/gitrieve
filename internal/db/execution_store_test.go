@@ -14,7 +14,33 @@ func TestRepositoryExecutionLookupPlansUseRepositoryIndexes(t *testing.T) {
 	require.NoError(t, err)
 	defer testDB.Close()
 
-	rows, err := testDB.Query("EXPLAIN QUERY PLAN " + repositoryRunStatsQuery)
+	details := repositoryQueryPlanDetails(t, testDB, repositoryRunStatsQuery)
+	plan := strings.Join(details, "\n")
+	require.True(t, queryPlanHasKeyedSearch(
+		details, "recent", "idx_executions_repo_start", "repo_key=?",
+	), plan)
+	require.True(t, queryPlanHasKeyedSearch(
+		details, "successful", "idx_executions_repo_status_end", "repo_key=?", "status=?",
+	), plan)
+
+	queryWithoutSuccessfulIndex := strings.Replace(
+		repositoryRunStatsQuery,
+		"FROM executions AS successful INDEXED BY idx_executions_repo_status_end",
+		"FROM executions AS successful NOT INDEXED",
+		1,
+	)
+	require.NotEqual(t, repositoryRunStatsQuery, queryWithoutSuccessfulIndex)
+	misleadingDetails := repositoryQueryPlanDetails(t, testDB, queryWithoutSuccessfulIndex)
+	require.Contains(t, strings.Join(misleadingDetails, "\n"), "idx_executions_repo_status_end",
+		"the totals scan should keep the old whole-plan assertion misleading")
+	require.False(t, queryPlanHasKeyedSearch(
+		misleadingDetails, "successful", "idx_executions_repo_status_end", "repo_key=?", "status=?",
+	), strings.Join(misleadingDetails, "\n"))
+}
+
+func repositoryQueryPlanDetails(t *testing.T, testDB *DB, query string) []string {
+	t.Helper()
+	rows, err := testDB.Query("EXPLAIN QUERY PLAN " + query)
 	require.NoError(t, err)
 	defer rows.Close()
 
@@ -26,9 +52,30 @@ func TestRepositoryExecutionLookupPlansUseRepositoryIndexes(t *testing.T) {
 		details = append(details, detail)
 	}
 	require.NoError(t, rows.Err())
-	plan := strings.Join(details, "\n")
-	require.Contains(t, plan, "idx_executions_repo_start", plan)
-	require.Contains(t, plan, "idx_executions_repo_status_end", plan)
+	return details
+}
+
+func queryPlanHasKeyedSearch(details []string, alias, index string, keyTerms ...string) bool {
+	searchPrefix := "SEARCH " + strings.ToUpper(alias) + " "
+	plainIndex := " USING INDEX " + strings.ToUpper(index)
+	coveringIndex := " USING COVERING INDEX " + strings.ToUpper(index)
+	for _, detail := range details {
+		normalized := strings.ToUpper(strings.Join(strings.Fields(detail), " "))
+		if !strings.Contains(normalized, searchPrefix) {
+			continue
+		}
+		if !strings.Contains(normalized, plainIndex) && !strings.Contains(normalized, coveringIndex) {
+			return false
+		}
+		compact := strings.ReplaceAll(normalized, " ", "")
+		for _, term := range keyTerms {
+			if !strings.Contains(compact, strings.ToUpper(strings.ReplaceAll(term, " ", ""))) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func TestCreatePendingExecutionsRollsBackWholeBatchWhenLaterComponentInsertFails(t *testing.T) {

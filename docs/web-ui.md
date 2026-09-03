@@ -55,7 +55,8 @@ Each row deliberately shows both the last attempt and last successful
 completion. A recent failed attempt must not make an older successful backup
 look recent. Primary health uses this precedence: never synced; stuck; pending
 or running; failed or cancelled; overdue; healthy. Overdue and stuck are also
-shown as independent diagnostics.
+shown as independent diagnostics. A repository is stuck when its latest
+execution remains `pending` or `running` beyond `syncStuckThreshold`.
 
 Open a row's execution detail to see the exact latest execution, its component
 outcomes, and its logs. Code is always enabled; release, issues, wiki, and
@@ -141,10 +142,11 @@ or deleted through the API, and after config import or reload.
 
 `syncOverdueGrace` defaults to `30m` and prevents a repository from being
 declared overdue immediately after its cron time. `syncStuckThreshold` defaults
-to `24h` and flags unusually long-running work. Non-positive values select
-those defaults. `cocurrencyNum` is intentionally spelled as shown and limits
-actual executor work shared by cron, manual runs, and bulk retries; excess work
-waits as `pending`. Duplicate active work for the same repository is rejected.
+to `24h` and flags work that remains `pending` or `running` past that duration.
+Non-positive values select those defaults. `cocurrencyNum` is intentionally
+spelled as shown and limits actual executor work shared by cron, manual runs,
+and bulk retries; excess work waits as `pending`. Duplicate active work for the
+same repository is rejected.
 At startup the server reconciles executions left `pending` or `running` by the
 previous process to `failed`, including active component rows.
 

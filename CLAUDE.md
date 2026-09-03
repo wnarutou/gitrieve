@@ -83,6 +83,10 @@ success, and compute summary counts across all search matches before health/
 diagnostic filters and pagination. Bulk retry must recompute and confirm the
 current eligible count, then account for partial outcomes.
 
+Stuck classification applies when the latest execution has remained either
+`pending` or `running` beyond `syncStuckThreshold`; do not narrow it to only
+running work.
+
 **Critical UI invariant:** the Repositories page refreshes only on an explicit
 user request. Never add polling, timer-triggered reloads, or SSE-completion
 reloads for this page.
