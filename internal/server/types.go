@@ -32,6 +32,28 @@ type CreateJobResponse struct {
 	Status string   `json:"status"`
 }
 
+type BulkJobSelector struct {
+	Search  string `json:"search"`
+	Health  string `json:"health"`
+	Overdue *bool  `json:"overdue,omitempty"`
+}
+
+type BulkCreateJobsRequest struct {
+	Selector      BulkJobSelector `json:"selector"`
+	ExpectedCount int             `json:"expected_count"`
+}
+
+// BulkCreateJobsResponse accounts for every repository in the server-confirmed
+// eligible set: Requested = Queued + SkippedActive + NoLongerEligible +
+// FailedToEnqueue.
+type BulkCreateJobsResponse struct {
+	Requested        int `json:"requested"`
+	Queued           int `json:"queued"`
+	SkippedActive    int `json:"skipped_active"`
+	NoLongerEligible int `json:"no_longer_eligible"`
+	FailedToEnqueue  int `json:"failed_to_enqueue"`
+}
+
 type CancelJobResponse struct {
 	Status string `json:"status"`
 }

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,6 +100,249 @@ func (a *API) CreateJob(c *gin.Context) {
 			Status: string(executor.StatusPending),
 		},
 	})
+}
+
+// BulkCreateJobs retries the current server-side eligible set selected by the
+// request. It never accepts repository IDs, and each confirmed candidate is
+// independently rechecked and submitted through the shared Executor.
+func (a *API) BulkCreateJobs(c *gin.Context) {
+	req, err := decodeBulkCreateJobsRequest(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid request: " + err.Error()})
+		return
+	}
+
+	confirmed, err := a.bulkEligibleSnapshot(c.Request.Context(), req.Selector, time.Now())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to query repository stats: " + err.Error()})
+		return
+	}
+	if len(confirmed) != req.ExpectedCount {
+		c.JSON(http.StatusConflict, Response{
+			Code:    http.StatusConflict,
+			Data:    gin.H{"actual_count": len(confirmed)},
+			Message: "Eligible repository count changed",
+		})
+		return
+	}
+
+	result := BulkCreateJobsResponse{Requested: len(confirmed)}
+	for _, candidate := range confirmed {
+		eligible, recheckErr := a.bulkRepositoryEligible(c.Request.Context(), candidate.Key(), req.Selector, time.Now())
+		if recheckErr != nil {
+			result.FailedToEnqueue++
+			continue
+		}
+		if !eligible {
+			result.NoLongerEligible++
+			continue
+		}
+
+		if a.executor == nil {
+			result.FailedToEnqueue++
+			continue
+		}
+		_, executeErr := a.executor.ExecuteJob(candidate.Key())
+		switch {
+		case executeErr == nil:
+			result.Queued++
+		case errors.Is(executeErr, executor.ErrRepositoryActive):
+			result.SkippedActive++
+		case errors.Is(executeErr, executor.ErrRepositoryNotFound):
+			result.NoLongerEligible++
+		default:
+			result.FailedToEnqueue++
+		}
+	}
+
+	c.JSON(http.StatusOK, Response{Code: http.StatusOK, Data: result})
+}
+
+func decodeBulkCreateJobsRequest(body io.Reader) (BulkCreateJobsRequest, error) {
+	var envelope struct {
+		Selector      json.RawMessage `json:"selector"`
+		ExpectedCount json.RawMessage `json:"expected_count"`
+	}
+	if err := decodeStrictJSON(body, &envelope); err != nil {
+		return BulkCreateJobsRequest{}, err
+	}
+	if len(envelope.Selector) == 0 || string(envelope.Selector) == "null" {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector is required")
+	}
+	if len(envelope.ExpectedCount) == 0 || string(envelope.ExpectedCount) == "null" {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count is required")
+	}
+
+	var req BulkCreateJobsRequest
+	if err := decodeStrictJSON(strings.NewReader(string(envelope.Selector)), &req.Selector); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector: %w", err)
+	}
+	var selectorFields map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Selector, &selectorFields); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector: %w", err)
+	}
+	for _, field := range []string{"search", "health", "overdue"} {
+		if raw, present := selectorFields[field]; present && string(raw) == "null" {
+			return BulkCreateJobsRequest{}, fmt.Errorf("selector.%s must not be null", field)
+		}
+	}
+	if req.Selector.Health != "" && !validRepositoryHealth(req.Selector.Health) {
+		return BulkCreateJobsRequest{}, fmt.Errorf("health %q is not supported", req.Selector.Health)
+	}
+	if err := json.Unmarshal(envelope.ExpectedCount, &req.ExpectedCount); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count must be an integer")
+	}
+	if req.ExpectedCount < 0 {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count must not be negative")
+	}
+	return req, nil
+}
+
+func decodeStrictJSON(reader io.Reader, target interface{}) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request must contain one JSON object")
+		}
+		return err
+	}
+	return nil
+}
+
+func (a *API) bulkEligibleSnapshot(ctx context.Context, selector BulkJobSelector, now time.Time) ([]RepositoryOverview, error) {
+	snapshot, err := a.currentRepositorySnapshot(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	return selectBulkEligible(snapshot, selector), nil
+}
+
+func selectBulkEligible(snapshot []RepositoryOverview, selector BulkJobSelector) []RepositoryOverview {
+	matched := searchRepositorySnapshot(snapshot, selector.Search)
+	matched = filterRepositorySnapshot(matched, RepositoryHealthFilter{
+		Health:  selector.Health,
+		Overdue: selector.Overdue,
+	})
+	eligible := make([]RepositoryOverview, 0, len(matched))
+	for _, repository := range matched {
+		if repository.Stuck {
+			continue
+		}
+		if repository.LastStatus == string(StatusFailed) ||
+			repository.LastStatus == string(StatusCancelled) || repository.Overdue {
+			eligible = append(eligible, repository)
+		}
+	}
+	sortRepositorySnapshot(eligible, "name", "asc")
+	return eligible
+}
+
+func (a *API) currentRepositorySnapshot(ctx context.Context, now time.Time) ([]RepositoryOverview, error) {
+	stats, err := a.db.RepositoryRunStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var repos []typedef.Repository
+	var overdueGrace, stuckThreshold time.Duration
+	if a.config != nil {
+		repos = a.config.Repository
+		overdueGrace = a.config.SyncOverdueGrace
+		stuckThreshold = a.config.SyncStuckThreshold
+	}
+	return buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), nil
+}
+
+func (a *API) bulkRepositoryEligible(ctx context.Context, repositoryKey string, selector BulkJobSelector, now time.Time) (bool, error) {
+	var repository typedef.Repository
+	found := false
+	if a.config != nil {
+		for _, configured := range a.config.Repository {
+			if configured.Matches(repositoryKey) {
+				repository = configured
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return false, nil
+	}
+
+	stats, err := a.repositoryRunStatsForCandidate(ctx, repository)
+	if err != nil {
+		return false, err
+	}
+	snapshot := buildRepositorySnapshot(
+		[]typedef.Repository{repository}, stats, now,
+		a.config.SyncOverdueGrace, a.config.SyncStuckThreshold,
+	)
+	return len(selectBulkEligible(snapshot, selector)) == 1, nil
+}
+
+// repositoryRunStatsForCandidate reads only the candidate's indexed execution
+// history. This keeps enqueue-time rechecks O(candidates) instead of rebuilding
+// the full ~6,000-repository fleet snapshot for every item.
+func (a *API) repositoryRunStatsForCandidate(ctx context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+	key := repository.Key()
+	query := `
+		SELECT id, repo_key, start_time, end_time, status, error_message
+		FROM executions WHERE repo_key = ?
+		ORDER BY repo_key, start_time DESC, id DESC LIMIT 1`
+	args := []interface{}{key}
+	if repository.GetType() == typedef.TypeOrg || repository.GetType() == typedef.TypeUser {
+		prefix := key + "/"
+		query = `
+			SELECT id, repo_key, start_time, end_time, status, error_message
+			FROM executions WHERE substr(repo_key, 1, ?) = ?
+			ORDER BY repo_key, start_time DESC, id DESC`
+		args = []interface{}{len(prefix), prefix}
+	}
+
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := make(map[string]db.RepositoryRunStats)
+	for rows.Next() {
+		var (
+			id           string
+			repoKey      string
+			start        time.Time
+			end          sql.NullTime
+			status       string
+			errorMessage sql.NullString
+		)
+		if err := rows.Scan(&id, &repoKey, &start, &end, &status, &errorMessage); err != nil {
+			return nil, err
+		}
+		if _, exists := stats[repoKey]; exists {
+			continue
+		}
+		entry := db.RepositoryRunStats{
+			LatestExecutionID: id,
+			LatestStatus:      status,
+			LatestStart:       start,
+			TotalRuns:         1,
+		}
+		if end.Valid {
+			latestEnd := end.Time
+			entry.LatestEnd = &latestEnd
+		}
+		if errorMessage.Valid {
+			entry.LatestError = errorMessage.String
+		}
+		stats[repoKey] = entry
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func (a *API) CancelJob(c *gin.Context) {
@@ -349,20 +594,12 @@ func (a *API) GetRepositories(c *gin.Context) {
 		return
 	}
 
-	stats, err := a.db.RepositoryRunStats(c.Request.Context())
+	snapshot, err := a.currentRepositorySnapshot(c.Request.Context(), now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query repository stats: " + err.Error()})
 		return
 	}
-
-	var repos []typedef.Repository
-	var overdueGrace, stuckThreshold time.Duration
-	if a.config != nil {
-		repos = a.config.Repository
-		overdueGrace = a.config.SyncOverdueGrace
-		stuckThreshold = a.config.SyncStuckThreshold
-	}
-	matched := searchRepositorySnapshot(buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), filter.Search)
+	matched := searchRepositorySnapshot(snapshot, filter.Search)
 	summary := summarizeRepositorySnapshot(matched)
 	filtered := filterRepositorySnapshot(matched, filter)
 	sortRepositorySnapshot(filtered, filter.Sort, filter.Direction)

@@ -58,6 +58,7 @@ func NewTestServer(db *db.DB) *TestServer {
 
 	s := &TestServer{router: gin.Default()}
 	s.router.POST("/api/jobs", api.CreateJob)
+	s.router.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
 	s.router.GET("/api/jobs", api.GetJobs)
 	s.router.GET("/api/jobs/:id/logs", api.GetJobLogs)
@@ -67,12 +68,16 @@ func NewTestServer(db *db.DB) *TestServer {
 
 // NewTestServerWithExecutor creates a new server instance with a custom
 // executor for testing, with the jobs routes registered.
-func NewTestServerWithExecutor(db *db.DB, exec *executor.Executor) *TestServer {
+func NewTestServerWithExecutor(db *db.DB, exec *executor.Executor, configs ...*config.Config) *TestServer {
 	cfg := newTestConfig()
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
 	api := NewAPI(cfg, db, exec)
 
 	s := &TestServer{router: gin.Default()}
 	s.router.POST("/api/jobs", api.CreateJob)
+	s.router.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
 	s.router.GET("/api/jobs", api.GetJobs)
 	s.router.GET("/api/jobs/:id/logs", api.GetJobLogs)

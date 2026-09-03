@@ -110,6 +110,7 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	}
 
 	apiGroup.POST("/api/jobs", api.CreateJob)
+	apiGroup.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	apiGroup.DELETE("/api/jobs/:id", api.CancelJob)
 	apiGroup.GET("/api/jobs", api.GetJobs)
 	apiGroup.GET("/api/jobs/:id/logs", api.GetJobLogs)
@@ -133,6 +134,10 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 }
 
 func (s *Server) setupTestRoutes(db *db.DB) {
+	s.router.POST("/api/jobs/bulk", func(c *gin.Context) {
+		api := internalserver.NewAPI(&config.Config{}, db, nil)
+		api.BulkCreateJobs(c)
+	})
 	s.router.GET("/api/jobs", func(c *gin.Context) {
 		api := internalserver.NewAPI(&config.Config{}, db, nil)
 		api.GetJobs(c)
