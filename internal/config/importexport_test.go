@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
-	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"gopkg.in/yaml.v3"
 )
@@ -153,21 +153,30 @@ func TestReloadAndSaveShareOneCoherentStateBoundary(t *testing.T) {
 	Path = newFile.Name()
 	t.Cleanup(func() { Path = "" })
 
-	previousConfigure := configureGitHubAPI
-	configureEntered := make(chan struct{})
-	configureRelease := make(chan struct{})
-	configureGitHubAPI = func(cfg githubapi.Config) {
-		if cfg.Concurrency == 7 {
-			close(configureEntered)
-			<-configureRelease
+	previousReadConfigFile := readConfigFile
+	readComplete := make(chan struct{})
+	readRelease := make(chan struct{})
+	readConfigFile = func(v *viper.Viper) error {
+		err := previousReadConfigFile(v)
+		if err != nil {
+			return err
 		}
-		previousConfigure(cfg)
+		close(readComplete)
+		<-readRelease
+		return nil
 	}
-	t.Cleanup(func() { configureGitHubAPI = previousConfigure })
+	t.Cleanup(func() { readConfigFile = previousReadConfigFile })
 
 	reloadDone := make(chan error, 1)
 	go func() { reloadDone <- Reload() }()
-	<-configureEntered
+	<-readComplete
+
+	// The disk generation has been read, but Reload has not parsed or installed
+	// it yet. Reload must already own stateMu before Save is launched here.
+	reloadOwnsState := !stateMu.TryLock()
+	if !reloadOwnsState {
+		stateMu.Unlock()
+	}
 	saveStarted := make(chan struct{})
 	saveDone := make(chan error, 1)
 	go func() {
@@ -175,15 +184,22 @@ func TestReloadAndSaveShareOneCoherentStateBoundary(t *testing.T) {
 		saveDone <- Save()
 	}()
 	<-saveStarted
-	lockedAcrossReload := !stateMu.TryLock()
-	if !lockedAcrossReload {
-		stateMu.Unlock()
-	}
-	close(configureRelease)
 
-	require.NoError(t, <-reloadDone)
-	require.NoError(t, <-saveDone)
-	require.True(t, lockedAcrossReload, "reload released state lock between viper and config publication")
+	// On the broken implementation Reload does not own the lock, so Save can
+	// finish in the read-to-install window and overwrite generation B with A.
+	var saveErr error
+	if !reloadOwnsState {
+		saveErr = <-saveDone
+	}
+	close(readRelease)
+
+	reloadErr := <-reloadDone
+	if reloadOwnsState {
+		saveErr = <-saveDone
+	}
+	require.NoError(t, reloadErr)
+	require.NoError(t, saveErr)
+	require.True(t, reloadOwnsState, "reload did not serialize the disk read-to-install window against Save")
 	require.Equal(t, "new", GetIns().GitHubToken)
 	saved, err := os.ReadFile(Path)
 	require.NoError(t, err)

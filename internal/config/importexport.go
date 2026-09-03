@@ -10,6 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var readConfigFile = func(v *viper.Viper) error { return v.ReadInConfig() }
+
 // ServerSection mirrors the `server:` section of config.yaml. It carries both
 // yaml and mapstructure tags so it can be (de)serialized directly and read via
 // viper's UnmarshalKey.
@@ -139,9 +141,12 @@ func Export() (string, error) {
 // error returned (the running server must survive a bad config file).
 func Reload() error {
 	stateMu.Lock()
-	initialized := vp != nil
-	stateMu.Unlock()
-	if !initialized {
+	defer stateMu.Unlock()
+	return reloadLocked()
+}
+
+func reloadLocked() error {
+	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}
 	// A fresh viper avoids inheriting override keys: Save()/SetServerField leave
@@ -149,7 +154,7 @@ func Reload() error {
 	// the stale overrides on top of the freshly-read file.
 	nv := viper.New()
 	nv.SetConfigFile(Path)
-	if err := nv.ReadInConfig(); err != nil {
+	if err := readConfigFile(nv); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 	var next Config
@@ -164,10 +169,8 @@ func Reload() error {
 		return err
 	}
 	snapshot := Clone(&next)
-	stateMu.Lock()
 	vp = nv
 	setInsLocked(snapshot)
-	stateMu.Unlock()
 	return nil
 }
 

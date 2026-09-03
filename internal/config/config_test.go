@@ -1,12 +1,14 @@
 package config
 
 import (
+	"context"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -229,6 +231,13 @@ func TestSetInsPublishesDefensiveImmutableSnapshots(t *testing.T) {
 	require.Equal(t, "old", actual.Storage[0].Path)
 }
 
+func TestGetInsPreservesUninitializedNil(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() { SetIns(previous) })
+	SetIns(nil)
+	require.Nil(t, GetIns())
+}
+
 func TestConcurrentConfigPublicationAndSnapshotReads(t *testing.T) {
 	previous := GetIns()
 	t.Cleanup(func() { SetIns(previous) })
@@ -281,22 +290,71 @@ func TestGetViperReturnsDetachedSnapshot(t *testing.T) {
 	require.Equal(t, "8081", GetViper().GetString("server.port"))
 }
 
+func TestGetViperReturnsDeepDetachedCompositeSnapshot(t *testing.T) {
+	writeTmpConfig(t, `repository:
+  - name: original
+    url: github.com/acme/original
+    storage:
+      - archive
+storage:
+  - name: archive
+    type: file
+    path: original-path
+`)
+	// Save installs typed slices in viper, which is the aliasing path a shallow
+	// AllSettings/MergeConfigMap copy fails to detach.
+	require.NoError(t, Save())
+
+	detached := GetViper()
+	repositories, ok := detached.Get("repository").([]typedef.Repository)
+	require.Truef(t, ok, "repository setting has unexpected type %T", detached.Get("repository"))
+	storages, ok := detached.Get("storage").([]typedef.MultiStorage)
+	require.Truef(t, ok, "storage setting has unexpected type %T", detached.Get("storage"))
+	repositories[0].Name = "detached mutation"
+	repositories[0].Storage[0] = "detached mutation"
+	storages[0].Path = "detached mutation"
+
+	fresh := GetViper()
+	freshRepositories, ok := fresh.Get("repository").([]typedef.Repository)
+	require.Truef(t, ok, "fresh repository setting has unexpected type %T", fresh.Get("repository"))
+	freshStorages, ok := fresh.Get("storage").([]typedef.MultiStorage)
+	require.Truef(t, ok, "fresh storage setting has unexpected type %T", fresh.Get("storage"))
+	live := GetIns()
+	assert.Equal(t, "original", freshRepositories[0].Name)
+	assert.Equal(t, []string{"archive"}, freshRepositories[0].Storage)
+	assert.Equal(t, "original-path", freshStorages[0].Path)
+	assert.Equal(t, "original", live.Repository[0].Name)
+	assert.Equal(t, []string{"archive"}, live.Repository[0].Storage)
+	assert.Equal(t, "original-path", live.Storage[0].Path)
+
+	require.NoError(t, Save())
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	assert.Contains(t, string(saved), "name: original")
+	assert.Contains(t, string(saved), "- archive")
+	assert.Contains(t, string(saved), "path: original-path")
+	assert.NotContains(t, string(saved), "detached mutation")
+}
+
 func TestConcurrentSetInsKeepsConfigAndGitHubCoordinatorPaired(t *testing.T) {
 	previousConfig := GetIns()
-	previousConfigure := configureGitHubAPI
+	previousPublish := publishGitHubAPI
 	t.Cleanup(func() {
-		configureGitHubAPI = previousConfigure
+		publishGitHubAPI = previousPublish
 		SetIns(previousConfig)
 	})
 
 	firstConfigureEntered := make(chan struct{})
 	firstConfigureRelease := make(chan struct{})
 	var appliedConcurrency atomic.Uint64
-	configureGitHubAPI = func(cfg githubapi.Config) {
-		if cfg.Concurrency == 1 {
-			close(firstConfigureEntered)
-			<-firstConfigureRelease
-		}
+	publishGitHubAPI = func(cfg githubapi.Config, install func()) {
+		previousPublish(cfg, func() {
+			install()
+			if cfg.Concurrency == 1 {
+				close(firstConfigureEntered)
+				<-firstConfigureRelease
+			}
+		})
 		appliedConcurrency.Store(uint64(cfg.Concurrency))
 	}
 
@@ -327,4 +385,79 @@ func TestConcurrentSetInsKeepsConfigAndGitHubCoordinatorPaired(t *testing.T) {
 	require.Equal(t, "two", GetIns().GitHubToken)
 	require.Equal(t, uint(2), GetIns().GitHubAPIConcurrency)
 	require.Equal(t, uint64(2), appliedConcurrency.Load())
+}
+
+func TestSetInsPublicationExcludesConfigAndCoordinatorReaders(t *testing.T) {
+	previousConfig := GetIns()
+	previousPublish := publishGitHubAPI
+	SetIns(&Config{GitHubToken: "old", GitHubAPIConcurrency: 1})
+	oldPermit, err := githubapi.Acquire(context.Background(), "core")
+	require.NoError(t, err)
+
+	publishEntered := make(chan struct{})
+	publishRelease := make(chan struct{})
+	publishGitHubAPI = func(cfg githubapi.Config, install func()) {
+		previousPublish(cfg, func() {
+			install()
+			if cfg.Concurrency == 2 {
+				close(publishEntered)
+				<-publishRelease
+			}
+		})
+	}
+
+	publishDone := make(chan struct{})
+	go func() {
+		SetIns(&Config{GitHubToken: "new", GitHubAPIConcurrency: 2})
+		close(publishDone)
+	}()
+	<-publishEntered
+
+	configReadStarted := make(chan struct{})
+	configReadDone := make(chan *Config, 1)
+	go func() {
+		close(configReadStarted)
+		configReadDone <- GetIns()
+	}()
+	<-configReadStarted
+
+	acquireCtx, cancelAcquire := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelAcquire()
+	type acquireResult struct {
+		permit githubapi.Permit
+		err    error
+	}
+	acquireStarted := make(chan struct{})
+	acquireDone := make(chan acquireResult, 1)
+	go func() {
+		close(acquireStarted)
+		permit, acquireErr := githubapi.Acquire(acquireCtx, "core")
+		acquireDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	<-acquireStarted
+
+	configReturnedDuringPublication := false
+	var publishedConfig *Config
+	select {
+	case publishedConfig = <-configReadDone:
+		configReturnedDuringPublication = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(publishRelease)
+	<-publishDone
+
+	if publishedConfig == nil {
+		publishedConfig = <-configReadDone
+	}
+	acquired := <-acquireDone
+	oldPermit.Done(githubapi.Observation{})
+	if acquired.permit != nil {
+		acquired.permit.Done(githubapi.Observation{})
+	}
+	publishGitHubAPI = previousPublish
+	SetIns(previousConfig)
+
+	assert.False(t, configReturnedDuringPublication, "GetIns observed the ins-before-coordinator publication window")
+	require.Equal(t, "new", publishedConfig.GitHubToken)
+	assert.NoError(t, acquired.err, "Acquire remained queued on the saturated old coordinator")
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,7 +41,7 @@ var Path string
 var vp *viper.Viper
 var stateMu sync.Mutex
 var ins atomic.Pointer[Config]
-var configureGitHubAPI = githubapi.Configure
+var publishGitHubAPI = githubapi.Publish
 
 func Init() {
 	nextViper := viper.New()
@@ -125,7 +126,7 @@ func Clone(cfg *Config) *Config {
 }
 
 func GetIns() *Config {
-	return Clone(ins.Load())
+	return Clone(loadPublishedConfig())
 }
 
 // SetIns replaces the package-global config instance. Used by apply/import to
@@ -139,15 +140,24 @@ func SetIns(cfg *Config) {
 }
 
 func setInsLocked(snapshot *Config) {
-	ins.Store(snapshot)
-	configureGitHubAPI(gitHubAPIConfig(snapshot))
+	publishGitHubAPI(gitHubAPIConfig(snapshot), func() {
+		ins.Store(snapshot)
+	})
 }
 
 func currentConfig() *Config {
-	cfg := ins.Load()
+	cfg := loadPublishedConfig()
 	if cfg == nil {
 		return &Config{}
 	}
+	return cfg
+}
+
+func loadPublishedConfig() *Config {
+	var cfg *Config
+	githubapi.ReadPublication(func() {
+		cfg = ins.Load()
+	})
 	return cfg
 }
 
@@ -162,8 +172,79 @@ func GetViper() *viper.Viper {
 		return nil
 	}
 	detached := viper.New()
-	_ = detached.MergeConfigMap(vp.AllSettings())
+	_ = detached.MergeConfigMap(cloneViperSettings(vp.AllSettings()))
 	return detached
+}
+
+func cloneViperSettings(settings map[string]interface{}) map[string]interface{} {
+	cloned := make(map[string]interface{}, len(settings))
+	for key, value := range settings {
+		if value == nil {
+			cloned[key] = nil
+			continue
+		}
+		cloned[key] = cloneViperValue(reflect.ValueOf(value)).Interface()
+	}
+	return cloned
+}
+
+func cloneViperValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return reflect.ValueOf(nil)
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneViperValue(value.Elem())
+		result := reflect.New(value.Type()).Elem()
+		result.Set(cloned)
+		return result
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.New(value.Type().Elem())
+		result.Elem().Set(cloneViperValue(value.Elem()))
+		return result
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			result.SetMapIndex(iterator.Key(), cloneViperValue(iterator.Value()))
+		}
+		return result
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			result.Index(index).Set(cloneViperValue(value.Index(index)))
+		}
+		return result
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.Len(); index++ {
+			result.Index(index).Set(cloneViperValue(value.Index(index)))
+		}
+		return result
+	case reflect.Struct:
+		result := reflect.New(value.Type()).Elem()
+		result.Set(value)
+		for index := 0; index < value.NumField(); index++ {
+			if result.Field(index).CanSet() && value.Field(index).CanInterface() {
+				result.Field(index).Set(cloneViperValue(value.Field(index)))
+			}
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 func GetStorageMap() map[string]typedef.MultiStorage {

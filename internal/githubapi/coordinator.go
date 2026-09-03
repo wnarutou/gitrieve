@@ -43,6 +43,7 @@ type permit struct {
 }
 
 var current atomic.Pointer[coordinator]
+var publicationMu sync.RWMutex
 
 func newCoordinator(cfg Config) *coordinator {
 	if cfg.Concurrency == 0 {
@@ -51,16 +52,49 @@ func newCoordinator(cfg Config) *coordinator {
 	return &coordinator{cfg: cfg, sem: make(chan struct{}, cfg.Concurrency), resourcePause: make(map[string]time.Time)}
 }
 
-func Configure(cfg Config) { current.Store(newCoordinator(cfg)) }
+// Publish installs an application configuration snapshot and its matching
+// GitHub coordinator under one reader-visible publication boundary. install
+// must only publish immutable state; it runs while publicationMu is held.
+func Publish(cfg Config, install func()) {
+	next := newCoordinator(cfg)
+	publicationMu.Lock()
+	defer publicationMu.Unlock()
+	if install != nil {
+		install()
+	}
+	current.Store(next)
+}
+
+// ReadPublication runs read while no paired configuration/coordinator
+// publication is in progress.
+func ReadPublication(read func()) {
+	publicationMu.RLock()
+	defer publicationMu.RUnlock()
+	read()
+}
+
+func Configure(cfg Config) { Publish(cfg, nil) }
 
 func Acquire(ctx context.Context, resource string) (Permit, error) {
-	c := current.Load()
-	if c == nil {
-		c = newCoordinator(Config{Concurrency: 1})
-		current.CompareAndSwap(nil, c)
-		c = current.Load()
-	}
+	c := loadCoordinator()
 	return c.acquire(ctx, resource)
+}
+
+func loadCoordinator() *coordinator {
+	publicationMu.RLock()
+	c := current.Load()
+	publicationMu.RUnlock()
+	if c != nil {
+		return c
+	}
+
+	publicationMu.Lock()
+	defer publicationMu.Unlock()
+	if c = current.Load(); c == nil {
+		c = newCoordinator(Config{Concurrency: 1})
+		current.Store(c)
+	}
+	return c
 }
 
 func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, error) {
