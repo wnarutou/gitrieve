@@ -249,35 +249,40 @@ func (d *DB) ActiveExecutionExists(ctx context.Context, repoKey string) (bool, e
 	return exists, nil
 }
 
+const repositoryRunStatsQuery = `
+	WITH totals AS (
+		SELECT repo_key,
+		       COUNT(*) AS total_runs,
+		       COALESCE(SUM(status = 'completed'), 0) AS success_runs,
+		       COALESCE(SUM(status = 'failed'), 0) AS failed_runs
+		FROM executions INDEXED BY idx_executions_repo_status_end
+		WHERE repo_key <> ''
+		GROUP BY repo_key
+	)
+	SELECT latest.id, latest.repo_key, latest.start_time, latest.end_time,
+	       latest.status, latest.error_message,
+	       (
+		       SELECT successful.end_time
+		       FROM executions AS successful INDEXED BY idx_executions_repo_status_end
+		       WHERE successful.repo_key = totals.repo_key
+		         AND successful.status = 'completed'
+		       ORDER BY successful.end_time DESC
+		       LIMIT 1
+	       ) AS last_success,
+	       totals.total_runs, totals.success_runs, totals.failed_runs
+	FROM totals
+	JOIN executions AS latest ON latest.id = (
+		SELECT recent.id
+		FROM executions AS recent INDEXED BY idx_executions_repo_start
+		WHERE recent.repo_key = totals.repo_key
+		ORDER BY recent.start_time DESC, recent.id DESC
+		LIMIT 1
+	)`
+
 // RepositoryRunStats loads the latest execution and cumulative outcome counts
 // for every repository key in one indexed query.
 func (d *DB) RepositoryRunStats(ctx context.Context) (map[string]RepositoryRunStats, error) {
-	rows, err := d.QueryContext(ctx, `
-		WITH ranked AS (
-			SELECT id, repo_key, start_time, end_time, status, error_message,
-			       ROW_NUMBER() OVER (
-				   PARTITION BY repo_key ORDER BY start_time DESC, id DESC
-			       ) AS rn
-			FROM executions WHERE repo_key <> ''
-		), totals AS (
-			SELECT repo_key,
-			       COUNT(*) AS total_runs,
-			       COALESCE(SUM(status = 'completed'), 0) AS success_runs,
-			       COALESCE(SUM(status = 'failed'), 0) AS failed_runs
-			FROM executions WHERE repo_key <> '' GROUP BY repo_key
-		), successes AS (
-			SELECT repo_key, MAX(end_time) AS last_success
-			FROM executions
-			WHERE repo_key <> '' AND status = 'completed'
-			GROUP BY repo_key
-		)
-		SELECT ranked.id, ranked.repo_key, ranked.start_time, ranked.end_time,
-		       ranked.status, ranked.error_message, successes.last_success,
-		       totals.total_runs, totals.success_runs, totals.failed_runs
-		FROM ranked
-		JOIN totals USING (repo_key)
-		LEFT JOIN successes USING (repo_key)
-		WHERE ranked.rn = 1`)
+	rows, err := d.QueryContext(ctx, repositoryRunStatsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("query repository run stats: %w", err)
 	}

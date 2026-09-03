@@ -2,11 +2,34 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestRepositoryExecutionLookupPlansUseRepositoryIndexes(t *testing.T) {
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	rows, err := testDB.Query("EXPLAIN QUERY PLAN " + repositoryRunStatsQuery)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var details []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	plan := strings.Join(details, "\n")
+	require.Contains(t, plan, "idx_executions_repo_start", plan)
+	require.Contains(t, plan, "idx_executions_repo_status_end", plan)
+}
 
 func TestCreatePendingExecutionsRollsBackWholeBatchWhenLaterComponentInsertFails(t *testing.T) {
 	ctx := context.Background()

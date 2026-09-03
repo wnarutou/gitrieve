@@ -126,6 +126,12 @@ gitrieve server
 
 详见 [Web UI 指南](docs/web-ui.md) 和 [API 文档](docs/api.md)。
 
+Repositories 页面提供服务端全局健康计数、失败/从未同步/逾期/卡住筛选、
+优先关注排序、组件详情和安全的批量重试。页面会区分最近一次尝试和最近一次完整
+成功的备份：不支持的已启用组件记为 `skipped`，真实组件失败会使整个执行失败。
+该页面**绝不自动刷新**，不会轮询、设置定时器，也不会因任务完成 SSE 事件而重载；
+需要新快照时请点击 Refresh 或重新进入页面。
+
 ## 配置
 
 Issue、Discussion 和 Release 使用的 GitHub API 请求会在每个 gitrieve 进程内统一协调。可选配置及默认值如下：
@@ -135,7 +141,16 @@ githubApiConcurrency: 2
 githubMinRequestInterval: 200ms
 githubLowRemainingThreshold: 100
 githubScheduleJitter: 30s
+syncOverdueGrace: 30m
+syncStuckThreshold: 24h
+cocurrencyNum: 6
 ```
+
+`syncOverdueGrace` 和 `syncStuckThreshold` 的默认值分别为 `30m` 和 `24h`；
+非正值会恢复为默认值。沿用已有拼写的 `cocurrencyNum` 会统一限制 server 的
+Cron、手动执行和批量重试实际并发数；超出上限的任务保持 `pending`，同一仓库的
+重复活动任务会被拒绝。服务重启时，上一进程遗留的 `pending`/`running` 执行及
+组件记录会被对账为 `failed`，不会永久显示为活动状态。
 
 设置 `githubScheduleJitter: 0s` 可关闭错峰。错峰仅应用于 daemon 的 cron 任务，手工命令和 Web API 任务仍会立即开始。这些配置用于降低请求突发，不会增加 GitHub 配额，也不会协调不同进程或主机。
 
