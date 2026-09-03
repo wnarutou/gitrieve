@@ -68,15 +68,19 @@ func (a *API) publishConfigLocked(next *config.Config) *config.Config {
 	return config.Clone(published)
 }
 
-func (a *API) publishConfig(next *config.Config) *config.Config {
-	a.configMu.Lock()
-	published := a.publishConfigLocked(next)
-	a.configMu.Unlock()
-	return published
-}
-
 func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {
 	a.scheduleRefresher = refresher
+}
+
+// publishPersistAndRefreshConfigLocked completes one configuration generation
+// while its caller retains configMu for the entire operation.
+func (a *API) publishPersistAndRefreshConfigLocked(next *config.Config, saveFailurePrefix string) (*config.Config, string) {
+	published := a.publishConfigLocked(next)
+	message := ""
+	if err := config.SaveSnapshot(published); err != nil {
+		message = saveFailurePrefix + err.Error()
+	}
+	return published, joinMessages(message, a.refreshSchedules(published))
 }
 
 func (a *API) refreshSchedules(cfg *config.Config) string {
@@ -850,14 +854,7 @@ func (a *API) CreateRepository(c *gin.Context) {
 
 	// Publish a copy-on-write replacement to the API and Executor together.
 	next.Repository = append(next.Repository, repo)
-	published := a.publishConfigLocked(next)
-
-	// Persist config; tolerate save failures with a warning
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository added in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules(published))
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository added in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -872,6 +869,15 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	// handler; gin prefixes the captured value with "/", which we strip before
 	// matching against repo keys.
 	id := strings.TrimPrefix(c.Param("id"), "/")
+	// Decode request input before entering the configuration generation lock.
+	var patch map[string]interface{}
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
 	next := config.Clone(a.config)
@@ -888,16 +894,6 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		c.JSON(http.StatusNotFound, Response{
 			Code:    404,
 			Message: "Repository not found",
-		})
-		return
-	}
-
-	// Decode the patch as a generic map for a partial merge.
-	var patch map[string]interface{}
-	if err := c.ShouldBindJSON(&patch); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Code:    400,
-			Message: "Invalid request: " + err.Error(),
 		})
 		return
 	}
@@ -961,13 +957,7 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	}
 
 	next.Repository[idx] = updated
-	published := a.publishConfigLocked(next)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository updated in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules(published))
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository updated in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -1001,13 +991,7 @@ func (a *API) DeleteRepository(c *gin.Context) {
 
 	// Remove element at idx
 	next.Repository = append(next.Repository[:idx], next.Repository[idx+1:]...)
-	published := a.publishConfigLocked(next)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository deleted in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules(published))
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository deleted in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -1069,13 +1053,7 @@ func (a *API) CreateStorage(c *gin.Context) {
 
 	// Publish a copy-on-write replacement to the API and Executor together.
 	next.Storage = append(next.Storage, storage)
-	a.publishConfigLocked(next)
-
-	// Persist config; tolerate save failures with a warning
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage added in memory but failed to persist config: " + err.Error()
-	}
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage added in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -1087,6 +1065,15 @@ func (a *API) CreateStorage(c *gin.Context) {
 // UpdateStorage modifies an existing storage backend by name (partial update via JSON merge).
 func (a *API) UpdateStorage(c *gin.Context) {
 	id := c.Param("id")
+	// Decode request input before entering the configuration generation lock.
+	var patch map[string]interface{}
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
 	next := config.Clone(a.config)
@@ -1103,16 +1090,6 @@ func (a *API) UpdateStorage(c *gin.Context) {
 		c.JSON(http.StatusNotFound, Response{
 			Code:    404,
 			Message: "Storage not found",
-		})
-		return
-	}
-
-	// Decode the patch as a generic map for a partial merge.
-	var patch map[string]interface{}
-	if err := c.ShouldBindJSON(&patch); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Code:    400,
-			Message: "Invalid request: " + err.Error(),
 		})
 		return
 	}
@@ -1157,12 +1134,7 @@ func (a *API) UpdateStorage(c *gin.Context) {
 	}
 
 	next.Storage[idx] = updated
-	a.publishConfigLocked(next)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage updated in memory but failed to persist config: " + err.Error()
-	}
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage updated in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -1195,12 +1167,7 @@ func (a *API) DeleteStorage(c *gin.Context) {
 
 	// Remove element at idx
 	next.Storage = append(next.Storage[:idx], next.Storage[idx+1:]...)
-	a.publishConfigLocked(next)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage deleted in memory but failed to persist config: " + err.Error()
-	}
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage deleted in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,

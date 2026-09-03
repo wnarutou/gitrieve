@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -268,4 +269,62 @@ func TestConcurrentConfigPublicationAndSnapshotReads(t *testing.T) {
 	close(start)
 	workers.Wait()
 	require.False(t, incoherent.Load(), "observed partial configuration generation")
+}
+
+func TestGetViperReturnsDetachedSnapshot(t *testing.T) {
+	writeTmpConfig(t, "server:\n  port: \"8081\"\n")
+	detached := GetViper()
+	require.NotNil(t, detached)
+	detached.Set("server.port", "9999")
+
+	require.Equal(t, "8081", GetServerSection().Port)
+	require.Equal(t, "8081", GetViper().GetString("server.port"))
+}
+
+func TestConcurrentSetInsKeepsConfigAndGitHubCoordinatorPaired(t *testing.T) {
+	previousConfig := GetIns()
+	previousConfigure := configureGitHubAPI
+	t.Cleanup(func() {
+		configureGitHubAPI = previousConfigure
+		SetIns(previousConfig)
+	})
+
+	firstConfigureEntered := make(chan struct{})
+	firstConfigureRelease := make(chan struct{})
+	var appliedConcurrency atomic.Uint64
+	configureGitHubAPI = func(cfg githubapi.Config) {
+		if cfg.Concurrency == 1 {
+			close(firstConfigureEntered)
+			<-firstConfigureRelease
+		}
+		appliedConcurrency.Store(uint64(cfg.Concurrency))
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		SetIns(&Config{GitHubToken: "one", GitHubAPIConcurrency: 1})
+		close(firstDone)
+	}()
+	<-firstConfigureEntered
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		SetIns(&Config{GitHubToken: "two", GitHubAPIConcurrency: 2})
+		close(secondDone)
+	}()
+	<-secondStarted
+
+	lockedAcrossConfigure := !stateMu.TryLock()
+	if !lockedAcrossConfigure {
+		stateMu.Unlock()
+	}
+	close(firstConfigureRelease)
+	<-firstDone
+	<-secondDone
+
+	require.True(t, lockedAcrossConfigure, "config state lock was released before GitHub coordinator publication")
+	require.Equal(t, "two", GetIns().GitHubToken)
+	require.Equal(t, uint(2), GetIns().GitHubAPIConcurrency)
+	require.Equal(t, uint64(2), appliedConcurrency.Load())
 }

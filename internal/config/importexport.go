@@ -77,8 +77,8 @@ type ExportConfig struct {
 // it falls back to the global viper singleton so callers can still override
 // settings directly.
 func GetServerSection() ServerSection {
-	vpMu.Lock()
-	defer vpMu.Unlock()
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	v := vp
 	if v == nil {
 		v = viper.GetViper()
@@ -138,9 +138,9 @@ func Export() (string, error) {
 // exits the process: on any error the previous in-memory config is kept and the
 // error returned (the running server must survive a bad config file).
 func Reload() error {
-	vpMu.Lock()
+	stateMu.Lock()
 	initialized := vp != nil
-	vpMu.Unlock()
+	stateMu.Unlock()
 	if !initialized {
 		return fmt.Errorf("config not initialized")
 	}
@@ -163,10 +163,11 @@ func Reload() error {
 	if err := validateIdentity(&next); err != nil {
 		return err
 	}
-	vpMu.Lock()
+	snapshot := Clone(&next)
+	stateMu.Lock()
 	vp = nv
-	vpMu.Unlock()
-	SetIns(&next)
+	setInsLocked(snapshot)
+	stateMu.Unlock()
 	return nil
 }
 
@@ -288,8 +289,8 @@ func ValidateImport(doc *ExportConfig) []string {
 // never re-reads the server section, so this only takes effect after a restart.
 // Returns an error when the config was never initialized.
 func SetServerField(field string, value interface{}) error {
-	vpMu.Lock()
-	defer vpMu.Unlock()
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"gopkg.in/yaml.v3"
 )
@@ -126,6 +127,68 @@ func TestReloadAfterSave(t *testing.T) {
 	require.Equal(t, "bbb", GetIns().GitHubToken, "reload must reflect the file, not stale Save() overrides")
 	require.Equal(t, "two", GetIns().Repository[0].Name)
 	Path = ""
+}
+
+func TestSaveSnapshotPersistsTheSuppliedGeneration(t *testing.T) {
+	writeTmpConfig(t, "githubToken: initial\nrepository:\n  - name: initial\n    url: github.com/acme/initial\n")
+	newer := &Config{GitHubToken: "newer", Repository: []typedef.Repository{{Name: "newer", URL: "github.com/acme/newer"}}}
+	SetIns(newer)
+	older := &Config{GitHubToken: "older", Repository: []typedef.Repository{{Name: "older", URL: "github.com/acme/older"}}}
+
+	require.NoError(t, SaveSnapshot(older))
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "githubtoken: older")
+	require.Contains(t, string(saved), "name: older")
+	require.Equal(t, "newer", GetIns().GitHubToken, "saving an explicit snapshot must not republish it")
+}
+
+func TestReloadAndSaveShareOneCoherentStateBoundary(t *testing.T) {
+	writeTmpConfig(t, "githubToken: old\nrepository:\n  - name: old\n    url: github.com/acme/old\n")
+	newFile, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	_, err = newFile.WriteString("githubToken: new\ngithubApiConcurrency: 7\nrepository:\n  - name: new\n    url: github.com/acme/new\n")
+	require.NoError(t, err)
+	require.NoError(t, newFile.Close())
+	Path = newFile.Name()
+	t.Cleanup(func() { Path = "" })
+
+	previousConfigure := configureGitHubAPI
+	configureEntered := make(chan struct{})
+	configureRelease := make(chan struct{})
+	configureGitHubAPI = func(cfg githubapi.Config) {
+		if cfg.Concurrency == 7 {
+			close(configureEntered)
+			<-configureRelease
+		}
+		previousConfigure(cfg)
+	}
+	t.Cleanup(func() { configureGitHubAPI = previousConfigure })
+
+	reloadDone := make(chan error, 1)
+	go func() { reloadDone <- Reload() }()
+	<-configureEntered
+	saveStarted := make(chan struct{})
+	saveDone := make(chan error, 1)
+	go func() {
+		close(saveStarted)
+		saveDone <- Save()
+	}()
+	<-saveStarted
+	lockedAcrossReload := !stateMu.TryLock()
+	if !lockedAcrossReload {
+		stateMu.Unlock()
+	}
+	close(configureRelease)
+
+	require.NoError(t, <-reloadDone)
+	require.NoError(t, <-saveDone)
+	require.True(t, lockedAcrossReload, "reload released state lock between viper and config publication")
+	require.Equal(t, "new", GetIns().GitHubToken)
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "githubtoken: new")
+	require.NotContains(t, string(saved), "githubtoken: old")
 }
 
 func TestGetServerSectionReadsFromConfigFile(t *testing.T) {

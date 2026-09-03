@@ -38,8 +38,9 @@ type Config struct {
 var Path string
 
 var vp *viper.Viper
-var vpMu sync.Mutex
+var stateMu sync.Mutex
 var ins atomic.Pointer[Config]
+var configureGitHubAPI = githubapi.Configure
 
 func Init() {
 	nextViper := viper.New()
@@ -61,10 +62,11 @@ func Init() {
 	if err := validateIdentity(&next); err != nil {
 		ui.ErrorfExit("Invalid configuration: %s", err)
 	}
-	vpMu.Lock()
+	snapshot := Clone(&next)
+	stateMu.Lock()
 	vp = nextViper
-	vpMu.Unlock()
-	SetIns(&next)
+	setInsLocked(snapshot)
+	stateMu.Unlock()
 }
 
 // seedDefaults fills zero-valued global options with their defaults. It runs in
@@ -131,8 +133,14 @@ func GetIns() *Config {
 // observe a complete old or complete new instance, never a torn one.
 func SetIns(cfg *Config) {
 	snapshot := Clone(cfg)
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	setInsLocked(snapshot)
+}
+
+func setInsLocked(snapshot *Config) {
 	ins.Store(snapshot)
-	githubapi.Configure(gitHubAPIConfig(snapshot))
+	configureGitHubAPI(gitHubAPIConfig(snapshot))
 }
 
 func currentConfig() *Config {
@@ -143,15 +151,19 @@ func currentConfig() *Config {
 	return cfg
 }
 
-// GetViper returns the viper instance that loaded the config file. It is nil
-// until Init has run (registered via cobra.OnInitialize, so it runs before any
-// command executes). Exposed so packages that read config sections outside the
-// top-level Config struct (e.g. the `server:` settings) read from the same
-// loaded instance rather than the empty global viper singleton.
+// GetViper returns a detached copy of the viper instance that loaded the
+// config file. It is nil until Init has run (registered via cobra.OnInitialize,
+// so it runs before any command executes). Mutating the returned instance
+// cannot bypass the package's configuration publication lock.
 func GetViper() *viper.Viper {
-	vpMu.Lock()
-	defer vpMu.Unlock()
-	return vp
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if vp == nil {
+		return nil
+	}
+	detached := viper.New()
+	_ = detached.MergeConfigMap(vp.AllSettings())
+	return detached
 }
 
 func GetStorageMap() map[string]typedef.MultiStorage {
@@ -246,12 +258,28 @@ func validateIdentity(cfg *Config) error {
 
 // Save persists the current in-memory config back to the config file via viper.
 func Save() error {
-	vpMu.Lock()
-	defer vpMu.Unlock()
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return saveSnapshotLocked(currentConfig())
+}
+
+// SaveSnapshot persists cfg through the current viper instance without
+// republishing it. Callers can therefore save the exact generation they
+// committed even if package-global configuration changes concurrently.
+func SaveSnapshot(cfg *Config) error {
+	snapshot := Clone(cfg)
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return saveSnapshotLocked(snapshot)
+}
+
+func saveSnapshotLocked(cfg *Config) error {
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}
-	cfg := currentConfig()
+	if cfg == nil {
+		cfg = &Config{}
+	}
 	// Update the viper config with current ins values
 	vp.Set("repository", cfg.Repository)
 	vp.Set("storage", cfg.Storage)

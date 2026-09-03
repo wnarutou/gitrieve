@@ -315,9 +315,9 @@ func (a *API) PreviewImport(c *gin.Context) {
 // ApplyImport applies a previously-previewed import. Choices select, per entry,
 // whether the imported or the existing value wins; entries without a choice use
 // the documented defaults (added/modified/globals/server -> imported, deleted ->
-// keep). Builds a complete replacement config and publishes it atomically, then
-// persists via config.Save(); the server section is written to viper (never
-// hot-applied).
+// keep). Builds a complete replacement config, then publishes, persists, and
+// refreshes schedules as one serialized generation. The server section is
+// written to viper but never hot-applied.
 func (a *API) ApplyImport(c *gin.Context) {
 	var req ImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -334,20 +334,14 @@ func (a *API) ApplyImport(c *gin.Context) {
 		return
 	}
 
-	result := a.applyImport(doc, &req)
-	published := a.configSnapshot()
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "配置已应用（内存）但未能持久化: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules(published))
+	a.configMu.Lock()
+	result, next := a.applyImportLocked(doc, &req)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "配置已应用（内存）但未能持久化: ")
+	a.configMu.Unlock()
 	c.JSON(http.StatusOK, Response{Code: 200, Data: result, Message: msg})
 }
 
-func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportResult {
-	a.configMu.Lock()
-	defer a.configMu.Unlock()
+func (a *API) applyImportLocked(doc *config.ExportConfig, req *ImportRequest) (ImportResult, *config.Config) {
 	var result ImportResult
 	// Build a NEW config instance instead of mutating a.config in place: job
 	// goroutines read a.config / ins / e.cfg.Load() concurrently, and atomic
@@ -549,13 +543,9 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		result.ServerUpdated++
 	}
 
-	// Publish the fully-built replacement in one place: repoint the API, the
-	// package-global ins (which config.Save() reads), and the executor's atomic
-	// pointer. Concurrent readers (job goroutines) observe either the complete
-	// old or the complete new instance, never a torn one.
-	a.publishConfigLocked(&next)
-
-	return result
+	// The caller publishes this fully-built replacement only after every
+	// selected section has been applied.
+	return result, &next
 }
 
 // ReloadConfig re-reads config.yaml from disk, repoints the API and executor at
@@ -568,7 +558,7 @@ func (a *API) ReloadConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
 		return
 	}
-	published := a.publishConfigLocked(config.GetIns())
+	_, message := a.publishPersistAndRefreshConfigLocked(config.GetIns(), "配置已重载（内存）但未能持久化: ")
 	a.configMu.Unlock()
-	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: a.refreshSchedules(published)})
+	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: message})
 }
