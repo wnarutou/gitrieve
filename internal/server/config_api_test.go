@@ -36,6 +36,15 @@ func getJSON(t *testing.T, s *server.TestServer, method, path, body string) (int
 	return w.Code, resp
 }
 
+type recordingScheduleRefresher struct {
+	configs []*config.Config
+}
+
+func (r *recordingScheduleRefresher) RefreshSchedules(cfg *config.Config) error {
+	r.configs = append(r.configs, cfg)
+	return nil
+}
+
 func TestExportConfigYAML(t *testing.T) {
 	loadTempConfig(t, "server:\n  host: 127.0.0.1\n  port: \"8081\"\n")
 	testDB, err := db.Initialize(":memory:")
@@ -277,6 +286,29 @@ storage:
 	require.Equal(t, "/tmp/two", s.Cfg().Storage[0].Path)
 }
 
+func TestApplyImportRefreshesServerSchedules(t *testing.T) {
+	loadTempConfig(t, "")
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "cron-test", URL: "github.com/test/import-cron"},
+	}}
+	refresher := &recordingScheduleRefresher{}
+	s := server.NewConfigTestServer(cfg, testDB, refresher)
+
+	importYAML := `repository:
+  - name: cron-test
+    url: github.com/test/import-cron
+    cron: "@every 1m"
+`
+	body, _ := json.Marshal(map[string]string{"config": importYAML})
+	code, _ := getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, refresher.configs, 1)
+	require.Equal(t, "@every 1m", refresher.configs[0].Repository[0].Cron)
+}
+
 func TestApplyImportWithChoices(t *testing.T) {
 	loadTempConfig(t, "")
 	testDB, err := db.Initialize(":memory:")
@@ -343,13 +375,16 @@ func TestReloadConfig(t *testing.T) {
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)
 	defer testDB.Close()
-	s := server.NewConfigTestServer(config.GetIns(), testDB)
+	refresher := &recordingScheduleRefresher{}
+	s := server.NewConfigTestServer(config.GetIns(), testDB, refresher)
 	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 
-	writeFile(t, path, "repository:\n  - name: two\n    url: github.com/two/repo\n")
+	writeFile(t, path, "repository:\n  - name: two\n    url: github.com/two/repo\n    cron: '@every 1m'\n")
 	code, _ := getJSON(t, s, http.MethodPost, "/api/config/reload", "")
 	require.Equal(t, 200, code)
 	require.Equal(t, "two", s.Cfg().Repository[0].Name)
+	require.Len(t, refresher.configs, 1)
+	require.Equal(t, "@every 1m", refresher.configs[0].Repository[0].Cron)
 }
 
 func TestReloadConfigKeepsOldOnError(t *testing.T) {

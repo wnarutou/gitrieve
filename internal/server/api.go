@@ -19,13 +19,44 @@ import (
 )
 
 type API struct {
-	config   *config.Config
-	db       *db.DB
-	executor *executor.Executor
+	config            *config.Config
+	db                *db.DB
+	executor          *executor.Executor
+	scheduleRefresher ScheduleRefresher
+}
+
+// ScheduleRefresher updates the live server scheduler after repository or
+// configuration changes.
+type ScheduleRefresher interface {
+	RefreshSchedules(*config.Config) error
 }
 
 func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
 	return &API{config: cfg, db: db, executor: exec}
+}
+
+func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {
+	a.scheduleRefresher = refresher
+}
+
+func (a *API) refreshSchedules() string {
+	if a.scheduleRefresher == nil {
+		return ""
+	}
+	if err := a.scheduleRefresher.RefreshSchedules(a.config); err != nil {
+		return "Cron schedules refreshed with errors: " + err.Error()
+	}
+	return ""
+}
+
+func joinMessages(messages ...string) string {
+	nonEmpty := messages[:0]
+	for _, message := range messages {
+		if message != "" {
+			nonEmpty = append(nonEmpty, message)
+		}
+	}
+	return strings.Join(nonEmpty, "; ")
 }
 
 func (a *API) CreateJob(c *gin.Context) {
@@ -488,6 +519,7 @@ func (a *API) CreateRepository(c *gin.Context) {
 	if err := config.Save(); err != nil {
 		msg = "Repository added in memory but failed to persist config: " + err.Error()
 	}
+	msg = joinMessages(msg, a.refreshSchedules())
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -593,6 +625,7 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	if err := config.Save(); err != nil {
 		msg = "Repository updated in memory but failed to persist config: " + err.Error()
 	}
+	msg = joinMessages(msg, a.refreshSchedules())
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -628,6 +661,7 @@ func (a *API) DeleteRepository(c *gin.Context) {
 	if err := config.Save(); err != nil {
 		msg = "Repository deleted in memory but failed to persist config: " + err.Error()
 	}
+	msg = joinMessages(msg, a.refreshSchedules())
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,

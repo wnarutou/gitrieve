@@ -780,7 +780,8 @@ diff classified as deleted.
 
 The `server:` section is **never hot-applied** — accepted changes are written to
 `config.yaml` and take effect on the next server restart. A failure to persist
-returns `200` with a `message` noting the change is in memory only.
+returns `200` with a `message` noting the change is in memory only. Repository
+cron schedules are refreshed immediately after the import is applied.
 
 | Method | Path | Description |
 |---|---|---|
@@ -816,10 +817,10 @@ returns `200` with a `message` noting the change is in memory only.
 
 ### Reload config from disk
 
-Re-reads `config.yaml` from disk and repoints the running server (API and
-executor) at the fresh config. The `server:` section is not hot-applied (a
-restart is required) and daemon cron schedules are not rescheduled. On any
-error the previous config stays active and a `400` is returned.
+Re-reads `config.yaml` from disk and repoints the running server (API, executor,
+and cron scheduler) at the fresh config. Repository cron schedules take effect
+immediately. The `server:` section is not hot-applied and still requires a
+restart. On any error the previous config stays active and a `400` is returned.
 
 | Method | Path | Description |
 |---|---|---|

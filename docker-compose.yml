@@ -36,5 +36,5 @@ services:
     # Alternative commands:
     #   archive all repositories defined in configuration:
     #   command: ["-c", "/root/config.yaml", "run"]
-    #   run as daemon with cron schedules:
+    #   run cron schedules without the Web UI/API:
     #   command: ["-c", "/root/config.yaml", "daemon"]

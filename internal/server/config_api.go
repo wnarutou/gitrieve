@@ -337,6 +337,7 @@ func (a *API) ApplyImport(c *gin.Context) {
 	if err := config.Save(); err != nil {
 		msg = "配置已应用（内存）但未能持久化: " + err.Error()
 	}
+	msg = joinMessages(msg, a.refreshSchedules())
 	c.JSON(http.StatusOK, Response{Code: 200, Data: result, Message: msg})
 }
 
@@ -540,9 +541,9 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	return result
 }
 
-// ReloadConfig re-reads config.yaml from disk and repoints the API and executor
-// at the fresh config instance. The `server:` section is NOT hot-applied (a
-// restart is required); daemon cron schedules are also not rescheduled.
+// ReloadConfig re-reads config.yaml from disk, repoints the API and executor at
+// the fresh config instance, and replaces the running server's cron schedules.
+// The `server:` section is NOT hot-applied and still requires a restart.
 func (a *API) ReloadConfig(c *gin.Context) {
 	if err := config.Reload(); err != nil {
 		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
@@ -552,5 +553,5 @@ func (a *API) ReloadConfig(c *gin.Context) {
 	if a.executor != nil {
 		a.executor.RefreshConfig(config.GetIns())
 	}
-	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}})
+	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: a.refreshSchedules()})
 }

@@ -100,6 +100,10 @@ storage:
 githubToken: your-github-token
 ```
 
+The `server` process executes every non-empty repository `cron` schedule. Cron
+registrations are refreshed immediately when repositories are created, updated,
+or deleted through the API, and after config import or reload.
+
 ## Security notes
 
 - **Auth is off by default.** With `authEnabled: false`, anyone who can reach the server can trigger archive jobs, view logs, and modify your repository/storage configuration. Only run with auth disabled on a trusted network.

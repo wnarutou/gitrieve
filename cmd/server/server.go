@@ -1,11 +1,15 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-co-op/gocron/v2"
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/auth"
 	"github.com/wnarutou/gitrieve/internal/config"
@@ -19,7 +23,11 @@ import (
 )
 
 type Server struct {
-	router *gin.Engine
+	router      *gin.Engine
+	scheduler   gocron.Scheduler
+	database    *db.DB
+	executor    *executor.Executor
+	schedulerMu sync.Mutex
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -47,6 +55,7 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	if err != nil {
 		ui.ErrorfExit("Failed to initialize database: %s", err)
 	}
+	s.database = database
 
 	// 迁移旧库（新增 repo_key 列）。失败宁可起不来，也不在坏 schema 上跑。
 	if err := db.Migrate(database); err != nil {
@@ -58,9 +67,14 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 
 	// Initialize executor
 	exec := executor.NewExecutor(log, database, cfg)
+	s.executor = exec
 
 	// Initialize API
 	api := internalserver.NewAPI(cfg, database, exec)
+	api.SetScheduleRefresher(s)
+	if err := s.RefreshSchedules(cfg); err != nil {
+		ui.Errorf("Failed to schedule one or more repositories: %s", err)
+	}
 
 	// Static files and templates are embedded in the binary (see package web),
 	// so the server works from any working directory.
@@ -124,12 +138,81 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
+// RefreshSchedules atomically replaces the server's cron registrations with
+// the schedules in cfg. Valid repositories remain scheduled even when another
+// repository contains an invalid cron expression.
+func (s *Server) RefreshSchedules(cfg *config.Config) error {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+
+	concurrency := uint(3)
+	if cfg != nil && cfg.ConcurrencyNum > 0 {
+		concurrency = cfg.ConcurrencyNum
+	}
+	next, err := gocron.NewScheduler(
+		gocron.WithLocation(time.Local),
+		gocron.WithLimitConcurrentJobs(concurrency, gocron.LimitModeWait),
+	)
+	if err != nil {
+		return fmt.Errorf("create scheduler: %w", err)
+	}
+
+	var scheduleErrs []error
+	if cfg != nil {
+		for _, repo := range cfg.Repository {
+			if repo.Cron == "" {
+				continue
+			}
+			repoKey := repo.Key()
+			_, scheduleErr := next.NewJob(
+				gocron.CronJob(repo.Cron, false),
+				gocron.NewTask(func() {
+					if _, executeErr := s.executor.ExecuteJob(repoKey); executeErr != nil {
+						ui.Errorf("Failed to execute scheduled repository %s: %s", repoKey, executeErr)
+					}
+				}),
+			)
+			if scheduleErr != nil {
+				scheduleErrs = append(scheduleErrs, fmt.Errorf("repository %s: %w", repoKey, scheduleErr))
+			}
+		}
+	}
+
+	var shutdownErr error
+	if s.scheduler != nil {
+		shutdownErr = s.scheduler.Shutdown()
+	}
+	next.Start()
+	s.scheduler = next
+	return errors.Join(append(scheduleErrs, shutdownErr)...)
+}
+
+// Close releases the scheduler and database resources owned by the server.
+func (s *Server) Close() error {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+
+	var schedulerErr, databaseErr error
+	if s.scheduler != nil {
+		schedulerErr = s.scheduler.Shutdown()
+	}
+	if s.database != nil {
+		databaseErr = s.database.Close()
+	}
+	return errors.Join(schedulerErr, databaseErr)
+}
+
 var Cmd = &cobra.Command{
 	Use:   "server",
 	Short: "start web server",
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.GetIns()
 		s := NewServer(cfg)
+		defer func() {
+			if err := s.Close(); err != nil {
+				ui.Errorf("Failed to close server resources: %s", err)
+			}
+		}()
 		serverCfg := internalserver.GetServerConfig()
 		addr := fmt.Sprintf("%s:%s", serverCfg.Host, serverCfg.Port)
 		ui.Printf("Starting server on %s", addr)

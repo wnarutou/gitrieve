@@ -115,14 +115,14 @@ nohup gitrieve daemon &
 
 ## Web UI
 
-`server` 命令会启动一个 Web UI 和 HTTP API，让你可以通过浏览器管理归档任务和配置。
+`server` 命令会启动一个 Web UI 和 HTTP API，让你可以通过浏览器管理归档任务和配置。它也会执行仓库的 Cron 调度，因此无需再单独运行 `daemon` 进程。
 
 ```bash
 gitrieve server
 # 默认监听 http://localhost:8080
 ```
 
-在 UI 中你可以触发归档任务、查看实时日志，并直接编辑仓库/存储配置而无需手动修改 `config.yaml`。服务器通过 `config.yaml` 中可选的 `server` 配置段进行配置（host、port 以及可选的 Bearer Token 认证）。
+在 UI 中你可以触发归档任务、查看实时日志，并直接编辑仓库/存储配置而无需手动修改 `config.yaml`。仓库编辑、配置导入或配置重载后，Cron 调度会立即刷新。服务器通过 `config.yaml` 中可选的 `server` 配置段进行配置（host、port 以及可选的 Bearer Token 认证）。
 
 详见 [Web UI 指南](docs/web-ui.md) 和 [API 文档](docs/api.md)。
 

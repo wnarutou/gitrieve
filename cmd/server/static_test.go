@@ -4,10 +4,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestStaticAssetServed(t *testing.T) {
 	server := NewServer(nil)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
 	// NewServer initializes a real DB at server.dbPath default (gitrieve.db).
 	// Cleaned up implicitly by test cwd.
 

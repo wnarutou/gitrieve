@@ -110,10 +110,13 @@ func NewStorageTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
 // NewConfigTestServer creates a test server with the config export + preview
 // routes registered, using a fresh executor backed by testDB. Task 4 adds the
 // apply + reload routes to the same constructor.
-func NewConfigTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
+func NewConfigTestServer(cfg *config.Config, testDB *db.DB, refreshers ...ScheduleRefresher) *TestServer {
 	log := logger.NewLogger(testDB)
 	exec := executor.NewExecutor(log, testDB, cfg)
 	api := NewAPI(cfg, testDB, exec)
+	if len(refreshers) > 0 {
+		api.SetScheduleRefresher(refreshers[0])
+	}
 	s := &TestServer{router: gin.Default(), api: api}
 	s.router.GET("/api/config/export", api.ExportConfig)
 	s.router.POST("/api/config/import/preview", api.PreviewImport)

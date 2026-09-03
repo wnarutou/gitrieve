@@ -20,7 +20,8 @@ go build -o gitrieve main.go
 ./gitrieve run          # archive all repos in config
 ./gitrieve repository <name>  # archive single repo
 ./gitrieve release <name>     # download release assets
-./gitrieve daemon       # run as daemon with cron schedules
+./gitrieve daemon       # run cron schedules without the Web UI/API
+./gitrieve server       # run Web UI/API and cron schedules together
 
 # Release (tagged pushes only)
 # Uses GoReleaser; builds multi-arch binaries and Docker image
@@ -42,7 +43,7 @@ go build -o gitrieve main.go
 - Configuration initialized via `cobra.OnInitialize(config.Init)` in root.go
 - Config parsed into `Config` struct with `Repository[]`, `Storage[]`, and global settings
 - Storage backends selected by name reference in repository config
-- Daemon mode uses `gocron/v2` for scheduled jobs
+- Daemon and server modes use `gocron/v2` for scheduled jobs
 - Archives created with `archiver/v4`, uploaded via `minio-go` (S3) or direct file write
 
 ### Concurrency: cross-process per-repo locks
