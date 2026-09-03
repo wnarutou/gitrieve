@@ -17,13 +17,20 @@ func escapeLike(s string) string {
 // nextRunTime returns the next time a repository's cron expression will fire,
 // or nil when the expression is empty or invalid.
 func nextRunTime(cronExpr string, now time.Time) *time.Time {
-	if cronExpr == "" {
+	sched, err := parseRepositorySchedule(cronExpr)
+	if err != nil {
 		return nil
 	}
-	sched, err := cron.ParseStandard(cronExpr)
-	if err != nil {
+	if sched == nil {
 		return nil
 	}
 	t := sched.Next(now)
 	return &t
+}
+
+func parseRepositorySchedule(cronExpr string) (cron.Schedule, error) {
+	if cronExpr == "" {
+		return nil, nil
+	}
+	return cron.ParseStandard(cronExpr)
 }

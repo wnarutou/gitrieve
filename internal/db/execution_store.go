@@ -246,6 +246,113 @@ func (d *DB) ActiveExecutionExists(ctx context.Context, repoKey string) (bool, e
 	return exists, nil
 }
 
+// RepositoryRunStats loads the latest execution and cumulative outcome counts
+// for every repository key in one indexed query.
+func (d *DB) RepositoryRunStats(ctx context.Context) (map[string]RepositoryRunStats, error) {
+	rows, err := d.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT id, repo_key, start_time, end_time, status, error_message,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY repo_key ORDER BY start_time DESC, id DESC
+			       ) AS rn
+			FROM executions WHERE repo_key <> ''
+		), totals AS (
+			SELECT repo_key,
+			       COUNT(*) AS total_runs,
+			       COALESCE(SUM(status = 'completed'), 0) AS success_runs,
+			       COALESCE(SUM(status = 'failed'), 0) AS failed_runs
+			FROM executions WHERE repo_key <> '' GROUP BY repo_key
+		), successes AS (
+			SELECT repo_key, MAX(end_time) AS last_success
+			FROM executions
+			WHERE repo_key <> '' AND status = 'completed'
+			GROUP BY repo_key
+		)
+		SELECT ranked.id, ranked.repo_key, ranked.start_time, ranked.end_time,
+		       ranked.status, ranked.error_message, successes.last_success,
+		       totals.total_runs, totals.success_runs, totals.failed_runs
+		FROM ranked
+		JOIN totals USING (repo_key)
+		LEFT JOIN successes USING (repo_key)
+		WHERE ranked.rn = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("query repository run stats: %w", err)
+	}
+	defer rows.Close()
+
+	stats := make(map[string]RepositoryRunStats)
+	for rows.Next() {
+		var (
+			key            string
+			latest         RepositoryRunStats
+			latestEnd      sql.NullTime
+			latestError    sql.NullString
+			lastSuccessRaw interface{}
+		)
+		if err := rows.Scan(
+			&latest.LatestExecutionID,
+			&key,
+			&latest.LatestStart,
+			&latestEnd,
+			&latest.LatestStatus,
+			&latestError,
+			&lastSuccessRaw,
+			&latest.TotalRuns,
+			&latest.SuccessRuns,
+			&latest.FailedRuns,
+		); err != nil {
+			return nil, fmt.Errorf("scan repository run stats: %w", err)
+		}
+		if latestEnd.Valid {
+			end := latestEnd.Time
+			latest.LatestEnd = &end
+		}
+		if latestError.Valid {
+			latest.LatestError = latestError.String
+		}
+		lastSuccess, err := nullableAggregateTime(lastSuccessRaw)
+		if err != nil {
+			return nil, fmt.Errorf("scan last success for repository %q: %w", key, err)
+		}
+		latest.LastSuccess = lastSuccess
+		stats[key] = latest
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repository run stats: %w", err)
+	}
+	return stats, nil
+}
+
+func nullableAggregateTime(value interface{}) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if parsed, ok := value.(time.Time); ok {
+		return &parsed, nil
+	}
+
+	var raw string
+	switch value := value.(type) {
+	case string:
+		raw = value
+	case []byte:
+		raw = string(value)
+	default:
+		return nil, fmt.Errorf("unsupported timestamp type %T", value)
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999",
+	} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return &parsed, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported timestamp %q", raw)
+}
+
 // ReconcileInterrupted marks executions and component rows left active by a
 // previous server process as failed.
 func (d *DB) ReconcileInterrupted(ctx context.Context, now time.Time) error {

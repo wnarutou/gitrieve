@@ -34,6 +34,18 @@ type Execution struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type RepositoryRunStats struct {
+	LatestExecutionID string
+	LatestStatus      string
+	LatestStart       time.Time
+	LatestEnd         *time.Time
+	LatestError       string
+	LastSuccess       *time.Time
+	TotalRuns         int64
+	SuccessRuns       int64
+	FailedRuns        int64
+}
+
 // ComponentExecution records an individual component's outcome within an execution.
 type ComponentExecution struct {
 	ID           int64           `json:"id"`

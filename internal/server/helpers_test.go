@@ -29,3 +29,22 @@ func TestNextRunTime(t *testing.T) {
 	require.NotNil(t, nt2)
 	assert.Equal(t, time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC), *nt2)
 }
+
+func TestParseRepositoryScheduleReportsInvalidExpression(t *testing.T) {
+	schedule, err := parseRepositorySchedule("")
+	require.NoError(t, err)
+	assert.Nil(t, schedule)
+
+	schedule, err = parseRepositorySchedule("not a cron")
+	require.Error(t, err)
+	assert.Nil(t, schedule)
+
+	schedule, err = parseRepositorySchedule("30 2 * * *")
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	newYork, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	afterDSTJump := schedule.Next(time.Date(2026, time.March, 7, 3, 30, 0, 0, newYork))
+	assert.Equal(t, time.Date(2026, time.March, 9, 2, 30, 0, 0, newYork), afterDSTJump)
+}

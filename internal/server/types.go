@@ -67,11 +67,42 @@ const (
 
 type RepositoryOverview struct {
 	typedef.Repository
-	LastRunTime *time.Time `json:"last_run_time"`
-	NextRunTime *time.Time `json:"next_run_time"`
-	TotalRuns   int64      `json:"total_runs"`
-	SuccessRuns int64      `json:"success_runs"`
-	FailedRuns  int64      `json:"failed_runs"`
+	LastRunTime         *time.Time `json:"last_run_time"`
+	NextRunTime         *time.Time `json:"next_run_time"`
+	TotalRuns           int64      `json:"total_runs"`
+	SuccessRuns         int64      `json:"success_runs"`
+	FailedRuns          int64      `json:"failed_runs"`
+	LastStatus          string     `json:"last_status"`
+	HealthStatus        string     `json:"health_status"`
+	LastAttemptTime     *time.Time `json:"last_attempt_time"`
+	LastSuccessTime     *time.Time `json:"last_success_time"`
+	LastDurationSeconds *int64     `json:"last_duration_seconds"`
+	LatestExecutionID   string     `json:"latest_execution_id"`
+	LastErrorMessage    string     `json:"last_error_message"`
+	Overdue             bool       `json:"overdue"`
+	Stuck               bool       `json:"stuck"`
+	ScheduleError       string     `json:"schedule_error"`
+}
+
+type RepositoryHealthFilter struct {
+	Search    string
+	Health    string
+	Overdue   *bool
+	Stuck     *bool
+	Sort      string
+	Direction string
+}
+
+type RepositoryHealthSummary struct {
+	Total       int `json:"total"`
+	Healthy     int `json:"healthy"`
+	Failed      int `json:"failed"`
+	Pending     int `json:"pending"`
+	Running     int `json:"running"`
+	NeverSynced int `json:"never_synced"`
+	Cancelled   int `json:"cancelled"`
+	Overdue     int `json:"overdue"`
+	Stuck       int `json:"stuck"`
 }
 
 type ListRepositoriesResponse struct {

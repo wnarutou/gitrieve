@@ -156,6 +156,54 @@ func TestExecutionExistenceQueriesUseExactExecutionAndRepositoryKeys(t *testing.
 	require.False(t, active)
 }
 
+func TestRepositoryRunStatsReturnsLatestRowsSuccessTimesAndCumulativeCounts(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	base := time.Date(2026, time.September, 4, 8, 0, 0, 0, time.UTC)
+	insertRepositoryRun(t, testDB, "alpha-success", "github.com/acme/alpha", base, ptrTime(base.Add(10*time.Minute)), "completed", nil)
+	insertRepositoryRun(t, testDB, "alpha-failure", "github.com/acme/alpha", base.Add(time.Hour), ptrTime(base.Add(time.Hour+5*time.Minute)), "failed", ptrString("network unavailable"))
+	insertRepositoryRun(t, testDB, "beta-running", "github.com/acme/beta", base.Add(2*time.Hour), nil, "running", nil)
+	insertRepositoryRun(t, testDB, "tie-a", "github.com/acme/tied", base.Add(3*time.Hour), ptrTime(base.Add(3*time.Hour+time.Minute)), "completed", nil)
+	insertRepositoryRun(t, testDB, "tie-z", "github.com/acme/tied", base.Add(3*time.Hour), ptrTime(base.Add(3*time.Hour+2*time.Minute)), "failed", ptrString("tie winner"))
+	insertRepositoryRun(t, testDB, "legacy", "", base.Add(4*time.Hour), nil, "completed", nil)
+
+	stats, err := testDB.RepositoryRunStats(ctx)
+	require.NoError(t, err)
+	require.Len(t, stats, 3, "rows without a repository key stay valid but are excluded from repository stats")
+
+	alpha := stats["github.com/acme/alpha"]
+	require.Equal(t, "alpha-failure", alpha.LatestExecutionID)
+	require.Equal(t, "failed", alpha.LatestStatus)
+	require.Equal(t, base.Add(time.Hour), alpha.LatestStart)
+	require.NotNil(t, alpha.LatestEnd)
+	require.Equal(t, base.Add(time.Hour+5*time.Minute), *alpha.LatestEnd)
+	require.Equal(t, "network unavailable", alpha.LatestError)
+	require.NotNil(t, alpha.LastSuccess)
+	require.Equal(t, base.Add(10*time.Minute), *alpha.LastSuccess)
+	require.Equal(t, int64(2), alpha.TotalRuns)
+	require.Equal(t, int64(1), alpha.SuccessRuns)
+	require.Equal(t, int64(1), alpha.FailedRuns)
+
+	beta := stats["github.com/acme/beta"]
+	require.Equal(t, "beta-running", beta.LatestExecutionID)
+	require.Equal(t, "running", beta.LatestStatus)
+	require.Nil(t, beta.LatestEnd)
+	require.Nil(t, beta.LastSuccess)
+	require.Zero(t, beta.SuccessRuns)
+	require.Zero(t, beta.FailedRuns)
+
+	tied := stats["github.com/acme/tied"]
+	require.Equal(t, "tie-z", tied.LatestExecutionID, "descending execution ID breaks equal-start ties")
+	require.Equal(t, "failed", tied.LatestStatus)
+	require.Equal(t, "tie winner", tied.LatestError)
+	require.NotNil(t, tied.LastSuccess)
+	require.Equal(t, base.Add(3*time.Hour+time.Minute), *tied.LastSuccess)
+	require.Equal(t, int64(2), tied.TotalRuns)
+}
+
 func TestStartComponentRejectsMissingAndNonPendingRows(t *testing.T) {
 	ctx := context.Background()
 	testDB, err := Initialize(":memory:")
@@ -195,3 +243,16 @@ func insertExecution(t *testing.T, testDB *DB, id, repoKey string, status Compon
 	)
 	require.NoError(t, err)
 }
+
+func insertRepositoryRun(t *testing.T, testDB *DB, id, repoKey string, start time.Time, end *time.Time, status string, message *string) {
+	t.Helper()
+	_, err := testDB.Exec(
+		`INSERT INTO executions (id, job_name, repo_key, start_time, end_time, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, "test-job", repoKey, start, end, status, message,
+	)
+	require.NoError(t, err)
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }
+
+func ptrString(value string) *string { return &value }
