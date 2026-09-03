@@ -11,6 +11,11 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
+const (
+	DefaultSyncOverdueGrace   = 30 * time.Minute
+	DefaultSyncStuckThreshold = 24 * time.Hour
+)
+
 type Config struct {
 	Repository                  []typedef.Repository   `yaml:"repository"`
 	Storage                     []typedef.MultiStorage `yaml:"storage"`
@@ -20,6 +25,8 @@ type Config struct {
 	ReleaseNumLimit             int                    `yaml:"releaseNumLimit"`
 	RetryMaxCount               int                    `yaml:"retryMaxCount"`
 	RetryBaseDelay              time.Duration          `yaml:"retryBaseDelay"`
+	SyncOverdueGrace            time.Duration          `yaml:"syncOverdueGrace" mapstructure:"syncOverdueGrace"`
+	SyncStuckThreshold          time.Duration          `yaml:"syncStuckThreshold" mapstructure:"syncStuckThreshold"`
 	GitHubAPIConcurrency        uint                   `yaml:"githubApiConcurrency" mapstructure:"githubApiConcurrency"`
 	GitHubMinRequestInterval    time.Duration          `yaml:"githubMinRequestInterval" mapstructure:"githubMinRequestInterval"`
 	GitHubLowRemainingThreshold int                    `yaml:"githubLowRemainingThreshold" mapstructure:"githubLowRemainingThreshold"`
@@ -64,6 +71,12 @@ func seedDefaults(cfg *Config) {
 	}
 	if cfg.RetryBaseDelay <= 0 {
 		cfg.RetryBaseDelay = 5 * time.Second
+	}
+	if cfg.SyncOverdueGrace <= 0 {
+		cfg.SyncOverdueGrace = DefaultSyncOverdueGrace
+	}
+	if cfg.SyncStuckThreshold <= 0 {
+		cfg.SyncStuckThreshold = DefaultSyncStuckThreshold
 	}
 	if cfg.ConcurrencyNum == 0 {
 		cfg.ConcurrencyNum = 3
@@ -152,6 +165,10 @@ func GetRetryBaseDelay() time.Duration {
 	return ins.RetryBaseDelay
 }
 
+func GetSyncOverdueGrace() time.Duration { return ins.SyncOverdueGrace }
+
+func GetSyncStuckThreshold() time.Duration { return ins.SyncStuckThreshold }
+
 func GetGitHubAPIConcurrency() uint { return ins.GitHubAPIConcurrency }
 
 func GetGitHubMinRequestInterval() time.Duration { return ins.GitHubMinRequestInterval }
@@ -202,6 +219,8 @@ func Save() error {
 	vp.Set("releaseNumLimit", ins.ReleaseNumLimit)
 	vp.Set("retryMaxCount", ins.RetryMaxCount)
 	vp.Set("retryBaseDelay", ins.RetryBaseDelay)
+	vp.Set("syncOverdueGrace", ins.SyncOverdueGrace)
+	vp.Set("syncStuckThreshold", ins.SyncStuckThreshold)
 	vp.Set("githubApiConcurrency", ins.GitHubAPIConcurrency)
 	vp.Set("githubMinRequestInterval", ins.GitHubMinRequestInterval)
 	vp.Set("githubLowRemainingThreshold", ins.GitHubLowRemainingThreshold)

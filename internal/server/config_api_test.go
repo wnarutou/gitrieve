@@ -112,6 +112,8 @@ func TestPreviewImportDiff(t *testing.T) {
 		ReleaseSizeLimit:            300000000,
 		ReleaseNumLimit:             3,
 		RetryMaxCount:               3,
+		SyncOverdueGrace:            config.DefaultSyncOverdueGrace,
+		SyncStuckThreshold:          config.DefaultSyncStuckThreshold,
 		GitHubAPIConcurrency:        2,
 		GitHubMinRequestInterval:    200 * time.Millisecond,
 		GitHubLowRemainingThreshold: 100,
@@ -206,6 +208,35 @@ server:
 	// Server section changed -> warning present.
 	warnings := data["warnings"].([]interface{})
 	require.Len(t, warnings, 1)
+}
+
+func TestPreviewAndApplyImportSyncHealthGlobals(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\nsyncOverdueGrace: 20m\nsyncStuckThreshold: 8h\n")
+	config.Path = path
+	config.Init()
+	t.Cleanup(func() { config.Path = "" })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+
+	importYAML := "repository:\n  - name: one\n    url: github.com/one/repo\nsyncOverdueGrace: 45m\nsyncStuckThreshold: 12h\n"
+	body, err := json.Marshal(map[string]string{"config": importYAML})
+	require.NoError(t, err)
+
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/import/preview", string(body))
+	require.Equal(t, http.StatusOK, code)
+	summary := resp["data"].(map[string]interface{})["summary"].(map[string]interface{})
+	require.Equal(t, float64(2), summary["globals"].(map[string]interface{})["changed"])
+
+	code, resp = getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, http.StatusOK, code)
+	result := resp["data"].(map[string]interface{})
+	require.Equal(t, float64(2), result["globals_updated"])
+	require.Equal(t, 45*time.Minute, s.Cfg().SyncOverdueGrace)
+	require.Equal(t, 12*time.Hour, s.Cfg().SyncStuckThreshold)
 }
 
 func TestApplyImportGitHubAPIGlobals(t *testing.T) {

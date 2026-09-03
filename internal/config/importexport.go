@@ -33,7 +33,7 @@ func (d DurationString) MarshalYAML() (interface{}, error) {
 
 func (d *DurationString) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode {
-		return fmt.Errorf("retryBaseDelay must be a string or integer")
+		return fmt.Errorf("duration must be a string or integer")
 	}
 	if node.Tag == "!!int" {
 		n, err := strconv.ParseInt(node.Value, 10, 64)
@@ -45,7 +45,7 @@ func (d *DurationString) UnmarshalYAML(node *yaml.Node) error {
 	}
 	parsed, err := time.ParseDuration(node.Value)
 	if err != nil {
-		return fmt.Errorf("invalid retryBaseDelay %q: %w", node.Value, err)
+		return fmt.Errorf("invalid duration %q: %w", node.Value, err)
 	}
 	*d = DurationString(parsed)
 	return nil
@@ -62,6 +62,8 @@ type ExportConfig struct {
 	ReleaseNumLimit             int                    `yaml:"releaseNumLimit"`
 	RetryMaxCount               int                    `yaml:"retryMaxCount"`
 	RetryBaseDelay              DurationString         `yaml:"retryBaseDelay"`
+	SyncOverdueGrace            DurationString         `yaml:"syncOverdueGrace"`
+	SyncStuckThreshold          DurationString         `yaml:"syncStuckThreshold"`
 	GitHubAPIConcurrency        uint                   `yaml:"githubApiConcurrency"`
 	GitHubMinRequestInterval    DurationString         `yaml:"githubMinRequestInterval"`
 	GitHubLowRemainingThreshold int                    `yaml:"githubLowRemainingThreshold"`
@@ -110,6 +112,8 @@ func ExportFrom(cfg *Config) (string, error) {
 		ReleaseNumLimit:             cfg.ReleaseNumLimit,
 		RetryMaxCount:               cfg.RetryMaxCount,
 		RetryBaseDelay:              DurationString(cfg.RetryBaseDelay),
+		SyncOverdueGrace:            DurationString(cfg.SyncOverdueGrace),
+		SyncStuckThreshold:          DurationString(cfg.SyncStuckThreshold),
 		GitHubAPIConcurrency:        cfg.GitHubAPIConcurrency,
 		GitHubMinRequestInterval:    DurationString(cfg.GitHubMinRequestInterval),
 		GitHubLowRemainingThreshold: cfg.GitHubLowRemainingThreshold,
@@ -168,6 +172,12 @@ func seedExportDefaults(doc *ExportConfig, jitterPresent bool) {
 	}
 	if time.Duration(doc.RetryBaseDelay) <= 0 {
 		doc.RetryBaseDelay = DurationString(5 * time.Second)
+	}
+	if time.Duration(doc.SyncOverdueGrace) <= 0 {
+		doc.SyncOverdueGrace = DurationString(DefaultSyncOverdueGrace)
+	}
+	if time.Duration(doc.SyncStuckThreshold) <= 0 {
+		doc.SyncStuckThreshold = DurationString(DefaultSyncStuckThreshold)
 	}
 	if doc.ConcurrencyNum == 0 {
 		doc.ConcurrencyNum = 3

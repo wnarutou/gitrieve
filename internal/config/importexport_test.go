@@ -25,18 +25,21 @@ func TestDurationStringYAML(t *testing.T) {
 
 	// A bad duration is rejected.
 	var doc ExportConfig
-	require.Error(t, yaml.Unmarshal([]byte("retryBaseDelay: 5pigs"), &doc))
+	err = yaml.Unmarshal([]byte("retryBaseDelay: 5pigs"), &doc)
+	require.ErrorContains(t, err, "invalid duration")
 }
 
 func TestExportFromRoundTrip(t *testing.T) {
 	writeTmpConfig(t, "server:\n  host: 127.0.0.1\n  port: \"8081\"\n")
 
 	cfg := &Config{
-		Repository:     []typedef.Repository{{Name: "r1", URL: "github.com/a/b"}},
-		Storage:        []typedef.MultiStorage{{Storage: typedef.Storage{Name: "local", Type: "file", Path: "/tmp"}}},
-		GitHubToken:    "tok",
-		ConcurrencyNum: 3,
-		RetryBaseDelay: 5 * time.Second,
+		Repository:         []typedef.Repository{{Name: "r1", URL: "github.com/a/b"}},
+		Storage:            []typedef.MultiStorage{{Storage: typedef.Storage{Name: "local", Type: "file", Path: "/tmp"}}},
+		GitHubToken:        "tok",
+		ConcurrencyNum:     3,
+		RetryBaseDelay:     5 * time.Second,
+		SyncOverdueGrace:   45 * time.Minute,
+		SyncStuckThreshold: 12 * time.Hour,
 	}
 	yamlStr, err := ExportFrom(cfg)
 	require.NoError(t, err)
@@ -44,13 +47,17 @@ func TestExportFromRoundTrip(t *testing.T) {
 	require.Contains(t, yamlStr, "url: github.com/a/b")
 	require.Contains(t, yamlStr, "githubToken: tok")
 	require.Contains(t, yamlStr, "retryBaseDelay: 5s")
+	require.Contains(t, yamlStr, "syncOverdueGrace: 45m0s")
+	require.Contains(t, yamlStr, "syncStuckThreshold: 12h0m0s")
 	require.Contains(t, yamlStr, "server:")
 	require.Contains(t, yamlStr, "host: 127.0.0.1")
 
 	// Round-trip: the exported YAML parses back with the same globals.
-	var doc ExportConfig
-	require.NoError(t, yaml.Unmarshal([]byte(yamlStr), &doc))
+	doc, err := ParseImport(yamlStr)
+	require.NoError(t, err)
 	require.Equal(t, DurationString(5*time.Second), doc.RetryBaseDelay)
+	require.Equal(t, DurationString(45*time.Minute), doc.SyncOverdueGrace)
+	require.Equal(t, DurationString(12*time.Hour), doc.SyncStuckThreshold)
 	require.Equal(t, "tok", doc.GitHubToken)
 	require.Equal(t, "127.0.0.1", doc.Server.Host)
 }
@@ -166,6 +173,8 @@ server:
 	require.Equal(t, "local", doc.Storage[0].Name)
 	require.Equal(t, "tok", doc.GitHubToken)
 	require.Equal(t, DurationString(5*time.Second), doc.RetryBaseDelay)
+	require.Equal(t, DurationString(DefaultSyncOverdueGrace), doc.SyncOverdueGrace)
+	require.Equal(t, DurationString(DefaultSyncStuckThreshold), doc.SyncStuckThreshold)
 	require.Equal(t, "127.0.0.1", doc.Server.Host)
 	require.Equal(t, "8081", doc.Server.Port)
 }

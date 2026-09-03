@@ -32,6 +32,31 @@ func TestGetRetryDefaults(t *testing.T) {
 	require.Equal(t, 5*time.Second, rc.BaseDelay)
 }
 
+func TestSyncHealthDefaults(t *testing.T) {
+	cfg := &Config{}
+	seedDefaults(cfg)
+	require.Equal(t, 30*time.Minute, cfg.SyncOverdueGrace)
+	require.Equal(t, 24*time.Hour, cfg.SyncStuckThreshold)
+}
+
+func TestSyncHealthNonPositiveValuesUseDefaults(t *testing.T) {
+	cfg := &Config{SyncOverdueGrace: -time.Second, SyncStuckThreshold: -time.Second}
+	seedDefaults(cfg)
+	require.Equal(t, DefaultSyncOverdueGrace, cfg.SyncOverdueGrace)
+	require.Equal(t, DefaultSyncStuckThreshold, cfg.SyncStuckThreshold)
+}
+
+func TestSyncHealthGettersAndSaveRoundTrip(t *testing.T) {
+	writeTmpConfig(t, "githubtoken: test\nsyncOverdueGrace: 45m\nsyncStuckThreshold: 12h\n")
+	require.Equal(t, 45*time.Minute, GetSyncOverdueGrace())
+	require.Equal(t, 12*time.Hour, GetSyncStuckThreshold())
+
+	require.NoError(t, Save())
+	Init()
+	require.Equal(t, 45*time.Minute, GetSyncOverdueGrace())
+	require.Equal(t, 12*time.Hour, GetSyncStuckThreshold())
+}
+
 func TestGetGitHubAPIDefaults(t *testing.T) {
 	writeTmpConfig(t, "githubtoken: test\n")
 	require.Equal(t, uint(2), GetGitHubAPIConcurrency())

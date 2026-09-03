@@ -206,6 +206,8 @@ func diffGlobals(cur *config.Config, imp *config.ExportConfig) []FieldChange {
 		{"releaseNumLimit", cur.ReleaseNumLimit, imp.ReleaseNumLimit},
 		{"retryMaxCount", cur.RetryMaxCount, imp.RetryMaxCount},
 		{"retryBaseDelay", cur.RetryBaseDelay.String(), time.Duration(imp.RetryBaseDelay).String()},
+		{"syncOverdueGrace", cur.SyncOverdueGrace.String(), time.Duration(imp.SyncOverdueGrace).String()},
+		{"syncStuckThreshold", cur.SyncStuckThreshold.String(), time.Duration(imp.SyncStuckThreshold).String()},
 		{"githubApiConcurrency", cur.GitHubAPIConcurrency, imp.GitHubAPIConcurrency},
 		{"githubMinRequestInterval", cur.GitHubMinRequestInterval.String(), time.Duration(imp.GitHubMinRequestInterval).String()},
 		{"githubLowRemainingThreshold", cur.GitHubLowRemainingThreshold, imp.GitHubLowRemainingThreshold},
@@ -479,6 +481,20 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		d := time.Duration(doc.RetryBaseDelay)
 		if next.RetryBaseDelay != d {
 			next.RetryBaseDelay = d
+			result.GlobalsUpdated++
+		}
+	}
+	if choice(req.Choices.GlobalChoices, "syncOverdueGrace", "imported") == "imported" {
+		d := time.Duration(doc.SyncOverdueGrace)
+		if next.SyncOverdueGrace != d {
+			next.SyncOverdueGrace = d
+			result.GlobalsUpdated++
+		}
+	}
+	if choice(req.Choices.GlobalChoices, "syncStuckThreshold", "imported") == "imported" {
+		d := time.Duration(doc.SyncStuckThreshold)
+		if next.SyncStuckThreshold != d {
+			next.SyncStuckThreshold = d
 			result.GlobalsUpdated++
 		}
 	}
