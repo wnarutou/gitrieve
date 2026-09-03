@@ -402,6 +402,18 @@ func TestExecuteJobCancelFailedFallbackRejectionLeavesOverallActive(t *testing.T
 		expectedComponent{db.ComponentIssue, db.ComponentRunning, ""},
 		expectedComponent{db.ComponentWiki, db.ComponentCancelled, "context canceled"},
 	)
+
+	wantFallbackLog := fmt.Sprintf(
+		`Failed to record issues cancellation store failure: finish component "issues" for execution %q: constraint failed: forced cancellation and fallback failure (1811)`,
+		jobIDs[0],
+	)
+	var fallbackLogCount int
+	require.NoError(t, testDB.QueryRow(`
+		SELECT COUNT(*) FROM logs
+		WHERE execution_id = ? AND level = 'error' AND message = ?`,
+		jobIDs[0], wantFallbackLog,
+	).Scan(&fallbackLogCount))
+	require.Equal(t, 1, fallbackLogCount)
 }
 
 func TestExecuteJobCancelledOverallStoreFailureFallsBackToFailed(t *testing.T) {
