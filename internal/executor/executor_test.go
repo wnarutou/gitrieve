@@ -106,6 +106,15 @@ type blockingExecutionStore struct {
 	finishOnce        sync.Once
 }
 
+type discardFailingStore struct {
+	*blockingExecutionStore
+	err error
+}
+
+func (s *discardFailingStore) DiscardPendingExecutions(context.Context, []string) error {
+	return s.err
+}
+
 func (s *blockingExecutionStore) Exec(query string, args ...interface{}) (sql.Result, error) {
 	if s.execEntered != nil {
 		s.execOnce.Do(func() { close(s.execEntered) })
@@ -129,6 +138,10 @@ func (s *blockingExecutionStore) CreatePendingExecutions(ctx context.Context, ex
 		<-s.componentsRelease
 	}
 	return err
+}
+
+func (s *blockingExecutionStore) DiscardPendingExecutions(ctx context.Context, executionIDs []string) error {
+	return s.delegate.DiscardPendingExecutions(ctx, executionIDs)
 }
 
 func (s *blockingExecutionStore) StartComponent(ctx context.Context, executionID string, component db.ComponentName, startedAt time.Time) error {
@@ -1382,7 +1395,7 @@ func TestClosePreventsDispatcherAdmissionWhileRunningWorkerFinishes(t *testing.T
 	}
 }
 
-func TestCloseWinningAfterPersistencePreventsPostCloseRunner(t *testing.T) {
+func TestExecuteJobCloseAfterCommitBeforePublishDiscardsBatch(t *testing.T) {
 	runnerEntered := make(chan struct{}, 1)
 	runners := noOpRunners()
 	runners.Code = func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
@@ -1390,6 +1403,14 @@ func TestCloseWinningAfterPersistencePreventsPostCloseRunner(t *testing.T) {
 		return nil
 	}
 	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(1, 1), runners)
+	_, err := testDB.Exec(`
+		CREATE TRIGGER reject_component_terminal_update
+		BEFORE UPDATE OF status ON execution_components
+		WHEN NEW.status IN ('cancelled', 'failed', 'completed', 'skipped')
+		BEGIN
+			SELECT RAISE(FAIL, 'forced component terminal update failure');
+		END;`)
+	require.NoError(t, err)
 	componentsRelease := make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(componentsRelease) }) })
@@ -1425,13 +1446,87 @@ func TestCloseWinningAfterPersistencePreventsPostCloseRunner(t *testing.T) {
 	require.ErrorIs(t, result.err, ErrExecutorClosed)
 	require.Empty(t, result.ids)
 	require.NoError(t, <-closeResult)
-	var active int
-	require.NoError(t, testDB.QueryRow(`
-		SELECT COUNT(*) FROM executions WHERE status IN ('pending', 'running')`).Scan(&active))
-	require.Zero(t, active)
+	var executionCount, componentCount int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&executionCount))
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM execution_components`).Scan(&componentCount))
+	require.Zero(t, executionCount)
+	require.Zero(t, componentCount)
+	exec.queueMu.Lock()
+	require.Empty(t, exec.activeByRepo)
+	require.Zero(t, exec.inflight)
+	exec.queueMu.Unlock()
 	select {
 	case <-runnerEntered:
 		t.Fatal("runner started after Close won the publish race")
+	default:
+	}
+
+	_, err = testDB.Exec(`DROP TRIGGER reject_component_terminal_update`)
+	require.NoError(t, err)
+	fresh := NewExecutorWithRunners(nil, testDB, repositoryConfig(1, 1), runners)
+	t.Cleanup(func() { require.NoError(t, fresh.Close()) })
+	retryIDs, err := fresh.ExecuteJob("github.com/test/repo-0")
+	require.NoError(t, err)
+	require.Len(t, retryIDs, 1)
+	select {
+	case <-runnerEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fresh executor did not start the discarded repository")
+	}
+}
+
+func TestExecuteJobDiscardFailureReachesSubmitterAndClose(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
+	runnerEntered := make(chan struct{}, 1)
+	runners := noOpRunners()
+	runners.Code = func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
+		runnerEntered <- struct{}{}
+		return nil
+	}
+	exec := NewExecutorWithRunners(nil, testDB, repositoryConfig(1, 1), runners)
+	componentsRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(componentsRelease) }) })
+	discardErr := errors.New("forced pending batch discard failure")
+	store := &discardFailingStore{
+		blockingExecutionStore: &blockingExecutionStore{
+			delegate:          testDB,
+			componentsEntered: make(chan struct{}),
+			componentsRelease: componentsRelease,
+		},
+		err: discardErr,
+	}
+	exec.db = store
+	type executeResult struct {
+		ids []string
+		err error
+	}
+	submitResult := make(chan executeResult, 1)
+	go func() {
+		ids, submitErr := exec.ExecuteJob("github.com/test/repo-0")
+		submitResult <- executeResult{ids: ids, err: submitErr}
+	}()
+	<-store.componentsEntered
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- exec.Close() }()
+	<-executorClosedSignal(exec)
+	releaseOnce.Do(func() { close(componentsRelease) })
+
+	result := <-submitResult
+	require.Empty(t, result.ids)
+	require.ErrorIs(t, result.err, ErrExecutorClosed)
+	require.ErrorIs(t, result.err, discardErr)
+	require.ErrorIs(t, <-closeResult, discardErr)
+	exec.queueMu.Lock()
+	require.Empty(t, exec.activeByRepo)
+	require.Zero(t, exec.inflight)
+	exec.queueMu.Unlock()
+	select {
+	case <-runnerEntered:
+		t.Fatal("runner started after Close won with a discard failure")
 	default:
 	}
 }

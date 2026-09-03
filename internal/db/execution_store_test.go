@@ -36,6 +36,29 @@ func TestCreatePendingExecutionsRollsBackWholeBatchWhenLaterComponentInsertFails
 	require.Zero(t, componentCount)
 }
 
+func TestDiscardPendingExecutionsRollsBackWhenEveryExecutionIsNotPending(t *testing.T) {
+	ctx := context.Background()
+	testDB, err := Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	startedAt := time.Date(2026, time.September, 4, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, testDB.CreatePendingExecutions(ctx, []PendingExecution{
+		{ID: "pending", JobName: "pending", RepoKey: "github.com/acme/pending", StartTime: startedAt, Components: []ComponentName{ComponentCode}},
+		{ID: "running", JobName: "running", RepoKey: "github.com/acme/running", StartTime: startedAt, Components: []ComponentName{ComponentCode}},
+	}))
+	_, err = testDB.Exec(`UPDATE executions SET status = 'running' WHERE id = 'running'`)
+	require.NoError(t, err)
+
+	err = testDB.DiscardPendingExecutions(ctx, []string{"pending", "running"})
+	require.ErrorContains(t, err, "expected 2 pending execution rows, deleted 1")
+	var executionCount, componentCount int
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&executionCount))
+	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM execution_components`).Scan(&componentCount))
+	require.Equal(t, 2, executionCount)
+	require.Equal(t, 2, componentCount)
+}
+
 func TestComponentStorePersistsTransitionsAndListsComponentsInDisplayOrder(t *testing.T) {
 	ctx := context.Background()
 	testDB, err := Initialize(":memory:")

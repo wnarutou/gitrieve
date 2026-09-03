@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,47 @@ func (d *DB) CreatePendingExecutions(ctx context.Context, executions []PendingEx
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit create pending executions: %w", err)
+	}
+	return nil
+}
+
+// DiscardPendingExecutions atomically removes an unaccepted batch that was
+// committed but never published to the executor queue.
+func (d *DB) DiscardPendingExecutions(ctx context.Context, executionIDs []string) error {
+	if len(executionIDs) == 0 {
+		return nil
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin discard pending executions: %w", err)
+	}
+	defer tx.Rollback()
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(executionIDs)), ",")
+	args := make([]interface{}, len(executionIDs))
+	for i, executionID := range executionIDs {
+		args[i] = executionID
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM execution_components WHERE execution_id IN (`+placeholders+`)`, args...,
+	); err != nil {
+		return fmt.Errorf("discard pending execution components: %w", err)
+	}
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM executions WHERE status = 'pending' AND id IN (`+placeholders+`)`, args...,
+	)
+	if err != nil {
+		return fmt.Errorf("discard pending executions: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect discarded pending executions: %w", err)
+	}
+	if deleted != int64(len(executionIDs)) {
+		return fmt.Errorf("expected %d pending execution rows, deleted %d", len(executionIDs), deleted)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit discard pending executions: %w", err)
 	}
 	return nil
 }

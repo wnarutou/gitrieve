@@ -46,16 +46,15 @@ type queuedJob struct {
 }
 
 type preparedJob struct {
-	queued            *queuedJob
-	jobContext        *JobContext
-	executionCreated  bool
-	componentsCreated bool
+	queued     *queuedJob
+	jobContext *JobContext
 }
 
 type executionStore interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
 	ActiveExecutionExists(context.Context, string) (bool, error)
 	CreatePendingExecutions(context.Context, []db.PendingExecution) error
+	DiscardPendingExecutions(context.Context, []string) error
 	StartComponent(context.Context, string, db.ComponentName, time.Time) error
 	FinishComponent(context.Context, string, db.ComponentName, db.ComponentStatus, time.Time, string) error
 }
@@ -189,18 +188,23 @@ func (e *Executor) submitBatch(repositories []typedef.Repository) ([]string, err
 		return nil, err
 	}
 	if err := e.preflightBatch(prepared); err != nil {
-		e.releaseBatch(prepared)
+		e.releaseBatch(prepared, nil)
 		return nil, err
 	}
 	if err := e.persistBatch(prepared); err != nil {
-		e.releaseBatch(prepared)
+		e.releaseBatch(prepared, nil)
 		return nil, err
 	}
 
 	e.queueMu.Lock()
 	if e.closed {
 		e.queueMu.Unlock()
-		return nil, errors.Join(ErrExecutorClosed, e.abortBatch(prepared, StatusCancelled, context.Canceled.Error()))
+		discardErr := e.discardBatch(prepared)
+		e.releaseBatch(prepared, discardErr)
+		if discardErr != nil {
+			return nil, errors.Join(ErrExecutorClosed, discardErr)
+		}
+		return nil, ErrExecutorClosed
 	}
 	jobIDs := make([]string, len(prepared))
 	for i, job := range prepared {
@@ -272,51 +276,25 @@ func (e *Executor) persistBatch(prepared []*preparedJob) error {
 	if err := e.db.CreatePendingExecutions(context.Background(), executions); err != nil {
 		return fmt.Errorf("create pending execution batch: %w", err)
 	}
-	for _, job := range prepared {
-		job.executionCreated = true
-		job.componentsCreated = true
+	return nil
+}
+
+func (e *Executor) discardBatch(prepared []*preparedJob) error {
+	executionIDs := make([]string, len(prepared))
+	for i, job := range prepared {
+		executionIDs[i] = job.queued.id
+	}
+	if err := e.db.DiscardPendingExecutions(context.Background(), executionIDs); err != nil {
+		return fmt.Errorf("discard unaccepted execution batch: %w", err)
 	}
 	return nil
 }
 
-func (e *Executor) abortBatch(prepared []*preparedJob, status ExecutionStatus, message string) error {
-	var errs []error
-	for _, job := range prepared {
-		job.jobContext.CancelFunc()
-		if !job.executionCreated {
-			continue
-		}
-		allComponentsTerminal := true
-		if job.componentsCreated {
-			componentStatus := db.ComponentFailed
-			componentMessage := message
-			if status == StatusCancelled {
-				componentStatus = db.ComponentCancelled
-				componentMessage = context.Canceled.Error()
-			}
-			for _, planned := range job.queued.plan {
-				if err := e.db.FinishComponent(context.Background(), job.queued.id, planned.name, componentStatus, time.Now(), componentMessage); err != nil {
-					allComponentsTerminal = false
-					errs = append(errs, err)
-				}
-			}
-		}
-		if allComponentsTerminal {
-			executionMessage := message
-			if status == StatusCancelled {
-				executionMessage = ""
-			}
-			if err := e.updateJobStatus(job.queued.id, string(status), executionMessage); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	e.releaseBatch(prepared)
-	return errors.Join(errs...)
-}
-
-func (e *Executor) releaseBatch(prepared []*preparedJob) {
+func (e *Executor) releaseBatch(prepared []*preparedJob, closeErr error) {
 	e.queueMu.Lock()
+	if closeErr != nil {
+		e.closeErr = errors.Join(e.closeErr, closeErr)
+	}
 	for _, job := range prepared {
 		job.jobContext.CancelFunc()
 		if e.activeByRepo[job.jobContext.repoKey] == job.queued.id {
