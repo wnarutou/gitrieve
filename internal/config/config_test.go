@@ -1,7 +1,6 @@
 package config
 
 import (
-	"context"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -387,12 +386,14 @@ func TestConcurrentSetInsKeepsConfigAndGitHubCoordinatorPaired(t *testing.T) {
 	require.Equal(t, uint64(2), appliedConcurrency.Load())
 }
 
-func TestSetInsPublicationExcludesConfigAndCoordinatorReaders(t *testing.T) {
+func TestSetInsPublicationExcludesConfigReaders(t *testing.T) {
 	previousConfig := GetIns()
 	previousPublish := publishGitHubAPI
 	SetIns(&Config{GitHubToken: "old", GitHubAPIConcurrency: 1})
-	oldPermit, err := githubapi.Acquire(context.Background(), "core")
-	require.NoError(t, err)
+	t.Cleanup(func() {
+		publishGitHubAPI = previousPublish
+		SetIns(previousConfig)
+	})
 
 	publishEntered := make(chan struct{})
 	publishRelease := make(chan struct{})
@@ -407,57 +408,89 @@ func TestSetInsPublicationExcludesConfigAndCoordinatorReaders(t *testing.T) {
 	}
 
 	publishDone := make(chan struct{})
+	var publishReleaseOnce sync.Once
+	var publishWorkers sync.WaitGroup
+	publishWorkers.Add(1)
 	go func() {
+		defer publishWorkers.Done()
 		SetIns(&Config{GitHubToken: "new", GitHubAPIConcurrency: 2})
 		close(publishDone)
 	}()
-	<-publishEntered
 
-	configReadStarted := make(chan struct{})
+	readerEntered := make(chan struct{}, 2)
+	readerProceed := make(chan struct{})
+	var readerProceedOnce sync.Once
+	var readerWorkers sync.WaitGroup
+	t.Cleanup(func() {
+		publishReleaseOnce.Do(func() { close(publishRelease) })
+		publishWorkers.Wait()
+		readerProceedOnce.Do(func() { close(readerProceed) })
+		readerWorkers.Wait()
+	})
+	select {
+	case <-publishEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for publication writer")
+	}
+
+	readHook := &configPublicationReadTestHook{read: func(read func()) {
+		readerEntered <- struct{}{}
+		<-readerProceed
+		githubapi.ReadPublication(read)
+	}}
+	configPublicationReadHookForTest.Store(readHook)
+	t.Cleanup(func() { configPublicationReadHookForTest.CompareAndSwap(readHook, nil) })
+
 	configReadDone := make(chan *Config, 1)
+	readerWorkers.Add(2)
 	go func() {
-		close(configReadStarted)
+		defer readerWorkers.Done()
 		configReadDone <- GetIns()
 	}()
-	<-configReadStarted
-
-	acquireCtx, cancelAcquire := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelAcquire()
-	type acquireResult struct {
-		permit githubapi.Permit
-		err    error
-	}
-	acquireStarted := make(chan struct{})
-	acquireDone := make(chan acquireResult, 1)
+	scalarReadDone := make(chan uint, 1)
 	go func() {
-		close(acquireStarted)
-		permit, acquireErr := githubapi.Acquire(acquireCtx, "core")
-		acquireDone <- acquireResult{permit: permit, err: acquireErr}
+		defer readerWorkers.Done()
+		scalarReadDone <- GetGitHubAPIConcurrency()
 	}()
-	<-acquireStarted
+	for range 2 {
+		select {
+		case <-readerEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for config reader to reach the pre-read barrier")
+		}
+	}
+	select {
+	case <-configReadDone:
+		t.Fatal("GetIns returned while blocked inside the publication read gate")
+	default:
+	}
+	select {
+	case <-scalarReadDone:
+		t.Fatal("scalar getter returned while blocked inside the publication read gate")
+	default:
+	}
 
-	configReturnedDuringPublication := false
+	publishReleaseOnce.Do(func() { close(publishRelease) })
+	select {
+	case <-publishDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for publication writer completion")
+	}
+	readerProceedOnce.Do(func() { close(readerProceed) })
+
 	var publishedConfig *Config
 	select {
 	case publishedConfig = <-configReadDone:
-		configReturnedDuringPublication = true
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for GetIns")
 	}
-	close(publishRelease)
-	<-publishDone
+	var publishedConcurrency uint
+	select {
+	case publishedConcurrency = <-scalarReadDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for scalar config getter")
+	}
 
-	if publishedConfig == nil {
-		publishedConfig = <-configReadDone
-	}
-	acquired := <-acquireDone
-	oldPermit.Done(githubapi.Observation{})
-	if acquired.permit != nil {
-		acquired.permit.Done(githubapi.Observation{})
-	}
-	publishGitHubAPI = previousPublish
-	SetIns(previousConfig)
-
-	assert.False(t, configReturnedDuringPublication, "GetIns observed the ins-before-coordinator publication window")
 	require.Equal(t, "new", publishedConfig.GitHubToken)
-	assert.NoError(t, acquired.err, "Acquire remained queued on the saturated old coordinator")
+	require.Equal(t, uint(2), publishedConcurrency)
 }

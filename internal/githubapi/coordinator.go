@@ -45,6 +45,16 @@ type permit struct {
 var current atomic.Pointer[coordinator]
 var publicationMu sync.RWMutex
 
+// publicationReadBoundaryTestHook is a package-private synchronization seam
+// for tests that need to observe the exact publication read-lock boundary.
+type publicationReadBoundaryTestHook struct {
+	beforeLock  func()
+	afterLock   func()
+	afterUnlock func()
+}
+
+var publicationReadBoundaryHookForTest atomic.Pointer[publicationReadBoundaryTestHook]
+
 func newCoordinator(cfg Config) *coordinator {
 	if cfg.Concurrency == 0 {
 		cfg.Concurrency = 1
@@ -68,8 +78,24 @@ func Publish(cfg Config, install func()) {
 // ReadPublication runs read while no paired configuration/coordinator
 // publication is in progress.
 func ReadPublication(read func()) {
+	readPublication(read)
+}
+
+func readPublication(read func()) {
+	hook := publicationReadBoundaryHookForTest.Load()
+	if hook != nil && hook.beforeLock != nil {
+		hook.beforeLock()
+	}
 	publicationMu.RLock()
-	defer publicationMu.RUnlock()
+	defer func() {
+		publicationMu.RUnlock()
+		if hook != nil && hook.afterUnlock != nil {
+			hook.afterUnlock()
+		}
+	}()
+	if hook != nil && hook.afterLock != nil {
+		hook.afterLock()
+	}
 	read()
 }
 
@@ -81,9 +107,10 @@ func Acquire(ctx context.Context, resource string) (Permit, error) {
 }
 
 func loadCoordinator() *coordinator {
-	publicationMu.RLock()
-	c := current.Load()
-	publicationMu.RUnlock()
+	var c *coordinator
+	readPublication(func() {
+		c = current.Load()
+	})
 	if c != nil {
 		return c
 	}

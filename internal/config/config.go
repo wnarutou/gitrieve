@@ -43,6 +43,14 @@ var stateMu sync.Mutex
 var ins atomic.Pointer[Config]
 var publishGitHubAPI = githubapi.Publish
 
+// configPublicationReadTestHook is a package-private synchronization seam for
+// tests that need to substitute the publication read gate itself.
+type configPublicationReadTestHook struct {
+	read func(func())
+}
+
+var configPublicationReadHookForTest atomic.Pointer[configPublicationReadTestHook]
+
 func Init() {
 	nextViper := viper.New()
 	nextViper.SetConfigFile(Path)
@@ -155,7 +163,11 @@ func currentConfig() *Config {
 
 func loadPublishedConfig() *Config {
 	var cfg *Config
-	githubapi.ReadPublication(func() {
+	readPublication := githubapi.ReadPublication
+	if hook := configPublicationReadHookForTest.Load(); hook != nil {
+		readPublication = hook.read
+	}
+	readPublication(func() {
 		cfg = ins.Load()
 	})
 	return cfg
