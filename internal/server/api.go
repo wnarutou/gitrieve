@@ -20,10 +20,11 @@ import (
 )
 
 type API struct {
-	config            *config.Config
-	db                *db.DB
-	executor          *executor.Executor
-	scheduleRefresher ScheduleRefresher
+	config              *config.Config
+	db                  *db.DB
+	executor            *executor.Executor
+	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
+	scheduleRefresher   ScheduleRefresher
 }
 
 // ScheduleRefresher updates the live server scheduler after repository or
@@ -33,7 +34,9 @@ type ScheduleRefresher interface {
 }
 
 func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
-	return &API{config: cfg, db: db, executor: exec}
+	api := &API{config: cfg, db: db, executor: exec}
+	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
+	return api
 }
 
 func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {
@@ -112,7 +115,12 @@ func (a *API) BulkCreateJobs(c *gin.Context) {
 		return
 	}
 
-	confirmed, err := a.bulkEligibleSnapshot(c.Request.Context(), req.Selector, time.Now())
+	if a.executor == nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Executor is unavailable"})
+		return
+	}
+	runtime := a.executor.RuntimeConfigSnapshot()
+	confirmed, err := a.bulkEligibleSnapshot(c.Request.Context(), runtime, req.Selector, time.Now())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to query repository stats: " + err.Error()})
 		return
@@ -127,9 +135,20 @@ func (a *API) BulkCreateJobs(c *gin.Context) {
 	}
 
 	result := BulkCreateJobsResponse{Requested: len(confirmed)}
-	for _, candidate := range confirmed {
-		eligible, recheckErr := a.bulkRepositoryEligible(c.Request.Context(), candidate.Key(), req.Selector, time.Now())
+	ctx := c.Request.Context()
+	for index, candidate := range confirmed {
+		remaining := len(confirmed) - index
+		if ctx.Err() != nil {
+			result.FailedToEnqueue += remaining
+			break
+		}
+		runtime = a.executor.RuntimeConfigSnapshot()
+		eligible, recheckErr := a.bulkRepositoryEligible(ctx, runtime, candidate.Key(), req.Selector, time.Now())
 		if recheckErr != nil {
+			if ctx.Err() != nil || errors.Is(recheckErr, context.Canceled) || errors.Is(recheckErr, context.DeadlineExceeded) {
+				result.FailedToEnqueue += remaining
+				break
+			}
 			result.FailedToEnqueue++
 			continue
 		}
@@ -137,18 +156,20 @@ func (a *API) BulkCreateJobs(c *gin.Context) {
 			result.NoLongerEligible++
 			continue
 		}
-
-		if a.executor == nil {
-			result.FailedToEnqueue++
-			continue
+		if ctx.Err() != nil {
+			result.FailedToEnqueue += remaining
+			break
 		}
-		_, executeErr := a.executor.ExecuteJob(candidate.Key())
+
+		_, executeErr := a.executor.ExecuteJobAtGeneration(candidate.Key(), runtime.Generation())
 		switch {
 		case executeErr == nil:
 			result.Queued++
 		case errors.Is(executeErr, executor.ErrRepositoryActive):
 			result.SkippedActive++
 		case errors.Is(executeErr, executor.ErrRepositoryNotFound):
+			result.NoLongerEligible++
+		case errors.Is(executeErr, executor.ErrConfigGenerationChanged):
 			result.NoLongerEligible++
 		default:
 			result.FailedToEnqueue++
@@ -214,11 +235,13 @@ func decodeStrictJSON(reader io.Reader, target interface{}) error {
 	return nil
 }
 
-func (a *API) bulkEligibleSnapshot(ctx context.Context, selector BulkJobSelector, now time.Time) ([]RepositoryOverview, error) {
-	snapshot, err := a.currentRepositorySnapshot(ctx, now)
+func (a *API) bulkEligibleSnapshot(ctx context.Context, runtime *executor.RuntimeConfigSnapshot, selector BulkJobSelector, now time.Time) ([]RepositoryOverview, error) {
+	stats, err := a.db.RepositoryRunStats(ctx)
 	if err != nil {
 		return nil, err
 	}
+	overdueGrace, stuckThreshold := runtime.SyncHealthThresholds()
+	snapshot := buildRepositorySnapshot(runtime.Repositories(), stats, now, overdueGrace, stuckThreshold)
 	return selectBulkEligible(snapshot, selector), nil
 }
 
@@ -257,29 +280,20 @@ func (a *API) currentRepositorySnapshot(ctx context.Context, now time.Time) ([]R
 	return buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), nil
 }
 
-func (a *API) bulkRepositoryEligible(ctx context.Context, repositoryKey string, selector BulkJobSelector, now time.Time) (bool, error) {
-	var repository typedef.Repository
-	found := false
-	if a.config != nil {
-		for _, configured := range a.config.Repository {
-			if configured.Matches(repositoryKey) {
-				repository = configured
-				found = true
-				break
-			}
-		}
-	}
+func (a *API) bulkRepositoryEligible(ctx context.Context, runtime *executor.RuntimeConfigSnapshot, repositoryKey string, selector BulkJobSelector, now time.Time) (bool, error) {
+	repository, found := runtime.Repository(repositoryKey)
 	if !found {
 		return false, nil
 	}
 
-	stats, err := a.repositoryRunStatsForCandidate(ctx, repository)
+	stats, err := a.bulkRepositoryStats(ctx, repository)
 	if err != nil {
 		return false, err
 	}
+	overdueGrace, stuckThreshold := runtime.SyncHealthThresholds()
 	snapshot := buildRepositorySnapshot(
 		[]typedef.Repository{repository}, stats, now,
-		a.config.SyncOverdueGrace, a.config.SyncStuckThreshold,
+		overdueGrace, stuckThreshold,
 	)
 	return len(selectBulkEligible(snapshot, selector)) == 1, nil
 }
@@ -288,20 +302,7 @@ func (a *API) bulkRepositoryEligible(ctx context.Context, repositoryKey string, 
 // history. This keeps enqueue-time rechecks O(candidates) instead of rebuilding
 // the full ~6,000-repository fleet snapshot for every item.
 func (a *API) repositoryRunStatsForCandidate(ctx context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
-	key := repository.Key()
-	query := `
-		SELECT id, repo_key, start_time, end_time, status, error_message
-		FROM executions WHERE repo_key = ?
-		ORDER BY repo_key, start_time DESC, id DESC LIMIT 1`
-	args := []interface{}{key}
-	if repository.GetType() == typedef.TypeOrg || repository.GetType() == typedef.TypeUser {
-		prefix := key + "/"
-		query = `
-			SELECT id, repo_key, start_time, end_time, status, error_message
-			FROM executions WHERE substr(repo_key, 1, ?) = ?
-			ORDER BY repo_key, start_time DESC, id DESC`
-		args = []interface{}{len(prefix), prefix}
-	}
+	query, args := repositoryRunStatsQuery(repository)
 
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -343,6 +344,24 @@ func (a *API) repositoryRunStatsForCandidate(ctx context.Context, repository typ
 		return nil, err
 	}
 	return stats, nil
+}
+
+func repositoryRunStatsQuery(repository typedef.Repository) (string, []interface{}) {
+	key := repository.Key()
+	query := `
+		SELECT id, repo_key, start_time, end_time, status, error_message
+		FROM executions WHERE repo_key = ?
+		ORDER BY repo_key, start_time DESC, id DESC LIMIT 1`
+	args := []interface{}{key}
+	if repository.GetType() == typedef.TypeOrg || repository.GetType() == typedef.TypeUser {
+		prefix := key + "/"
+		query = `
+			SELECT id, repo_key, start_time, end_time, status, error_message
+			FROM executions WHERE repo_key >= ? AND repo_key < ?
+			ORDER BY repo_key, start_time DESC, id DESC`
+		args = []interface{}{prefix, key + "0"}
+	}
+	return query, args
 }
 
 func (a *API) CancelJob(c *gin.Context) {
@@ -787,6 +806,9 @@ func (a *API) CreateRepository(c *gin.Context) {
 
 	// Append to in-memory config
 	a.config.Repository = append(a.config.Repository, repo)
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	// Persist config; tolerate save failures with a warning
 	msg := ""
@@ -894,6 +916,9 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	}
 
 	a.config.Repository[idx] = updated
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	msg := ""
 	if err := config.Save(); err != nil {
@@ -930,6 +955,9 @@ func (a *API) DeleteRepository(c *gin.Context) {
 
 	// Remove element at idx
 	a.config.Repository = append(a.config.Repository[:idx], a.config.Repository[idx+1:]...)
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	msg := ""
 	if err := config.Save(); err != nil {
@@ -993,6 +1021,9 @@ func (a *API) CreateStorage(c *gin.Context) {
 
 	// Append to in-memory config
 	a.config.Storage = append(a.config.Storage, storage)
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	// Persist config; tolerate save failures with a warning
 	msg := ""
@@ -1077,6 +1108,9 @@ func (a *API) UpdateStorage(c *gin.Context) {
 	}
 
 	a.config.Storage[idx] = updated
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	msg := ""
 	if err := config.Save(); err != nil {
@@ -1111,6 +1145,9 @@ func (a *API) DeleteStorage(c *gin.Context) {
 
 	// Remove element at idx
 	a.config.Storage = append(a.config.Storage[:idx], a.config.Storage[idx+1:]...)
+	if a.executor != nil {
+		a.executor.RefreshConfig(a.config)
+	}
 
 	msg := ""
 	if err := config.Save(); err != nil {

@@ -7,7 +7,9 @@ package server
 // tests, never into production binaries.
 
 import (
+	"context"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wnarutou/gitrieve/internal/config"
@@ -36,6 +38,36 @@ func (s *TestServer) Cfg() *config.Config {
 	return s.api.config
 }
 
+// SetBulkRepositoryStats replaces only the bulk enqueue-time repository-stats
+// read so tests can establish deterministic persistence/config barriers.
+func (s *TestServer) SetBulkRepositoryStats(load func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)) {
+	s.api.bulkRepositoryStats = load
+}
+
+// BulkRepositoryStatsQueryPlan returns SQLite's plan for the exact production
+// candidate-history query.
+func (s *TestServer) BulkRepositoryStatsQueryPlan(ctx context.Context, repository typedef.Repository) (string, error) {
+	query, args := repositoryRunStatsQuery(repository)
+	rows, err := s.api.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			return "", err
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(details, "\n"), nil
+}
+
 // newTestConfig returns the default config used by the test servers.
 func newTestConfig() *config.Config {
 	return &config.Config{
@@ -56,7 +88,7 @@ func NewTestServer(db *db.DB) *TestServer {
 	exec := executor.NewExecutor(log, db, cfg)
 	api := NewAPI(cfg, db, exec)
 
-	s := &TestServer{router: gin.Default()}
+	s := &TestServer{router: gin.Default(), api: api}
 	s.router.POST("/api/jobs", api.CreateJob)
 	s.router.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
@@ -75,7 +107,7 @@ func NewTestServerWithExecutor(db *db.DB, exec *executor.Executor, configs ...*c
 	}
 	api := NewAPI(cfg, db, exec)
 
-	s := &TestServer{router: gin.Default()}
+	s := &TestServer{router: gin.Default(), api: api}
 	s.router.POST("/api/jobs", api.CreateJob)
 	s.router.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	s.router.DELETE("/api/jobs/:id", api.CancelJob)
@@ -87,11 +119,16 @@ func NewTestServerWithExecutor(db *db.DB, exec *executor.Executor, configs ...*c
 
 // NewRepoTestServer creates a test server with only the repository CRUD
 // routes registered, using a fresh executor backed by testDB.
-func NewRepoTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
-	log := logger.NewLogger(testDB)
-	exec := executor.NewExecutor(log, testDB, cfg)
+func NewRepoTestServer(cfg *config.Config, testDB *db.DB, executors ...*executor.Executor) *TestServer {
+	var exec *executor.Executor
+	if len(executors) > 0 {
+		exec = executors[0]
+	} else {
+		log := logger.NewLogger(testDB)
+		exec = executor.NewExecutor(log, testDB, cfg)
+	}
 	api := NewAPI(cfg, testDB, exec)
-	s := &TestServer{router: gin.Default()}
+	s := &TestServer{router: gin.Default(), api: api}
 	s.router.GET("/api/repositories", api.GetRepositories)
 	s.router.POST("/api/repositories", api.CreateRepository)
 	// *id catch-all: identity keys are URLs containing "/" that :id cannot match.
@@ -102,11 +139,16 @@ func NewRepoTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
 
 // NewStorageTestServer creates a test server with only the storage CRUD
 // routes registered, using a fresh executor backed by testDB.
-func NewStorageTestServer(cfg *config.Config, testDB *db.DB) *TestServer {
-	log := logger.NewLogger(testDB)
-	exec := executor.NewExecutor(log, testDB, cfg)
+func NewStorageTestServer(cfg *config.Config, testDB *db.DB, executors ...*executor.Executor) *TestServer {
+	var exec *executor.Executor
+	if len(executors) > 0 {
+		exec = executors[0]
+	} else {
+		log := logger.NewLogger(testDB)
+		exec = executor.NewExecutor(log, testDB, cfg)
+	}
 	api := NewAPI(cfg, testDB, exec)
-	s := &TestServer{router: gin.Default()}
+	s := &TestServer{router: gin.Default(), api: api}
 	s.router.GET("/api/storage", api.GetStorages)
 	s.router.POST("/api/storage", api.CreateStorage)
 	s.router.PUT("/api/storage/:id", api.UpdateStorage)

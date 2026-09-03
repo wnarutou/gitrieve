@@ -60,9 +60,11 @@ type executionStore interface {
 }
 
 type Executor struct {
-	db      executionStore
-	cfg     atomic.Pointer[config.Config]
-	runners Runners
+	db             executionStore
+	runtime        atomic.Pointer[RuntimeConfigSnapshot]
+	nextGeneration atomic.Uint64
+	runners        Runners
+	expander       func(typedef.Repository) []typedef.Repository
 
 	queueMu           sync.Mutex
 	queueCond         *sync.Cond
@@ -81,11 +83,88 @@ type Executor struct {
 	workers           sync.WaitGroup
 }
 
+// RuntimeConfigSnapshot is an immutable Executor configuration generation.
+// Callers can inspect cloned repository values but cannot mutate the published
+// configuration or its normalized-key index.
+type RuntimeConfigSnapshot struct {
+	config       *config.Config
+	generation   uint64
+	repositories map[string]typedef.Repository
+}
+
+func buildRuntimeConfigSnapshot(cfg *config.Config) *RuntimeConfigSnapshot {
+	cloned := cloneRuntimeConfig(cfg)
+	indexed := make(map[string]typedef.Repository)
+	if cloned != nil {
+		indexed = make(map[string]typedef.Repository, len(cloned.Repository))
+		for _, repository := range cloned.Repository {
+			if key := repository.Key(); key != "" {
+				indexed[key] = repository
+			}
+		}
+	}
+	return &RuntimeConfigSnapshot{config: cloned, repositories: indexed}
+}
+
+func cloneRuntimeConfig(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.Repository = make([]typedef.Repository, len(cfg.Repository))
+	for i, repository := range cfg.Repository {
+		cloned.Repository[i] = cloneRuntimeRepository(repository)
+	}
+	cloned.Storage = append([]typedef.MultiStorage(nil), cfg.Storage...)
+	return &cloned
+}
+
+func cloneRuntimeRepository(repository typedef.Repository) typedef.Repository {
+	repository.Storage = append([]string(nil), repository.Storage...)
+	return repository
+}
+
+func (s *RuntimeConfigSnapshot) Generation() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.generation
+}
+
+func (s *RuntimeConfigSnapshot) Repository(repositoryKey string) (typedef.Repository, bool) {
+	if s == nil {
+		return typedef.Repository{}, false
+	}
+	repository, found := s.repositories[typedef.NormalizeURL(repositoryKey)]
+	if !found {
+		return typedef.Repository{}, false
+	}
+	return cloneRuntimeRepository(repository), true
+}
+
+func (s *RuntimeConfigSnapshot) Repositories() []typedef.Repository {
+	if s == nil || s.config == nil {
+		return nil
+	}
+	repositories := make([]typedef.Repository, len(s.config.Repository))
+	for i, repository := range s.config.Repository {
+		repositories[i] = cloneRuntimeRepository(repository)
+	}
+	return repositories
+}
+
+func (s *RuntimeConfigSnapshot) SyncHealthThresholds() (time.Duration, time.Duration) {
+	if s == nil || s.config == nil {
+		return 0, 0
+	}
+	return s.config.SyncOverdueGrace, s.config.SyncStuckThreshold
+}
+
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
 	return NewExecutorWithRunners(logger, db, cfg, defaultRunners())
 }
 
-func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config, runners Runners) *Executor {
+func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config, runners Runners, expanders ...func(typedef.Repository) []typedef.Repository) *Executor {
 	// Side effect: re-points the package-global ui sink so executor log output
 	// is persisted to the DB. Only the server process constructs an Executor;
 	// the CLI and daemon never do, so their stdout-only ui output is unchanged.
@@ -101,8 +180,13 @@ func NewExecutorWithRunners(logger *logger.Logger, db *db.DB, cfg *config.Config
 		dispatcherDone: make(chan struct{}),
 		closeDone:      make(chan struct{}),
 	}
+	if len(expanders) > 0 {
+		exec.expander = expanders[0]
+	}
 	exec.queueCond = sync.NewCond(&exec.queueMu)
-	exec.cfg.Store(cfg)
+	runtime := buildRuntimeConfigSnapshot(cfg)
+	runtime.generation = exec.nextGeneration.Add(1)
+	exec.runtime.Store(runtime)
 	return exec
 }
 
@@ -117,24 +201,27 @@ func concurrencyLimit(cfg *config.Config) int {
 	return int(cfg.ConcurrencyNum)
 }
 
-// RefreshConfig repoints the executor at a new config instance. Called by the
-// server's config-reload endpoint after the config file is re-read. e.cfg is an
-// atomic pointer: concurrent reads (ExecuteJob's repository lookup and the
-// async executeAsync goroutine's storage lookup) observe either the old or the
-// new config in its entirety, never a torn read, so this is safe to call while
-// jobs are running.
+// RefreshConfig defensively clones and indexes cfg before atomically publishing
+// one immutable runtime generation.
 func (e *Executor) RefreshConfig(cfg *config.Config) {
+	runtime := buildRuntimeConfigSnapshot(cfg)
 	e.queueMu.Lock()
-	e.cfg.Store(cfg)
-	e.limit = concurrencyLimit(cfg)
+	runtime.generation = e.nextGeneration.Add(1)
+	e.limit = concurrencyLimit(runtime.config)
+	e.runtime.Store(runtime)
 	e.queueCond.Broadcast()
 	e.queueMu.Unlock()
+}
+
+func (e *Executor) RuntimeConfigSnapshot() *RuntimeConfigSnapshot {
+	return e.runtime.Load()
 }
 
 // ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
 var ErrRepositoryNotFound = errors.New("repository not found in configuration")
 var ErrRepositoryActive = errors.New("repository is already active")
 var ErrExecutorClosed = errors.New("executor is closed")
+var ErrConfigGenerationChanged = errors.New("executor configuration generation changed")
 
 // expandRepos 是把 user/org 条目展开为具体仓库的 seam：生产用 repository.Expand，
 // 测试注入 fake，避免真实 GitHub 调用。
@@ -144,21 +231,26 @@ var expandRepos = repository.Expand
 // 一条 execution 并返回单元素 jobID；type=user/org 先在任务内展开为具体仓库，
 // 每个具体仓库独立执行（各自 jobID / execution / 日志流 / 可取消）。
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
-	var repo typedef.Repository
-	found := false
-	if cfg := e.cfg.Load(); cfg != nil {
-		for _, r := range cfg.Repository {
-			if r.Matches(repoKey) {
-				repo = r
-				found = true
-				break
-			}
-		}
+	return e.executeJobFromSnapshot(e.runtime.Load(), repoKey)
+}
+
+func (e *Executor) ExecuteJobAtGeneration(repoKey string, generation uint64) ([]string, error) {
+	runtime := e.runtime.Load()
+	if runtime == nil || runtime.generation != generation {
+		return nil, ErrConfigGenerationChanged
 	}
+	return e.executeJobFromSnapshot(runtime, repoKey)
+}
+
+func (e *Executor) executeJobFromSnapshot(runtime *RuntimeConfigSnapshot, repoKey string) ([]string, error) {
+	repo, found := runtime.Repository(repoKey)
 	if !found {
 		return nil, ErrRepositoryNotFound
 	}
 
+	if e.expander != nil {
+		return e.submitBatch(e.expander(repo))
+	}
 	return e.submitBatch(expandRepos(repo))
 }
 
@@ -394,9 +486,9 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 
 	// Get storages
 	var storages []typedef.MultiStorage
-	if cfg := e.cfg.Load(); cfg != nil {
+	if runtime := e.runtime.Load(); runtime != nil && runtime.config != nil {
 		for _, storageName := range job.Storage {
-			for _, s := range cfg.Storage {
+			for _, s := range runtime.config.Storage {
 				if s.Name == storageName {
 					storages = append(storages, typedef.MultiStorage{
 						Storage: typedef.Storage{

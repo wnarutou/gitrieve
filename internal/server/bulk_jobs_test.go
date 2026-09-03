@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -71,7 +72,7 @@ func (r *bulkBlockingRunner) close() {
 	r.releaseOnce.Do(func() { close(r.release) })
 }
 
-func newBulkServer(t *testing.T, cfg *config.Config, runner *bulkBlockingRunner) (*db.DB, *executor.Executor, http.Handler) {
+func newBulkServer(t *testing.T, cfg *config.Config, runner *bulkBlockingRunner) (*db.DB, *executor.Executor, *server.TestServer) {
 	t.Helper()
 	testDB, err := db.Initialize(":memory:")
 	require.NoError(t, err)
@@ -114,6 +115,16 @@ func executionCount(t *testing.T, testDB *db.DB) int {
 	var count int
 	require.NoError(t, testDB.QueryRow(`SELECT COUNT(*) FROM executions`).Scan(&count))
 	return count
+}
+
+func serveJSON(t *testing.T, handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	return resp
 }
 
 func TestBulkExpectedCountConflictHasNoSideEffectsAndOnlyRetryableRepositoriesQueue(t *testing.T) {
@@ -267,6 +278,374 @@ func TestBulkReportsPartialResultsAndRechecksEligibilityAtEnqueueTime(t *testing
 	}
 	require.NoError(t, rows.Err())
 	require.Equal(t, []string{"github.com/bulk/alpha", "github.com/bulk/echo"}, newlyQueued)
+}
+
+func TestBulkDoesNotEnqueueAcrossRuntimeConfigGenerations(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/bulk/candidate"}}}
+	runner := newBulkBlockingRunner(1)
+	testDB, exec, handler := newBulkServer(t, cfg, runner)
+	insertBulkExecution(t, testDB, "fixture-candidate", "github.com/bulk/candidate", "failed", now)
+
+	recheckEntered := make(chan struct{})
+	recheckRelease := make(chan struct{})
+	handler.SetBulkRepositoryStats(func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		close(recheckEntered)
+		<-recheckRelease
+		return map[string]db.RepositoryRunStats{
+			"github.com/bulk/candidate": {
+				LatestExecutionID: "fixture-candidate",
+				LatestStatus:      "failed",
+				LatestStart:       now,
+				TotalRuns:         1,
+			},
+		}, nil
+	})
+
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/jobs/bulk", bytes.NewBufferString(
+			`{"selector":{"search":"candidate"},"expected_count":1}`,
+		))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		responseReady <- resp
+	}()
+	<-recheckEntered
+	exec.RefreshConfig(&config.Config{Repository: []typedef.Repository{{Name: "replacement", URL: "github.com/bulk/replacement"}}})
+	close(recheckRelease)
+
+	resp := <-responseReady
+	var result bulkResponse
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &result))
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Equal(t, 1, result.Data.NoLongerEligible)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 1, executionCount(t, testDB))
+}
+
+func TestRepositoryCRUDPublishesExecutorRuntimeSnapshots(t *testing.T) {
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "old", URL: "github.com/config/old"},
+		{Name: "remove", URL: "github.com/config/remove"},
+	}}
+	runner := newBulkBlockingRunner(1)
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, executor.Runners{Code: runner.run})
+	t.Cleanup(func() {
+		runner.close()
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	handler := server.NewRepoTestServer(cfg, testDB, exec)
+	generation := exec.RuntimeConfigSnapshot().Generation()
+
+	serveJSON(t, handler, http.MethodPost, "/api/repositories", `{"Name":"created","URL":"github.com/config/created"}`)
+	snapshot := exec.RuntimeConfigSnapshot()
+	require.Greater(t, snapshot.Generation(), generation)
+	_, found := snapshot.Repository("github.com/config/created")
+	require.True(t, found)
+	generation = snapshot.Generation()
+
+	serveJSON(t, handler, http.MethodPut, "/api/repositories/github.com/config/old", `{"URL":"github.com/config/updated"}`)
+	snapshot = exec.RuntimeConfigSnapshot()
+	require.Greater(t, snapshot.Generation(), generation)
+	_, found = snapshot.Repository("github.com/config/old")
+	require.False(t, found)
+	_, found = snapshot.Repository("github.com/config/updated")
+	require.True(t, found)
+	generation = snapshot.Generation()
+
+	serveJSON(t, handler, http.MethodDelete, "/api/repositories/github.com/config/remove", "")
+	snapshot = exec.RuntimeConfigSnapshot()
+	require.Greater(t, snapshot.Generation(), generation)
+	_, found = snapshot.Repository("github.com/config/remove")
+	require.False(t, found)
+}
+
+func TestStorageCRUDPublishesExecutorRuntimeSnapshots(t *testing.T) {
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "first", URL: "github.com/config/first", Storage: []string{"archive"}},
+		{Name: "second", URL: "github.com/config/second", Storage: []string{"archive"}},
+		{Name: "third", URL: "github.com/config/third", Storage: []string{"archive"}},
+	}}
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	storagesSeen := make(chan []typedef.MultiStorage, 3)
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, executor.Runners{
+		Code: func(_ context.Context, _ typedef.Repository, storages []typedef.MultiStorage) error {
+			storagesSeen <- append([]typedef.MultiStorage(nil), storages...)
+			return nil
+		},
+	})
+	t.Cleanup(func() {
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	handler := server.NewStorageTestServer(cfg, testDB, exec)
+	generation := exec.RuntimeConfigSnapshot().Generation()
+
+	serveJSON(t, handler, http.MethodPost, "/api/storage", `{"Name":"archive","Type":"file","Path":"one"}`)
+	require.Greater(t, exec.RuntimeConfigSnapshot().Generation(), generation)
+	_, err = exec.ExecuteJob("github.com/config/first")
+	require.NoError(t, err)
+	require.Equal(t, "one", receiveBulkStorages(t, storagesSeen)[0].Path)
+	generation = exec.RuntimeConfigSnapshot().Generation()
+
+	serveJSON(t, handler, http.MethodPut, "/api/storage/archive", `{"Path":"two"}`)
+	require.Greater(t, exec.RuntimeConfigSnapshot().Generation(), generation)
+	_, err = exec.ExecuteJob("github.com/config/second")
+	require.NoError(t, err)
+	require.Equal(t, "two", receiveBulkStorages(t, storagesSeen)[0].Path)
+	generation = exec.RuntimeConfigSnapshot().Generation()
+
+	serveJSON(t, handler, http.MethodDelete, "/api/storage/archive", "")
+	require.Greater(t, exec.RuntimeConfigSnapshot().Generation(), generation)
+	_, err = exec.ExecuteJob("github.com/config/third")
+	require.NoError(t, err)
+	require.Empty(t, receiveBulkStorages(t, storagesSeen))
+}
+
+func TestBulkUserRetryUsesUnicodePrefixIndexAndCountsOneCandidateForMultipleExecutions(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	user := typedef.Repository{Name: "unicode user", URL: "github.com/团队", Type: typedef.TypeUser, OrgName: "团队"}
+	cfg := &config.Config{ConcurrencyNum: 2, Repository: []typedef.Repository{user}}
+	runner := newBulkBlockingRunner(2)
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, executor.Runners{Code: runner.run},
+		func(typedef.Repository) []typedef.Repository {
+			return []typedef.Repository{
+				{Name: "one", URL: "github.com/团队/one"},
+				{Name: "two", URL: "github.com/团队/two"},
+			}
+		},
+	)
+	t.Cleanup(func() {
+		runner.close()
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	handler := server.NewTestServerWithExecutor(testDB, exec, cfg)
+	insertBulkExecution(t, testDB, "fixture-unicode-member", "github.com/团队/历史", "failed", now)
+	insertBulkExecution(t, testDB, "fixture-prefix-decoy", "github.com/团队0/not-a-member", "failed", now.Add(time.Minute))
+
+	plan, err := handler.BulkRepositoryStatsQueryPlan(context.Background(), user)
+	require.NoError(t, err)
+	require.Contains(t, plan, "idx_executions_repo_start", plan)
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"unicode user"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Equal(t, 1, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Zero(t, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 4, executionCount(t, testDB), "one user candidate should create two concrete executions")
+	require.NotContains(t, resp.Body.String(), "job_ids")
+}
+
+func TestBulkCancellationAfterRecheckStopsBeforeEnqueueAndAccountsRemainder(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "one", URL: "github.com/cancel/one"},
+		{Name: "two", URL: "github.com/cancel/two"},
+		{Name: "three", URL: "github.com/cancel/three"},
+	}}
+	runner := newBulkBlockingRunner(3)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	for _, name := range []string{"one", "two", "three"} {
+		insertBulkExecution(t, testDB, "fixture-cancel-"+name, "github.com/cancel/"+name, "failed", now)
+	}
+
+	recheckEntered := make(chan struct{})
+	recheckRelease := make(chan struct{})
+	var rechecks atomic.Int32
+	handler.SetBulkRepositoryStats(func(_ context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		if rechecks.Add(1) == 1 {
+			close(recheckEntered)
+			<-recheckRelease
+		}
+		return map[string]db.RepositoryRunStats{
+			repository.Key(): {
+				LatestExecutionID: "fixture",
+				LatestStatus:      "failed",
+				LatestStart:       now,
+				TotalRuns:         1,
+			},
+		}, nil
+	})
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/jobs/bulk", bytes.NewBufferString(
+			`{"selector":{"search":"cancel"},"expected_count":3}`,
+		)).WithContext(requestContext)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		responseReady <- resp
+	}()
+	<-recheckEntered
+	cancel()
+	close(recheckRelease)
+
+	resp := <-responseReady
+	var result bulkResponse
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &result))
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, int32(1), rechecks.Load(), "bulk continued rechecking after cancellation")
+	require.Equal(t, 3, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Equal(t, 3, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 3, executionCount(t, testDB))
+}
+
+func TestBulkContextCancelledRecheckStopsAndAccountsRemainderOnce(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "one", URL: "github.com/recheck/one"},
+		{Name: "two", URL: "github.com/recheck/two"},
+	}}
+	runner := newBulkBlockingRunner(2)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	for _, name := range []string{"one", "two"} {
+		insertBulkExecution(t, testDB, "fixture-recheck-"+name, "github.com/recheck/"+name, "failed", now)
+	}
+	var rechecks atomic.Int32
+	handler.SetBulkRepositoryStats(func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		rechecks.Add(1)
+		return nil, context.Canceled
+	})
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"recheck"},"expected_count":2}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, int32(1), rechecks.Load(), "bulk retried after a context-cancelled database read")
+	require.Equal(t, 2, result.Data.Requested)
+	require.Equal(t, 2, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 2, executionCount(t, testDB))
+}
+
+func TestBulkCountsRepositoryThatBecomesActiveAfterGuardAsSkipped(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/race/active"}}}
+	runner := newBulkBlockingRunner(1)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	insertBulkExecution(t, testDB, "fixture-race-failed", "github.com/race/active", "failed", now)
+	handler.SetBulkRepositoryStats(func(_ context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		insertBulkExecution(t, testDB, "became-active-after-guard", repository.Key(), "pending", now.Add(-time.Hour))
+		return map[string]db.RepositoryRunStats{
+			repository.Key(): {
+				LatestExecutionID: "fixture-race-failed",
+				LatestStatus:      "failed",
+				LatestStart:       now,
+				TotalRuns:         2,
+			},
+		}, nil
+	})
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"race"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Equal(t, 1, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Zero(t, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 2, executionCount(t, testDB))
+}
+
+func TestBulkCountsClosedExecutorAsFailedWithoutAbortingResponse(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/closed/candidate"}}}
+	runner := newBulkBlockingRunner(1)
+	testDB, exec, handler := newBulkServer(t, cfg, runner)
+	insertBulkExecution(t, testDB, "fixture-closed", "github.com/closed/candidate", "failed", now)
+	require.NoError(t, exec.Close())
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"closed"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Equal(t, 1, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 1, executionCount(t, testDB))
+}
+
+func TestBulkContinuesAfterOrdinaryRecheckDatabaseFailure(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{ConcurrencyNum: 1, Repository: []typedef.Repository{
+		{Name: "alpha", URL: "github.com/db-failure/alpha"},
+		{Name: "bravo", URL: "github.com/db-failure/bravo"},
+	}}
+	runner := newBulkBlockingRunner(1)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	for _, name := range []string{"alpha", "bravo"} {
+		insertBulkExecution(t, testDB, "fixture-db-failure-"+name, "github.com/db-failure/"+name, "failed", now)
+	}
+	handler.SetBulkRepositoryStats(func(_ context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		if repository.Key() == "github.com/db-failure/alpha" {
+			return nil, errors.New("forced recheck read failure")
+		}
+		return map[string]db.RepositoryRunStats{
+			repository.Key(): {
+				LatestExecutionID: "fixture-db-failure-bravo",
+				LatestStatus:      "failed",
+				LatestStart:       now,
+				TotalRuns:         1,
+			},
+		}, nil
+	})
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"db-failure"},"expected_count":2}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 2, result.Data.Requested)
+	require.Equal(t, 1, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Equal(t, 1, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 3, executionCount(t, testDB))
+}
+
+func TestBulkReturnsServerErrorWhenExecutorIsUnavailable(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/nil/candidate"}}}
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
+	insertBulkExecution(t, testDB, "fixture-nil", "github.com/nil/candidate", "failed", now)
+	handler := server.NewTestServerWithExecutor(testDB, nil, cfg)
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"nil"},"expected_count":1}`)
+	require.Equal(t, http.StatusInternalServerError, resp.Code, resp.Body.String())
+	require.Equal(t, http.StatusInternalServerError, result.Code)
+	require.Equal(t, 1, executionCount(t, testDB))
+}
+
+func receiveBulkStorages(t *testing.T, calls <-chan []typedef.MultiStorage) []typedef.MultiStorage {
+	t.Helper()
+	select {
+	case storages := <-calls:
+		return storages
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor runner did not receive storage configuration")
+		return nil
+	}
 }
 
 func TestBulkUsesExecutorConcurrencyLimit(t *testing.T) {

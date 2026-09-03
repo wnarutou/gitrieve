@@ -771,10 +771,11 @@ func TestExecuteJobCreatesRecord(t *testing.T) {
 }
 
 func TestExecuteJobUnknownRepository(t *testing.T) {
-	exec, _ := newTestExecutor(t)
+	exec, testDB := newTestExecutor(t)
 
 	_, err := exec.ExecuteJob("does-not-exist")
-	assert.Error(t, err)
+	require.ErrorIs(t, err, ErrRepositoryNotFound)
+	require.Empty(t, executionStatusCounts(t, testDB))
 }
 
 func TestCancelNonRunningJob(t *testing.T) {
@@ -800,9 +801,9 @@ func TestExecuteJobWritesRepoKey(t *testing.T) {
 
 func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 	exec, testDB := newTestExecutor(t)
-	exec.cfg.Load().Repository = []typedef.Repository{
+	exec.RefreshConfig(&config.Config{Repository: []typedef.Repository{
 		{Name: "acme", URL: "https://github.com/acme", Type: typedef.TypeOrg, OrgName: "acme"},
-	}
+	}})
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
@@ -839,6 +840,67 @@ func TestRefreshConfigRepointsExecutor(t *testing.T) {
 	require.Error(t, err)
 
 	jobIDs, err := exec.ExecuteJob("github.com/other/repo")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestRuntimeConfigSnapshotDefensivelyCopiesAndIndexesRepositories(t *testing.T) {
+	cfg := &config.Config{SyncOverdueGrace: time.Minute, SyncStuckThreshold: time.Hour, Repository: []typedef.Repository{{
+		Name:    "original",
+		URL:     "https://github.com/acme/original.git",
+		Storage: []string{"archive"},
+	}}}
+	exec, _ := newTestExecutorForConfig(t, cfg, noOpRunners())
+
+	snapshot := exec.RuntimeConfigSnapshot()
+	cfg.Repository[0].URL = "github.com/acme/changed"
+	cfg.Repository[0].Storage[0] = "changed"
+	cfg.SyncOverdueGrace = 2 * time.Minute
+	cfg.SyncStuckThreshold = 2 * time.Hour
+
+	repository, found := snapshot.Repository("github.com/acme/original")
+	require.True(t, found)
+	require.Equal(t, "https://github.com/acme/original.git", repository.URL)
+	require.Equal(t, []string{"archive"}, repository.Storage)
+	repository.Storage[0] = "caller mutation"
+	repositories := snapshot.Repositories()
+	repositories[0].URL = "caller mutation"
+
+	repository, found = exec.RuntimeConfigSnapshot().Repository("https://github.com/acme/original")
+	require.True(t, found)
+	require.Equal(t, "https://github.com/acme/original.git", repository.URL)
+	require.Equal(t, []string{"archive"}, repository.Storage)
+	overdueGrace, stuckThreshold := exec.RuntimeConfigSnapshot().SyncHealthThresholds()
+	require.Equal(t, time.Minute, overdueGrace)
+	require.Equal(t, time.Hour, stuckThreshold)
+	_, found = exec.RuntimeConfigSnapshot().Repository("github.com/acme/changed")
+	require.False(t, found)
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme/original")
+	require.NoError(t, err)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestExecuteJobAtGenerationRejectsConfigPublishedAfterRecheck(t *testing.T) {
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name: "old",
+		URL:  "github.com/acme/old",
+	}, noOpRunners())
+	checked := exec.RuntimeConfigSnapshot()
+	exec.RefreshConfig(&config.Config{Repository: []typedef.Repository{{
+		Name: "new",
+		URL:  "github.com/acme/new",
+	}}})
+
+	jobIDs, err := exec.ExecuteJobAtGeneration("github.com/acme/old", checked.Generation())
+	require.ErrorIs(t, err, ErrConfigGenerationChanged)
+	require.Empty(t, jobIDs)
+	require.Empty(t, executionStatusCounts(t, testDB))
+
+	current := exec.RuntimeConfigSnapshot()
+	require.Greater(t, current.Generation(), checked.Generation())
+	jobIDs, err = exec.ExecuteJobAtGeneration("github.com/acme/new", current.Generation())
 	require.NoError(t, err)
 	require.Len(t, jobIDs, 1)
 	waitForJob(t, exec, jobIDs[0])
