@@ -39,10 +39,11 @@ type JobContext struct {
 }
 
 type queuedJob struct {
-	id   string
-	repo typedef.Repository
-	ctx  context.Context
-	plan []component
+	id       string
+	repo     typedef.Repository
+	storages []typedef.MultiStorage
+	ctx      context.Context
+	plan     []component
 }
 
 type preparedJob struct {
@@ -153,6 +154,14 @@ func (s *RuntimeConfigSnapshot) Repositories() []typedef.Repository {
 	return repositories
 }
 
+// Config returns a defensive copy of this immutable runtime generation.
+func (s *RuntimeConfigSnapshot) Config() *config.Config {
+	if s == nil {
+		return nil
+	}
+	return cloneRuntimeConfig(s.config)
+}
+
 func (s *RuntimeConfigSnapshot) SyncHealthThresholds() (time.Duration, time.Duration) {
 	if s == nil || s.config == nil {
 		return 0, 0
@@ -231,39 +240,52 @@ var expandRepos = repository.Expand
 // 一条 execution 并返回单元素 jobID；type=user/org 先在任务内展开为具体仓库，
 // 每个具体仓库独立执行（各自 jobID / execution / 日志流 / 可取消）。
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
-	return e.executeJobFromSnapshot(e.runtime.Load(), repoKey)
+	return e.executeJobFromSnapshot(context.Background(), e.runtime.Load(), repoKey, nil)
 }
 
 func (e *Executor) ExecuteJobAtGeneration(repoKey string, generation uint64) ([]string, error) {
+	return e.ExecuteJobAtGenerationContext(context.Background(), repoKey, generation)
+}
+
+// ExecuteJobAtGenerationContext admits a generation-bound job using ctx for
+// preflight and persistence. Once published, the job owns an independent
+// cancellation context and is not tied to the HTTP request lifetime.
+func (e *Executor) ExecuteJobAtGenerationContext(ctx context.Context, repoKey string, generation uint64) ([]string, error) {
 	runtime := e.runtime.Load()
 	if runtime == nil || runtime.generation != generation {
 		return nil, ErrConfigGenerationChanged
 	}
-	return e.executeJobFromSnapshot(runtime, repoKey)
+	return e.executeJobFromSnapshot(ctx, runtime, repoKey, &generation)
 }
 
-func (e *Executor) executeJobFromSnapshot(runtime *RuntimeConfigSnapshot, repoKey string) ([]string, error) {
+func (e *Executor) executeJobFromSnapshot(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, repoKey string, expectedGeneration *uint64) ([]string, error) {
 	repo, found := runtime.Repository(repoKey)
 	if !found {
 		return nil, ErrRepositoryNotFound
 	}
 
 	if e.expander != nil {
-		return e.submitBatch(e.expander(repo))
+		return e.submitBatch(admissionCtx, runtime, e.expander(repo), expectedGeneration)
 	}
-	return e.submitBatch(expandRepos(repo))
+	return e.submitBatch(admissionCtx, runtime, expandRepos(repo), expectedGeneration)
 }
 
 // submitBatch reserves, preflights, and persists every concrete repository
 // before atomically publishing any of them to the dispatcher.
-func (e *Executor) submitBatch(repositories []typedef.Repository) ([]string, error) {
+func (e *Executor) submitBatch(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, repositories []typedef.Repository, expectedGeneration *uint64) ([]string, error) {
 	prepared := make([]*preparedJob, len(repositories))
 	for i, repo := range repositories {
 		ctx, cancel := context.WithCancel(context.Background())
 		jobID := uuid.New().String()
 		plan := componentPlan(repo, e.runners)
 		prepared[i] = &preparedJob{
-			queued: &queuedJob{id: jobID, repo: repo, ctx: ctx, plan: plan},
+			queued: &queuedJob{
+				id:       jobID,
+				repo:     repo,
+				storages: runtime.resolveStorages(repo.Storage),
+				ctx:      ctx,
+				plan:     plan,
+			},
 			jobContext: &JobContext{
 				Ctx:        ctx,
 				CancelFunc: cancel,
@@ -273,22 +295,31 @@ func (e *Executor) submitBatch(repositories []typedef.Repository) ([]string, err
 		}
 	}
 
-	if err := e.reserveBatch(prepared); err != nil {
+	if err := e.reserveBatch(admissionCtx, prepared, expectedGeneration); err != nil {
 		for _, job := range prepared {
 			job.jobContext.CancelFunc()
 		}
 		return nil, err
 	}
-	if err := e.preflightBatch(prepared); err != nil {
+	if err := e.preflightBatch(admissionCtx, prepared); err != nil {
 		e.releaseBatch(prepared, nil)
 		return nil, err
 	}
-	if err := e.persistBatch(prepared); err != nil {
+	if err := e.persistBatch(admissionCtx, prepared); err != nil {
 		e.releaseBatch(prepared, nil)
 		return nil, err
 	}
 
 	e.queueMu.Lock()
+	if err := admissionCtx.Err(); err != nil {
+		e.queueMu.Unlock()
+		discardErr := e.discardBatch(prepared)
+		e.releaseBatch(prepared, discardErr)
+		if discardErr != nil {
+			return nil, errors.Join(err, discardErr)
+		}
+		return nil, err
+	}
 	if e.closed {
 		e.queueMu.Unlock()
 		discardErr := e.discardBatch(prepared)
@@ -313,9 +344,34 @@ func (e *Executor) submitBatch(repositories []typedef.Repository) ([]string, err
 	return jobIDs, nil
 }
 
-func (e *Executor) reserveBatch(prepared []*preparedJob) error {
+func (s *RuntimeConfigSnapshot) resolveStorages(names []string) []typedef.MultiStorage {
+	if s == nil || s.config == nil || len(names) == 0 {
+		return nil
+	}
+	storages := make([]typedef.MultiStorage, 0, len(names))
+	for _, name := range names {
+		for _, storage := range s.config.Storage {
+			if storage.Name == name {
+				storages = append(storages, storage)
+				break
+			}
+		}
+	}
+	return storages
+}
+
+func (e *Executor) reserveBatch(ctx context.Context, prepared []*preparedJob, expectedGeneration *uint64) error {
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if expectedGeneration != nil {
+		runtime := e.runtime.Load()
+		if runtime == nil || runtime.generation != *expectedGeneration {
+			return ErrConfigGenerationChanged
+		}
+	}
 	if e.closed {
 		return ErrExecutorClosed
 	}
@@ -337,9 +393,9 @@ func (e *Executor) reserveBatch(prepared []*preparedJob) error {
 	return nil
 }
 
-func (e *Executor) preflightBatch(prepared []*preparedJob) error {
+func (e *Executor) preflightBatch(ctx context.Context, prepared []*preparedJob) error {
 	for _, job := range prepared {
-		active, err := e.db.ActiveExecutionExists(context.Background(), job.jobContext.repoKey)
+		active, err := e.db.ActiveExecutionExists(ctx, job.jobContext.repoKey)
 		if err != nil {
 			return fmt.Errorf("check active execution: %w", err)
 		}
@@ -350,7 +406,7 @@ func (e *Executor) preflightBatch(prepared []*preparedJob) error {
 	return nil
 }
 
-func (e *Executor) persistBatch(prepared []*preparedJob) error {
+func (e *Executor) persistBatch(ctx context.Context, prepared []*preparedJob) error {
 	executions := make([]db.PendingExecution, len(prepared))
 	for i, job := range prepared {
 		componentNames := make([]db.ComponentName, len(job.queued.plan))
@@ -365,7 +421,7 @@ func (e *Executor) persistBatch(prepared []*preparedJob) error {
 			Components: componentNames,
 		}
 	}
-	if err := e.db.CreatePendingExecutions(context.Background(), executions); err != nil {
+	if err := e.db.CreatePendingExecutions(ctx, executions); err != nil {
 		return fmt.Errorf("create pending execution batch: %w", err)
 	}
 	return nil
@@ -437,7 +493,7 @@ func (e *Executor) runAdmitted(job *queuedJob) {
 		e.finishAdmissionFailure(job, err)
 		return
 	}
-	e.executeAsync(job.ctx, job.id, job.repo, job.plan)
+	e.executeAsync(job.ctx, job.id, job.repo, job.storages, job.plan)
 }
 
 func (e *Executor) finishAdmissionFailure(job *queuedJob, admissionErr error) {
@@ -469,7 +525,7 @@ func (e *Executor) completeRunningJob(jobID, repoKey string) {
 	e.queueMu.Unlock()
 }
 
-func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository, plan []component) {
+func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.Repository, storages []typedef.MultiStorage, plan []component) {
 	unbind := ui.Bind(jobID, job.Name)
 	defer unbind()
 
@@ -482,25 +538,6 @@ func (e *Executor) executeAsync(ctx context.Context, jobID string, job typedef.R
 		// does not flush before this row is committed and drop it.
 		e.finishCancellation(jobID, plan, 0, ctx.Err())
 		return
-	}
-
-	// Get storages
-	var storages []typedef.MultiStorage
-	if runtime := e.runtime.Load(); runtime != nil && runtime.config != nil {
-		for _, storageName := range job.Storage {
-			for _, s := range runtime.config.Storage {
-				if s.Name == storageName {
-					storages = append(storages, typedef.MultiStorage{
-						Storage: typedef.Storage{
-							Name: s.Name,
-							Type: s.Type,
-							Path: s.Path,
-						},
-					})
-					break
-				}
-			}
-		}
 	}
 
 	failures := make([]string, 0)

@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -190,4 +192,80 @@ func TestValidateIdentity(t *testing.T) {
 
 	// 空仓库列表 → 通过。
 	require.NoError(t, validateIdentity(&Config{}))
+}
+
+func TestSetInsPublishesDefensiveImmutableSnapshots(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() {
+		if previous == nil {
+			SetIns(&Config{})
+			return
+		}
+		SetIns(previous)
+	})
+
+	input := &Config{
+		Repository: []typedef.Repository{{
+			Name:    "original",
+			URL:     "github.com/acme/original",
+			Storage: []string{"archive"},
+		}},
+		Storage: []typedef.MultiStorage{{Storage: typedef.Storage{Name: "archive", Type: "file", Path: "old"}}},
+	}
+	SetIns(input)
+	input.Repository[0].Name = "input mutation"
+	input.Repository[0].Storage[0] = "input mutation"
+	input.Storage[0].Path = "input mutation"
+
+	callerSnapshot := GetIns()
+	callerSnapshot.Repository[0].Name = "caller mutation"
+	callerSnapshot.Repository[0].Storage[0] = "caller mutation"
+	callerSnapshot.Storage[0].Path = "caller mutation"
+
+	actual := GetIns()
+	require.Equal(t, "original", actual.Repository[0].Name)
+	require.Equal(t, []string{"archive"}, actual.Repository[0].Storage)
+	require.Equal(t, "old", actual.Storage[0].Path)
+}
+
+func TestConcurrentConfigPublicationAndSnapshotReads(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() { SetIns(previous) })
+	configs := []*Config{
+		{Repository: []typedef.Repository{{Name: "one", URL: "github.com/acme/one"}}, SyncOverdueGrace: time.Minute},
+		{Repository: []typedef.Repository{{Name: "two", URL: "github.com/acme/two"}}, SyncOverdueGrace: 2 * time.Minute},
+	}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	var incoherent atomic.Bool
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 1000; index++ {
+			SetIns(configs[index%len(configs)])
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 1000; index++ {
+			snapshot := GetIns()
+			if snapshot == nil || len(snapshot.Repository) == 0 {
+				continue
+			}
+			switch snapshot.Repository[0].Name {
+			case "one":
+				incoherent.CompareAndSwap(false, snapshot.SyncOverdueGrace != time.Minute)
+			case "two":
+				incoherent.CompareAndSwap(false, snapshot.SyncOverdueGrace != 2*time.Minute)
+			default:
+				incoherent.Store(true)
+			}
+			_ = GetSyncOverdueGrace()
+		}
+	}()
+	close(start)
+	workers.Wait()
+	require.False(t, incoherent.Load(), "observed partial configuration generation")
 }

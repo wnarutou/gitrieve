@@ -108,8 +108,10 @@ func TestReloadAfterSave(t *testing.T) {
 	writeTmpConfig(t, "githubToken: aaa\nrepository:\n  - name: one\n    url: github.com/one/repo\n")
 	require.Equal(t, "aaa", GetIns().GitHubToken)
 
-	// Simulate applyImport mutating the in-memory config, then persisting.
-	GetIns().GitHubToken = "zzz"
+	// Simulate applyImport publishing a copy-on-write config, then persisting.
+	next := GetIns()
+	next.GitHubToken = "zzz"
+	SetIns(next)
 	require.NoError(t, Save())
 
 	// The operator restores/edits config.yaml on disk to something else.

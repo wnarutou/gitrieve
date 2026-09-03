@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -36,29 +38,33 @@ type Config struct {
 var Path string
 
 var vp *viper.Viper
-var ins *Config
+var vpMu sync.Mutex
+var ins atomic.Pointer[Config]
 
 func Init() {
-	vp = viper.New()
-	vp.SetConfigFile(Path)
-	err := vp.ReadInConfig()
+	nextViper := viper.New()
+	nextViper.SetConfigFile(Path)
+	err := nextViper.ReadInConfig()
 	if err != nil {
 		ui.ErrorfExit("Error reading config file, %s", err)
 	}
-	err = vp.Unmarshal(&ins)
+	var next Config
+	err = nextViper.Unmarshal(&next)
 	if err != nil {
 		ui.ErrorfExit("Error unmarshalling config file, %s", err)
 	}
-	seedDefaults(ins)
-	if !vp.IsSet("githubScheduleJitter") {
-		ins.GitHubScheduleJitter = 30 * time.Second
+	seedDefaults(&next)
+	if !nextViper.IsSet("githubScheduleJitter") {
+		next.GitHubScheduleJitter = 30 * time.Second
 	}
-	githubapi.Configure(GetGitHubAPIConfig())
-	// 启动校验：每个仓库条目都必须有可用身份。身份键为空意味着永远无法被
-	// 匹配或执行，直接拒绝启动。
-	if err := validateIdentity(ins); err != nil {
+	// Every repository entry must have an identity before publication.
+	if err := validateIdentity(&next); err != nil {
 		ui.ErrorfExit("Invalid configuration: %s", err)
 	}
+	vpMu.Lock()
+	vp = nextViper
+	vpMu.Unlock()
+	SetIns(&next)
 }
 
 // seedDefaults fills zero-valued global options with their defaults. It runs in
@@ -101,16 +107,40 @@ func seedDefaults(cfg *Config) {
 	}
 }
 
+// Clone returns a deep copy suitable for copy-on-write configuration updates.
+func Clone(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.Repository = make([]typedef.Repository, len(cfg.Repository))
+	for index, repository := range cfg.Repository {
+		repository.Storage = append([]string(nil), repository.Storage...)
+		cloned.Repository[index] = repository
+	}
+	cloned.Storage = append([]typedef.MultiStorage(nil), cfg.Storage...)
+	return &cloned
+}
+
 func GetIns() *Config {
-	return ins
+	return Clone(ins.Load())
 }
 
 // SetIns replaces the package-global config instance. Used by apply/import to
 // publish a fully-built replacement so concurrent readers (job goroutines)
 // observe a complete old or complete new instance, never a torn one.
 func SetIns(cfg *Config) {
-	ins = cfg
-	githubapi.Configure(GetGitHubAPIConfig())
+	snapshot := Clone(cfg)
+	ins.Store(snapshot)
+	githubapi.Configure(gitHubAPIConfig(snapshot))
+}
+
+func currentConfig() *Config {
+	cfg := ins.Load()
+	if cfg == nil {
+		return &Config{}
+	}
+	return cfg
 }
 
 // GetViper returns the viper instance that loaded the config file. It is nil
@@ -119,12 +149,14 @@ func SetIns(cfg *Config) {
 // top-level Config struct (e.g. the `server:` settings) read from the same
 // loaded instance rather than the empty global viper singleton.
 func GetViper() *viper.Viper {
+	vpMu.Lock()
+	defer vpMu.Unlock()
 	return vp
 }
 
 func GetStorageMap() map[string]typedef.MultiStorage {
 	storageMap := make(map[string]typedef.MultiStorage)
-	for _, storage := range ins.Storage {
+	for _, storage := range currentConfig().Storage {
 		storageMap[storage.Name] = storage
 	}
 	return storageMap
@@ -134,51 +166,58 @@ func GetStorageMap() map[string]typedef.MultiStorage {
 // to 3 when the config value is zero; a negative value means "no limit". It is
 // read-only (no lazy mutation) so it is safe under concurrent workers.
 func GetReleaseNumLimit() int {
-	return ins.ReleaseNumLimit
+	return currentConfig().ReleaseNumLimit
 }
 
 // GetReleaseSizeLimit returns the max total release size to keep. Init seeds it
 // to 300000000 when the config value is zero; a negative value means "no
 // limit". It is read-only so it is safe under concurrent workers.
 func GetReleaseSizeLimit() int {
-	return ins.ReleaseSizeLimit
+	return currentConfig().ReleaseSizeLimit
 }
 
 // GetConcurrencyNum returns the max number of concurrent scheduler jobs. Init
 // seeds it to 3 when the config value is zero. It is read-only so it is safe
 // under concurrent workers.
 func GetConcurrencyNum() uint {
-	return ins.ConcurrencyNum
+	return currentConfig().ConcurrencyNum
 }
 
 // GetRetryMaxCount returns the configured max retries per API call. Init seeds
 // it to 3 when the config value is zero or negative, so this getter is
 // read-only.
 func GetRetryMaxCount() int {
-	return ins.RetryMaxCount
+	return currentConfig().RetryMaxCount
 }
 
 // GetRetryBaseDelay returns the exponential-backoff base delay. Init seeds it
 // to 5 seconds when the config value is zero or negative, so this getter is
 // read-only.
 func GetRetryBaseDelay() time.Duration {
-	return ins.RetryBaseDelay
+	return currentConfig().RetryBaseDelay
 }
 
-func GetSyncOverdueGrace() time.Duration { return ins.SyncOverdueGrace }
+func GetSyncOverdueGrace() time.Duration { return currentConfig().SyncOverdueGrace }
 
-func GetSyncStuckThreshold() time.Duration { return ins.SyncStuckThreshold }
+func GetSyncStuckThreshold() time.Duration { return currentConfig().SyncStuckThreshold }
 
-func GetGitHubAPIConcurrency() uint { return ins.GitHubAPIConcurrency }
+func GetGitHubAPIConcurrency() uint { return currentConfig().GitHubAPIConcurrency }
 
-func GetGitHubMinRequestInterval() time.Duration { return ins.GitHubMinRequestInterval }
+func GetGitHubMinRequestInterval() time.Duration { return currentConfig().GitHubMinRequestInterval }
 
-func GetGitHubLowRemainingThreshold() int { return ins.GitHubLowRemainingThreshold }
+func GetGitHubLowRemainingThreshold() int { return currentConfig().GitHubLowRemainingThreshold }
 
-func GetGitHubScheduleJitter() time.Duration { return ins.GitHubScheduleJitter }
+func GetGitHubScheduleJitter() time.Duration { return currentConfig().GitHubScheduleJitter }
 
 func GetGitHubAPIConfig() githubapi.Config {
-	return githubapi.Config{Concurrency: ins.GitHubAPIConcurrency, MinRequestInterval: ins.GitHubMinRequestInterval, LowRemainingThreshold: ins.GitHubLowRemainingThreshold}
+	return gitHubAPIConfig(currentConfig())
+}
+
+func gitHubAPIConfig(cfg *Config) githubapi.Config {
+	if cfg == nil {
+		return githubapi.Config{}
+	}
+	return githubapi.Config{Concurrency: cfg.GitHubAPIConcurrency, MinRequestInterval: cfg.GitHubMinRequestInterval, LowRemainingThreshold: cfg.GitHubLowRemainingThreshold}
 }
 
 // GetRetryConfig assembles the retry configuration used by every GitHub API
@@ -207,23 +246,26 @@ func validateIdentity(cfg *Config) error {
 
 // Save persists the current in-memory config back to the config file via viper.
 func Save() error {
+	vpMu.Lock()
+	defer vpMu.Unlock()
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}
+	cfg := currentConfig()
 	// Update the viper config with current ins values
-	vp.Set("repository", ins.Repository)
-	vp.Set("storage", ins.Storage)
-	vp.Set("githubToken", ins.GitHubToken)
-	vp.Set("cocurrencyNum", ins.ConcurrencyNum)
-	vp.Set("releaseSizeLimit", ins.ReleaseSizeLimit)
-	vp.Set("releaseNumLimit", ins.ReleaseNumLimit)
-	vp.Set("retryMaxCount", ins.RetryMaxCount)
-	vp.Set("retryBaseDelay", ins.RetryBaseDelay)
-	vp.Set("syncOverdueGrace", ins.SyncOverdueGrace)
-	vp.Set("syncStuckThreshold", ins.SyncStuckThreshold)
-	vp.Set("githubApiConcurrency", ins.GitHubAPIConcurrency)
-	vp.Set("githubMinRequestInterval", ins.GitHubMinRequestInterval)
-	vp.Set("githubLowRemainingThreshold", ins.GitHubLowRemainingThreshold)
-	vp.Set("githubScheduleJitter", ins.GitHubScheduleJitter)
+	vp.Set("repository", cfg.Repository)
+	vp.Set("storage", cfg.Storage)
+	vp.Set("githubToken", cfg.GitHubToken)
+	vp.Set("cocurrencyNum", cfg.ConcurrencyNum)
+	vp.Set("releaseSizeLimit", cfg.ReleaseSizeLimit)
+	vp.Set("releaseNumLimit", cfg.ReleaseNumLimit)
+	vp.Set("retryMaxCount", cfg.RetryMaxCount)
+	vp.Set("retryBaseDelay", cfg.RetryBaseDelay)
+	vp.Set("syncOverdueGrace", cfg.SyncOverdueGrace)
+	vp.Set("syncStuckThreshold", cfg.SyncStuckThreshold)
+	vp.Set("githubApiConcurrency", cfg.GitHubAPIConcurrency)
+	vp.Set("githubMinRequestInterval", cfg.GitHubMinRequestInterval)
+	vp.Set("githubLowRemainingThreshold", cfg.GitHubLowRemainingThreshold)
+	vp.Set("githubScheduleJitter", cfg.GitHubScheduleJitter)
 	return vp.WriteConfig()
 }

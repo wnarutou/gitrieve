@@ -567,6 +567,190 @@ func TestBulkCountsRepositoryThatBecomesActiveAfterGuardAsSkipped(t *testing.T) 
 	require.Equal(t, 2, executionCount(t, testDB))
 }
 
+func TestBulkCountsRepositoryMissingAtEnqueueAsNoLongerEligible(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/race/missing"}}}
+	runner := newBulkBlockingRunner(1)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	insertBulkExecution(t, testDB, "fixture-race-missing", "github.com/race/missing", "failed", now)
+	handler.SetBulkExecute(func(context.Context, string, uint64) ([]string, error) {
+		return nil, executor.ErrRepositoryNotFound
+	})
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"candidate"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Equal(t, 1, result.Data.NoLongerEligible)
+	require.Zero(t, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 1, executionCount(t, testDB))
+}
+
+func TestBulkCancellationDuringEnqueueStopsAndAccountsUntouchedRemainder(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{
+		{Name: "one", URL: "github.com/enqueue-cancel/one"},
+		{Name: "two", URL: "github.com/enqueue-cancel/two"},
+		{Name: "three", URL: "github.com/enqueue-cancel/three"},
+	}}
+	runner := newBulkBlockingRunner(3)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	for _, name := range []string{"one", "two", "three"} {
+		insertBulkExecution(t, testDB, "fixture-enqueue-cancel-"+name, "github.com/enqueue-cancel/"+name, "failed", now)
+	}
+
+	enqueueEntered := make(chan struct{})
+	var enqueueCalls atomic.Int32
+	handler.SetBulkExecute(func(ctx context.Context, _ string, _ uint64) ([]string, error) {
+		enqueueCalls.Add(1)
+		close(enqueueEntered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	requestContext, cancel := context.WithCancel(context.Background())
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/jobs/bulk", bytes.NewBufferString(
+			`{"selector":{"search":"enqueue-cancel"},"expected_count":3}`,
+		)).WithContext(requestContext)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		responseReady <- resp
+	}()
+	<-enqueueEntered
+	cancel()
+
+	resp := <-responseReady
+	var result bulkResponse
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &result))
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, int32(1), enqueueCalls.Load())
+	require.Equal(t, 3, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Equal(t, 3, result.Data.FailedToEnqueue)
+	require.Equal(t, result.Data.Requested, result.Data.Queued+result.Data.SkippedActive+result.Data.NoLongerEligible+result.Data.FailedToEnqueue)
+	require.Equal(t, 3, executionCount(t, testDB))
+}
+
+func TestConcurrentConfigMutationAndBulkSnapshotUseIsRaceSafe(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, `repository:
+  - name: base
+    url: github.com/race/base
+  - name: update-target
+    url: github.com/race/update-target
+  - name: delete-target
+    url: github.com/race/delete-target
+storage:
+  - name: update-target
+    type: file
+    path: old
+  - name: delete-target
+    type: file
+    path: old
+`)
+	config.Path = path
+	config.Init()
+	t.Cleanup(func() { config.Path = "" })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	cfg := config.GetIns()
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, executor.Runners{})
+	t.Cleanup(func() {
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	handler := server.NewConfigConcurrencyTestServer(cfg, testDB, exec)
+
+	requestStatus := func(method, path, body string) int {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		return resp.Code
+	}
+	importDocument, err := json.Marshal(map[string]interface{}{
+		"config": "repository:\n  - name: base-imported\n    url: github.com/race/base\n",
+	})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	failures := make(chan string, 140)
+	var workers sync.WaitGroup
+	workers.Add(4)
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 20; index++ {
+			body := fmt.Sprintf(`{"Name":"repo-%d","URL":"github.com/race/repo-%d"}`, index, index)
+			if status := requestStatus(http.MethodPost, "/api/repositories", body); status != http.StatusOK {
+				failures <- fmt.Sprintf("create repository %d returned %d", index, status)
+			}
+		}
+		crudRequests := []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPut, "/api/repositories/github.com/race/update-target", `{"Name":"updated"}`},
+			{http.MethodDelete, "/api/repositories/github.com/race/delete-target", ""},
+			{http.MethodPost, "/api/storage", `{"Name":"created-storage","Type":"file","Path":"one"}`},
+			{http.MethodPut, "/api/storage/update-target", `{"Path":"two"}`},
+			{http.MethodDelete, "/api/storage/delete-target", ""},
+		}
+		for _, request := range crudRequests {
+			if status := requestStatus(request.method, request.path, request.body); status != http.StatusOK {
+				failures <- fmt.Sprintf("%s %s returned %d", request.method, request.path, status)
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 10; index++ {
+			if status := requestStatus(http.MethodPost, "/api/config/import", string(importDocument)); status != http.StatusOK {
+				failures <- fmt.Sprintf("import %d returned %d", index, status)
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 10; index++ {
+			if status := requestStatus(http.MethodPost, "/api/config/reload", ""); status != http.StatusOK {
+				failures <- fmt.Sprintf("reload %d returned %d", index, status)
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 100; index++ {
+			if status := requestStatus(http.MethodPost, "/api/jobs/bulk", `{"selector":{},"expected_count":0}`); status != http.StatusOK {
+				failures <- fmt.Sprintf("bulk %d returned %d", index, status)
+			}
+			snapshot := handler.Cfg()
+			if snapshot == nil || len(snapshot.Repository) == 0 {
+				failures <- "observed empty API config snapshot"
+			}
+		}
+	}()
+	close(start)
+	workers.Wait()
+	close(failures)
+	for failure := range failures {
+		require.Fail(t, failure)
+	}
+}
+
 func TestBulkCountsClosedExecutorAsFailedWithoutAbortingResponse(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/closed/candidate"}}}

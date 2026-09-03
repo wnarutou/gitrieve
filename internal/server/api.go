@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,10 +21,12 @@ import (
 )
 
 type API struct {
+	configMu            sync.RWMutex
 	config              *config.Config
 	db                  *db.DB
 	executor            *executor.Executor
 	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
+	bulkExecute         func(context.Context, string, uint64) ([]string, error)
 	scheduleRefresher   ScheduleRefresher
 }
 
@@ -34,20 +37,53 @@ type ScheduleRefresher interface {
 }
 
 func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
-	api := &API{config: cfg, db: db, executor: exec}
+	initial := config.Clone(cfg)
+	if exec != nil {
+		initial = exec.RuntimeConfigSnapshot().Config()
+	}
+	api := &API{config: initial, db: db, executor: exec}
 	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
+	if exec != nil {
+		api.bulkExecute = exec.ExecuteJobAtGenerationContext
+	}
 	return api
+}
+
+func (a *API) configSnapshot() *config.Config {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	if a.executor != nil {
+		return a.executor.RuntimeConfigSnapshot().Config()
+	}
+	return config.Clone(a.config)
+}
+
+func (a *API) publishConfigLocked(next *config.Config) *config.Config {
+	published := config.Clone(next)
+	if a.executor != nil {
+		a.executor.RefreshConfig(published)
+	}
+	a.config = published
+	config.SetIns(published)
+	return config.Clone(published)
+}
+
+func (a *API) publishConfig(next *config.Config) *config.Config {
+	a.configMu.Lock()
+	published := a.publishConfigLocked(next)
+	a.configMu.Unlock()
+	return published
 }
 
 func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {
 	a.scheduleRefresher = refresher
 }
 
-func (a *API) refreshSchedules() string {
+func (a *API) refreshSchedules(cfg *config.Config) string {
 	if a.scheduleRefresher == nil {
 		return ""
 	}
-	if err := a.scheduleRefresher.RefreshSchedules(a.config); err != nil {
+	if err := a.scheduleRefresher.RefreshSchedules(config.Clone(cfg)); err != nil {
 		return "Cron schedules refreshed with errors: " + err.Error()
 	}
 	return ""
@@ -136,6 +172,7 @@ func (a *API) BulkCreateJobs(c *gin.Context) {
 
 	result := BulkCreateJobsResponse{Requested: len(confirmed)}
 	ctx := c.Request.Context()
+bulkLoop:
 	for index, candidate := range confirmed {
 		remaining := len(confirmed) - index
 		if ctx.Err() != nil {
@@ -161,10 +198,13 @@ func (a *API) BulkCreateJobs(c *gin.Context) {
 			break
 		}
 
-		_, executeErr := a.executor.ExecuteJobAtGeneration(candidate.Key(), runtime.Generation())
+		_, executeErr := a.bulkExecute(ctx, candidate.Key(), runtime.Generation())
 		switch {
 		case executeErr == nil:
 			result.Queued++
+		case ctx.Err() != nil || errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded):
+			result.FailedToEnqueue += remaining
+			break bulkLoop
 		case errors.Is(executeErr, executor.ErrRepositoryActive):
 			result.SkippedActive++
 		case errors.Is(executeErr, executor.ErrRepositoryNotFound):
@@ -272,10 +312,10 @@ func (a *API) currentRepositorySnapshot(ctx context.Context, now time.Time) ([]R
 	}
 	var repos []typedef.Repository
 	var overdueGrace, stuckThreshold time.Duration
-	if a.config != nil {
-		repos = a.config.Repository
-		overdueGrace = a.config.SyncOverdueGrace
-		stuckThreshold = a.config.SyncStuckThreshold
+	if cfg := a.configSnapshot(); cfg != nil {
+		repos = cfg.Repository
+		overdueGrace = cfg.SyncOverdueGrace
+		stuckThreshold = cfg.SyncStuckThreshold
 	}
 	return buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), nil
 }
@@ -460,6 +500,7 @@ func (a *API) GetJobs(c *gin.Context) {
 	defer rows.Close()
 
 	jobs := make([]Job, 0)
+	cfg := a.configSnapshot()
 	for rows.Next() {
 		var job Job
 		var startTime time.Time
@@ -484,7 +525,7 @@ func (a *API) GetJobs(c *gin.Context) {
 
 		// Resolve URL from config by identity key; unmatched (renamed/deleted/old
 		// empty-key rows) keeps the job_name snapshot and empty URL.
-		for _, repo := range a.config.Repository {
+		for _, repo := range cfg.Repository {
 			if repo.Matches(repoKey) {
 				job.URL = repo.URL
 				break
@@ -792,9 +833,12 @@ func (a *API) CreateRepository(c *gin.Context) {
 		})
 		return
 	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// 判重按身份键（URL），name 允许重复。
-	for _, existing := range a.config.Repository {
+	for _, existing := range next.Repository {
 		if existing.Key() == repo.Key() {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -804,18 +848,16 @@ func (a *API) CreateRepository(c *gin.Context) {
 		}
 	}
 
-	// Append to in-memory config
-	a.config.Repository = append(a.config.Repository, repo)
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	// Publish a copy-on-write replacement to the API and Executor together.
+	next.Repository = append(next.Repository, repo)
+	published := a.publishConfigLocked(next)
 
 	// Persist config; tolerate save failures with a warning
 	msg := ""
 	if err := config.Save(); err != nil {
 		msg = "Repository added in memory but failed to persist config: " + err.Error()
 	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	msg = joinMessages(msg, a.refreshSchedules(published))
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -830,10 +872,13 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	// handler; gin prefixes the captured value with "/", which we strip before
 	// matching against repo keys.
 	id := strings.TrimPrefix(c.Param("id"), "/")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Locate the existing repository by identity key (URL).
 	idx := -1
-	for i, existing := range a.config.Repository {
+	for i, existing := range next.Repository {
 		if existing.Matches(id) {
 			idx = i
 			break
@@ -860,7 +905,7 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	// Marshal the existing repository into a map, overlay the patch fields,
 	// then unmarshal back into a typed struct. This preserves unspecified
 	// fields while applying only the supplied changes.
-	existingRaw, err := json.Marshal(a.config.Repository[idx])
+	existingRaw, err := json.Marshal(next.Repository[idx])
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
@@ -905,7 +950,7 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		})
 		return
 	}
-	for i, other := range a.config.Repository {
+	for i, other := range next.Repository {
 		if i != idx && other.Key() == updated.Key() {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -915,16 +960,14 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		}
 	}
 
-	a.config.Repository[idx] = updated
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	next.Repository[idx] = updated
+	published := a.publishConfigLocked(next)
 
 	msg := ""
 	if err := config.Save(); err != nil {
 		msg = "Repository updated in memory but failed to persist config: " + err.Error()
 	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	msg = joinMessages(msg, a.refreshSchedules(published))
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -937,9 +980,12 @@ func (a *API) UpdateRepository(c *gin.Context) {
 func (a *API) DeleteRepository(c *gin.Context) {
 	// See UpdateRepository: strip the leading "/" gin adds to *id catch-all values.
 	id := strings.TrimPrefix(c.Param("id"), "/")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	idx := -1
-	for i, existing := range a.config.Repository {
+	for i, existing := range next.Repository {
 		if existing.Matches(id) {
 			idx = i
 			break
@@ -954,16 +1000,14 @@ func (a *API) DeleteRepository(c *gin.Context) {
 	}
 
 	// Remove element at idx
-	a.config.Repository = append(a.config.Repository[:idx], a.config.Repository[idx+1:]...)
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	next.Repository = append(next.Repository[:idx], next.Repository[idx+1:]...)
+	published := a.publishConfigLocked(next)
 
 	msg := ""
 	if err := config.Save(); err != nil {
 		msg = "Repository deleted in memory but failed to persist config: " + err.Error()
 	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	msg = joinMessages(msg, a.refreshSchedules(published))
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -974,9 +1018,10 @@ func (a *API) DeleteRepository(c *gin.Context) {
 
 // GetStorages returns all storage backends from the configuration.
 func (a *API) GetStorages(c *gin.Context) {
+	cfg := a.configSnapshot()
 	c.JSON(http.StatusOK, Response{
 		Code: 200,
-		Data: a.config.Storage,
+		Data: cfg.Storage,
 	})
 }
 
@@ -1007,9 +1052,12 @@ func (a *API) CreateStorage(c *gin.Context) {
 		})
 		return
 	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Check for duplicates
-	for _, existing := range a.config.Storage {
+	for _, existing := range next.Storage {
 		if existing.Name == storage.Name {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -1019,11 +1067,9 @@ func (a *API) CreateStorage(c *gin.Context) {
 		}
 	}
 
-	// Append to in-memory config
-	a.config.Storage = append(a.config.Storage, storage)
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	// Publish a copy-on-write replacement to the API and Executor together.
+	next.Storage = append(next.Storage, storage)
+	a.publishConfigLocked(next)
 
 	// Persist config; tolerate save failures with a warning
 	msg := ""
@@ -1041,10 +1087,13 @@ func (a *API) CreateStorage(c *gin.Context) {
 // UpdateStorage modifies an existing storage backend by name (partial update via JSON merge).
 func (a *API) UpdateStorage(c *gin.Context) {
 	id := c.Param("id")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Locate the existing storage
 	idx := -1
-	for i, existing := range a.config.Storage {
+	for i, existing := range next.Storage {
 		if existing.Name == id {
 			idx = i
 			break
@@ -1071,7 +1120,7 @@ func (a *API) UpdateStorage(c *gin.Context) {
 	// Marshal the existing storage into a map, overlay the patch fields,
 	// then unmarshal back into a typed struct. This preserves unspecified
 	// fields while applying only the supplied changes.
-	existingRaw, err := json.Marshal(a.config.Storage[idx])
+	existingRaw, err := json.Marshal(next.Storage[idx])
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
@@ -1107,10 +1156,8 @@ func (a *API) UpdateStorage(c *gin.Context) {
 		return
 	}
 
-	a.config.Storage[idx] = updated
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	next.Storage[idx] = updated
+	a.publishConfigLocked(next)
 
 	msg := ""
 	if err := config.Save(); err != nil {
@@ -1127,9 +1174,12 @@ func (a *API) UpdateStorage(c *gin.Context) {
 // DeleteStorage removes a storage backend from the configuration by name.
 func (a *API) DeleteStorage(c *gin.Context) {
 	id := c.Param("id")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	idx := -1
-	for i, existing := range a.config.Storage {
+	for i, existing := range next.Storage {
 		if existing.Name == id {
 			idx = i
 			break
@@ -1144,10 +1194,8 @@ func (a *API) DeleteStorage(c *gin.Context) {
 	}
 
 	// Remove element at idx
-	a.config.Storage = append(a.config.Storage[:idx], a.config.Storage[idx+1:]...)
-	if a.executor != nil {
-		a.executor.RefreshConfig(a.config)
-	}
+	next.Storage = append(next.Storage[:idx], next.Storage[idx+1:]...)
+	a.publishConfigLocked(next)
 
 	msg := ""
 	if err := config.Save(); err != nil {

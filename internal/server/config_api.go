@@ -263,7 +263,7 @@ func buildWarnings(serverChanges []FieldChange) []string {
 // ExportConfig returns the full current config as YAML, usable directly as
 // config.yaml (secrets in plaintext — the export is the source of truth).
 func (a *API) ExportConfig(c *gin.Context) {
-	yamlStr, err := config.ExportFrom(a.config)
+	yamlStr, err := config.ExportFrom(a.configSnapshot())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "导出配置失败: " + err.Error()})
 		return
@@ -290,9 +290,10 @@ func (a *API) PreviewImport(c *gin.Context) {
 	}
 
 	curServer := config.GetServerSection()
-	repos := diffRepositories(a.config.Repository, doc.Repository)
-	storages := diffStorages(a.config.Storage, doc.Storage)
-	globals := diffGlobals(a.config, doc)
+	current := a.configSnapshot()
+	repos := diffRepositories(current.Repository, doc.Repository)
+	storages := diffStorages(current.Storage, doc.Storage)
+	globals := diffGlobals(current, doc)
 	serverChanges := diffServer(curServer, doc.Server)
 
 	data := ImportPreviewData{
@@ -334,16 +335,19 @@ func (a *API) ApplyImport(c *gin.Context) {
 	}
 
 	result := a.applyImport(doc, &req)
+	published := a.configSnapshot()
 
 	msg := ""
 	if err := config.Save(); err != nil {
 		msg = "配置已应用（内存）但未能持久化: " + err.Error()
 	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	msg = joinMessages(msg, a.refreshSchedules(published))
 	c.JSON(http.StatusOK, Response{Code: 200, Data: result, Message: msg})
 }
 
 func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportResult {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
 	var result ImportResult
 	// Build a NEW config instance instead of mutating a.config in place: job
 	// goroutines read a.config / ins / e.cfg.Load() concurrently, and atomic
@@ -352,7 +356,8 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	// built kept/keptSt arrays and writes scalar globals, never mutating shared
 	// backing arrays or nested objects. The new instance is published once it is
 	// fully built (see the publish block before return).
-	next := *a.config
+	current := config.Clone(a.config)
+	next := *current
 	choice := func(m map[string]string, key string, def string) string {
 		if v, ok := m[key]; ok {
 			return v
@@ -363,7 +368,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	// Recompute the classification so choices apply only to the classes the
 	// user actually saw in the preview (modified / deleted). This reads the
 	// current config before any merge.
-	repoDiff := diffRepositories(a.config.Repository, doc.Repository)
+	repoDiff := diffRepositories(current.Repository, doc.Repository)
 	modifiedRepos := map[string]bool{}
 	deletedRepos := map[string]bool{}
 	for _, e := range repoDiff.Modified {
@@ -372,7 +377,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	for _, e := range repoDiff.Deleted {
 		deletedRepos[e.Key] = true
 	}
-	stDiff := diffStorages(a.config.Storage, doc.Storage)
+	stDiff := diffStorages(current.Storage, doc.Storage)
 	modifiedStorages := map[string]bool{}
 	deletedStorages := map[string]bool{}
 	for _, e := range stDiff.Modified {
@@ -548,11 +553,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	// package-global ins (which config.Save() reads), and the executor's atomic
 	// pointer. Concurrent readers (job goroutines) observe either the complete
 	// old or the complete new instance, never a torn one.
-	a.config = &next
-	config.SetIns(&next)
-	if a.executor != nil {
-		a.executor.RefreshConfig(&next)
-	}
+	a.publishConfigLocked(&next)
 
 	return result
 }
@@ -561,13 +562,13 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 // the fresh config instance, and replaces the running server's cron schedules.
 // The `server:` section is NOT hot-applied and still requires a restart.
 func (a *API) ReloadConfig(c *gin.Context) {
+	a.configMu.Lock()
 	if err := config.Reload(); err != nil {
+		a.configMu.Unlock()
 		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
 		return
 	}
-	a.config = config.GetIns()
-	if a.executor != nil {
-		a.executor.RefreshConfig(config.GetIns())
-	}
-	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: a.refreshSchedules()})
+	published := a.publishConfigLocked(config.GetIns())
+	a.configMu.Unlock()
+	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: a.refreshSchedules(published)})
 }

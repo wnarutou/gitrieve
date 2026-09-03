@@ -906,6 +906,131 @@ func TestExecuteJobAtGenerationRejectsConfigPublishedAfterRecheck(t *testing.T) 
 	waitForJob(t, exec, jobIDs[0])
 }
 
+func TestExecuteJobAtGenerationRejectsRefreshBetweenLookupAndReservation(t *testing.T) {
+	expansionEntered := make(chan struct{})
+	expansionRelease := make(chan struct{})
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	exec := NewExecutorWithRunners(
+		logger.NewLogger(testDB),
+		testDB,
+		&config.Config{Repository: []typedef.Repository{{Name: "old", URL: "github.com/acme/old"}}},
+		noOpRunners(),
+		func(repo typedef.Repository) []typedef.Repository {
+			close(expansionEntered)
+			<-expansionRelease
+			return []typedef.Repository{repo}
+		},
+	)
+	t.Cleanup(func() {
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+
+	checked := exec.RuntimeConfigSnapshot()
+	type result struct {
+		ids []string
+		err error
+	}
+	resultReady := make(chan result, 1)
+	go func() {
+		ids, executeErr := exec.ExecuteJobAtGeneration("github.com/acme/old", checked.Generation())
+		resultReady <- result{ids: ids, err: executeErr}
+	}()
+
+	<-expansionEntered
+	exec.RefreshConfig(&config.Config{Repository: []typedef.Repository{{Name: "new", URL: "github.com/acme/new"}}})
+	close(expansionRelease)
+
+	got := <-resultReady
+	require.ErrorIs(t, got.err, ErrConfigGenerationChanged)
+	require.Empty(t, got.ids)
+	require.Empty(t, executionStatusCounts(t, testDB))
+}
+
+func TestQueuedJobUsesStorageFromAcceptedRuntimeGeneration(t *testing.T) {
+	storagesSeen := make(chan []typedef.MultiStorage, 1)
+	runners := noOpRunners()
+	runners.Code = func(_ context.Context, _ typedef.Repository, storages []typedef.MultiStorage) error {
+		storagesSeen <- storages
+		return nil
+	}
+	cfg := &config.Config{
+		Repository: []typedef.Repository{{Name: "repo", URL: "github.com/acme/repo", Storage: []string{"archive"}}},
+		Storage:    []typedef.MultiStorage{{Storage: typedef.Storage{Name: "archive", Type: "file", Path: "old"}}},
+	}
+	exec, testDB := newTestExecutorForConfig(t, cfg, runners)
+	execEntered := make(chan struct{})
+	execRelease := make(chan struct{})
+	exec.db = &blockingExecutionStore{
+		delegate:    testDB,
+		execEntered: execEntered,
+		execRelease: execRelease,
+	}
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme/repo")
+	require.NoError(t, err)
+	require.Len(t, jobIDs, 1)
+	<-execEntered
+	exec.RefreshConfig(&config.Config{
+		Repository: []typedef.Repository{{Name: "repo", URL: "github.com/acme/repo", Storage: []string{"archive"}}},
+		Storage:    []typedef.MultiStorage{{Storage: typedef.Storage{Name: "archive", Type: "file", Path: "new"}}},
+	})
+	close(execRelease)
+
+	storages := <-storagesSeen
+	require.Len(t, storages, 1)
+	require.Equal(t, "old", storages[0].Path)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestExecuteJobAtGenerationContextDiscardsCommitWhenCancelledBeforePublish(t *testing.T) {
+	var runnerCalls atomic.Int32
+	runners := noOpRunners()
+	runners.Code = func(context.Context, typedef.Repository, []typedef.MultiStorage) error {
+		runnerCalls.Add(1)
+		return nil
+	}
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name: "repo",
+		URL:  "github.com/acme/repo",
+	}, runners)
+	componentsEntered := make(chan struct{})
+	componentsRelease := make(chan struct{})
+	exec.db = &blockingExecutionStore{
+		delegate:          testDB,
+		componentsEntered: componentsEntered,
+		componentsRelease: componentsRelease,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	generation := exec.RuntimeConfigSnapshot().Generation()
+	type result struct {
+		ids []string
+		err error
+	}
+	resultReady := make(chan result, 1)
+	go func() {
+		ids, executeErr := exec.ExecuteJobAtGenerationContext(ctx, "github.com/acme/repo", generation)
+		resultReady <- result{ids: ids, err: executeErr}
+	}()
+
+	<-componentsEntered
+	cancel()
+	close(componentsRelease)
+	got := <-resultReady
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.Empty(t, got.ids)
+	require.Empty(t, executionStatusCounts(t, testDB))
+	require.Zero(t, runnerCalls.Load())
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme/repo")
+	require.NoError(t, err, "cancelled persistence must release repository ownership")
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+	require.Equal(t, int32(1), runnerCalls.Load())
+}
+
 func TestExecuteJobLimitsActualRunnerConcurrencyAndKeepsOverflowPending(t *testing.T) {
 	blocker := newBlockingRunner(6)
 	exec, testDB := newTestExecutorForConfig(t, repositoryConfig(2, 6), blocker.runners())

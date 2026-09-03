@@ -418,6 +418,26 @@ func TestReloadConfig(t *testing.T) {
 	require.Equal(t, "@every 1m", refresher.configs[0].Repository[0].Cron)
 }
 
+func TestConfigSnapshotAccessorCannotMutatePublishedAPIConfig(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	cfg := &config.Config{Repository: []typedef.Repository{{
+		Name:    "original",
+		URL:     "github.com/acme/original",
+		Storage: []string{"archive"},
+	}}}
+	s := server.NewConfigTestServer(cfg, testDB)
+
+	snapshot := s.Cfg()
+	snapshot.Repository[0].Name = "caller mutation"
+	snapshot.Repository[0].Storage[0] = "caller mutation"
+
+	actual := s.Cfg()
+	require.Equal(t, "original", actual.Repository[0].Name)
+	require.Equal(t, []string{"archive"}, actual.Repository[0].Storage)
+}
+
 func TestReloadConfigKeepsOldOnError(t *testing.T) {
 	path := t.TempDir() + "/config.yaml"
 	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\n")
