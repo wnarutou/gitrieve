@@ -553,12 +553,12 @@ func (a *API) applyImportLocked(doc *config.ExportConfig, req *ImportRequest) (I
 // The `server:` section is NOT hot-applied and still requires a restart.
 func (a *API) ReloadConfig(c *gin.Context) {
 	a.configMu.Lock()
-	if err := config.Reload(); err != nil {
+	if err := a.reloadConfig(); err != nil {
 		a.configMu.Unlock()
 		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
 		return
 	}
-	_, message := a.publishPersistAndRefreshConfigLocked(config.GetIns(), "配置已重载（内存）但未能持久化: ")
+	_, message := a.publishAndRefreshConfigLocked(config.GetIns())
 	a.configMu.Unlock()
 	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: message})
 }

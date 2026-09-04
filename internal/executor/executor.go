@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/logger"
 	"github.com/wnarutou/gitrieve/internal/repository"
 	"github.com/wnarutou/gitrieve/internal/syncresult"
@@ -49,6 +50,20 @@ type queuedJob struct {
 type preparedJob struct {
 	queued     *queuedJob
 	jobContext *JobContext
+}
+
+// EligibilityCheck runs after the Executor has reserved all concrete
+// repositories but before any pending execution is persisted or published.
+type EligibilityCheck func(context.Context, *RuntimeConfigSnapshot, typedef.Repository) (bool, error)
+
+// RepositoryNoLongerEligibleError distinguishes a completed eligibility
+// change from admission/storage failures for bulk response accounting.
+type RepositoryNoLongerEligibleError struct {
+	RepositoryKey string
+}
+
+func (e *RepositoryNoLongerEligibleError) Error() string {
+	return fmt.Sprintf("repository %q is no longer eligible", e.RepositoryKey)
 }
 
 type executionStore interface {
@@ -88,9 +103,11 @@ type Executor struct {
 // Callers can inspect cloned repository values but cannot mutate the published
 // configuration or its normalized-key index.
 type RuntimeConfigSnapshot struct {
-	config       *config.Config
-	generation   uint64
-	repositories map[string]typedef.Repository
+	config          *config.Config
+	executionConfig *config.ExecutionSnapshot
+	githubAPIScope  *githubapi.Scope
+	generation      uint64
+	repositories    map[string]typedef.Repository
 }
 
 func buildRuntimeConfigSnapshot(cfg *config.Config) *RuntimeConfigSnapshot {
@@ -104,7 +121,12 @@ func buildRuntimeConfigSnapshot(cfg *config.Config) *RuntimeConfigSnapshot {
 			}
 		}
 	}
-	return &RuntimeConfigSnapshot{config: cloned, repositories: indexed}
+	return &RuntimeConfigSnapshot{
+		config:          cloned,
+		executionConfig: config.NewExecutionSnapshot(cloned),
+		githubAPIScope:  githubapi.NewScope(config.GitHubAPIConfigFrom(cloned)),
+		repositories:    indexed,
+	}
 }
 
 func cloneRuntimeConfig(cfg *config.Config) *config.Config {
@@ -167,6 +189,14 @@ func (s *RuntimeConfigSnapshot) SyncHealthThresholds() (time.Duration, time.Dura
 		return 0, 0
 	}
 	return s.config.SyncOverdueGrace, s.config.SyncStuckThreshold
+}
+
+func (s *RuntimeConfigSnapshot) executionContext(parent context.Context) context.Context {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx := config.WithExecutionSnapshot(parent, s.executionConfig)
+	return githubapi.WithScope(ctx, s.githubAPIScope)
 }
 
 func NewExecutor(logger *logger.Logger, db *db.DB, cfg *config.Config) *Executor {
@@ -234,13 +264,13 @@ var ErrConfigGenerationChanged = errors.New("executor configuration generation c
 
 // expandRepos 是把 user/org 条目展开为具体仓库的 seam：生产用 repository.Expand，
 // 测试注入 fake，避免真实 GitHub 调用。
-var expandRepos = repository.Expand
+var expandRepos = repository.ExpandContext
 
 // ExecuteJob 按仓库身份键（规范化 URL）在配置中定位条目并执行。type=repo 产生
 // 一条 execution 并返回单元素 jobID；type=user/org 先在任务内展开为具体仓库，
 // 每个具体仓库独立执行（各自 jobID / execution / 日志流 / 可取消）。
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
-	return e.executeJobFromSnapshot(context.Background(), e.runtime.Load(), repoKey, nil)
+	return e.executeJobFromSnapshot(context.Background(), e.runtime.Load(), repoKey, nil, nil)
 }
 
 func (e *Executor) ExecuteJobAtGeneration(repoKey string, generation uint64) ([]string, error) {
@@ -255,27 +285,38 @@ func (e *Executor) ExecuteJobAtGenerationContext(ctx context.Context, repoKey st
 	if runtime == nil || runtime.generation != generation {
 		return nil, ErrConfigGenerationChanged
 	}
-	return e.executeJobFromSnapshot(ctx, runtime, repoKey, &generation)
+	return e.executeJobFromSnapshot(ctx, runtime, repoKey, &generation, nil)
 }
 
-func (e *Executor) executeJobFromSnapshot(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, repoKey string, expectedGeneration *uint64) ([]string, error) {
+// ExecuteJobAtGenerationIfEligibleContext is the bulk admission path. It
+// reserves first, evaluates eligible while ownership is held, then persists
+// and publishes only when the callback still accepts the repository.
+func (e *Executor) ExecuteJobAtGenerationIfEligibleContext(ctx context.Context, repoKey string, generation uint64, eligible EligibilityCheck) ([]string, error) {
+	runtime := e.runtime.Load()
+	if runtime == nil || runtime.generation != generation {
+		return nil, ErrConfigGenerationChanged
+	}
+	return e.executeJobFromSnapshot(ctx, runtime, repoKey, &generation, eligible)
+}
+
+func (e *Executor) executeJobFromSnapshot(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, repoKey string, expectedGeneration *uint64, eligible EligibilityCheck) ([]string, error) {
 	repo, found := runtime.Repository(repoKey)
 	if !found {
 		return nil, ErrRepositoryNotFound
 	}
 
 	if e.expander != nil {
-		return e.submitBatch(admissionCtx, runtime, e.expander(repo), expectedGeneration)
+		return e.submitBatch(admissionCtx, runtime, repo, e.expander(repo), expectedGeneration, eligible)
 	}
-	return e.submitBatch(admissionCtx, runtime, expandRepos(repo), expectedGeneration)
+	return e.submitBatch(admissionCtx, runtime, repo, expandRepos(runtime.executionContext(admissionCtx), repo), expectedGeneration, eligible)
 }
 
 // submitBatch reserves, preflights, and persists every concrete repository
 // before atomically publishing any of them to the dispatcher.
-func (e *Executor) submitBatch(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, repositories []typedef.Repository, expectedGeneration *uint64) ([]string, error) {
+func (e *Executor) submitBatch(admissionCtx context.Context, runtime *RuntimeConfigSnapshot, configured typedef.Repository, repositories []typedef.Repository, expectedGeneration *uint64, eligible EligibilityCheck) ([]string, error) {
 	prepared := make([]*preparedJob, len(repositories))
 	for i, repo := range repositories {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(runtime.executionContext(context.Background()))
 		jobID := uuid.New().String()
 		plan := componentPlan(repo, e.runners)
 		prepared[i] = &preparedJob{
@@ -304,6 +345,20 @@ func (e *Executor) submitBatch(admissionCtx context.Context, runtime *RuntimeCon
 	if err := e.preflightBatch(admissionCtx, prepared); err != nil {
 		e.releaseBatch(prepared, nil)
 		return nil, err
+	}
+	if eligible != nil {
+		stillEligible, err := eligible(admissionCtx, runtime, cloneRuntimeRepository(configured))
+		if err == nil {
+			err = admissionCtx.Err()
+		}
+		if err != nil {
+			e.releaseBatch(prepared, nil)
+			return nil, err
+		}
+		if !stillEligible {
+			e.releaseBatch(prepared, nil)
+			return nil, &RepositoryNoLongerEligibleError{RepositoryKey: configured.Key()}
+		}
 	}
 	if err := e.persistBatch(admissionCtx, prepared); err != nil {
 		e.releaseBatch(prepared, nil)

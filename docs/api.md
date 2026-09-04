@@ -431,7 +431,7 @@ GET /api/repositories
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `page` | int | `1` | Page number (1-based) |
-| `limit` | int | `20` | Items per page; clamped to `1`–`100` |
+| `limit` | int | `20` | Items per page; values outside `1`–`100` are rejected |
 | `search` | string | — | Fuzzy (partial) match on repository **name or URL**, case-insensitive for ASCII |
 | `health` | string | — | `healthy`, `failed`, `overdue`, `stuck`, `never_synced`, `cancelled`, `pending`, `running`, or `syncing` (`pending` plus `running`) |
 | `overdue` | bool | — | `true` or `false`; independent of the primary health category |
@@ -534,6 +534,8 @@ Health precedence is `never_synced`, `stuck`, active `pending`/`running`,
 are independent diagnostics and can overlap the mutually exclusive status
 counts. Summary counts cover the whole search-matched fleet, not just the
 current page and not just rows selected by the health/overdue/stuck filters.
+`summary.healthy` is exactly the count selected by `health=healthy` for that
+same search; a completed but overdue repository is not counted as healthy.
 
 **Examples**
 
@@ -559,6 +561,7 @@ curl "http://localhost:8080/api/repositories?health=failed&overdue=true&sort=att
 | Code | Meaning |
 |---|---|
 | 200 | Repositories returned |
+| 400 | Invalid page, limit, health, overdue, stuck, sort, or direction |
 | 500 | Failed to query execution stats |
 
 ---

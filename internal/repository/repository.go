@@ -27,6 +27,7 @@ type repoLister interface {
 
 // newGithubClient 是可替换的包级 seam：生产用真客户端，测试注入 fake。
 var newGithubClient = func() (repoLister, error) { return github.New() }
+var newGithubClientWithContext = func(ctx context.Context) (repoLister, error) { return github.NewWithContext(ctx) }
 
 func GetRepositories(name string) []typedef.Repository {
 	repositories := make([]typedef.Repository, 0)
@@ -46,12 +47,22 @@ func GetRepositories(name string) []typedef.Repository {
 }
 
 func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Repository {
+	return addRepoWithClient(repo, ret, newGithubClient)
+}
+
+func addRepoWithContext(ctx context.Context, repo typedef.Repository, ret []typedef.Repository) []typedef.Repository {
+	return addRepoWithClient(repo, ret, func() (repoLister, error) {
+		return newGithubClientWithContext(ctx)
+	})
+}
+
+func addRepoWithClient(repo typedef.Repository, ret []typedef.Repository, newClient func() (repoLister, error)) []typedef.Repository {
 	switch repo.GetType() {
 	case typedef.TypeRepo:
 		ret = append(ret, repo)
 	case typedef.TypeUser, typedef.TypeOrg:
 		// get repos
-		client, err := newGithubClient()
+		client, err := newClient()
 		if err != nil {
 			ui.Errorf("Error creating github client, %s", err)
 			return ret
@@ -424,4 +435,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 // 非法类型返回空切片。CLI 与 executor 共用。
 func Expand(repo typedef.Repository) []typedef.Repository {
 	return addRepo(repo, nil)
+}
+
+// ExpandContext expands a user/org entry using the caller's frozen execution
+// configuration (token, retry, and API coordination scope when present).
+func ExpandContext(ctx context.Context, repo typedef.Repository) []typedef.Repository {
+	return addRepoWithContext(ctx, repo, nil)
 }

@@ -280,6 +280,52 @@ func TestBulkReportsPartialResultsAndRechecksEligibilityAtEnqueueTime(t *testing
 	require.Equal(t, []string{"github.com/bulk/alpha", "github.com/bulk/echo"}, newlyQueued)
 }
 
+func TestBulkCompletionBetweenAPIRecheckAndReservedAdmissionIsNotQueued(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/bulk/completion-race"}}}
+	runner := newBulkBlockingRunner(1)
+	testDB, _, handler := newBulkServer(t, cfg, runner)
+	insertBulkExecution(t, testDB, "fixture-failed", "github.com/bulk/completion-race", "failed", now)
+
+	var rechecks atomic.Int32
+	handler.SetBulkRepositoryStats(func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+		if rechecks.Add(1) == 1 {
+			insertBulkExecution(t, testDB, "completed-after-api-recheck", "github.com/bulk/completion-race", "completed", now.Add(time.Minute))
+			return map[string]db.RepositoryRunStats{
+				"github.com/bulk/completion-race": {
+					LatestExecutionID: "fixture-failed",
+					LatestStatus:      "failed",
+					LatestStart:       now,
+					TotalRuns:         1,
+				},
+			}, nil
+		}
+		completedEnd := now.Add(2 * time.Minute)
+		return map[string]db.RepositoryRunStats{
+			"github.com/bulk/completion-race": {
+				LatestExecutionID: "completed-after-api-recheck",
+				LatestStatus:      "completed",
+				LatestStart:       now.Add(time.Minute),
+				LatestEnd:         &completedEnd,
+				LastSuccess:       &completedEnd,
+				TotalRuns:         2,
+				SuccessRuns:       1,
+				FailedRuns:        1,
+			},
+		}, nil
+	})
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"completion-race"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Equal(t, 1, result.Data.NoLongerEligible)
+	require.Zero(t, result.Data.FailedToEnqueue)
+	require.Equal(t, int32(2), rechecks.Load(), "eligibility must be checked again while Executor owns the reservation")
+	require.Equal(t, 2, executionCount(t, testDB), "no redundant pending execution may be persisted")
+}
+
 func TestBulkDoesNotEnqueueAcrossRuntimeConfigGenerations(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	cfg := &config.Config{Repository: []typedef.Repository{{Name: "candidate", URL: "github.com/bulk/candidate"}}}

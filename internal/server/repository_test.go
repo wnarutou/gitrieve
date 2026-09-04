@@ -276,7 +276,10 @@ func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.
 		status, data := get("?search=match&health=failed&page=1&limit=1")
 		require.Equal(t, http.StatusOK, status)
 		require.Equal(t, 1, data.Total)
-		require.Equal(t, healthSummary{Total: 5, Healthy: 1, Failed: 1, Pending: 1, Running: 2, Overdue: 1, Stuck: 1}, data.Summary)
+		require.Equal(t, healthSummary{Total: 5, Failed: 1, Pending: 1, Running: 2, Overdue: 1, Stuck: 1}, data.Summary)
+		status, healthy := get("?search=match&health=healthy")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, data.Summary.Healthy, healthy.Total, "Healthy card count must match the same search/filter endpoint")
 	})
 
 	t.Run("sorts each supported key and direction", func(t *testing.T) {

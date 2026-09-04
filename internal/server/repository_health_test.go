@@ -31,7 +31,7 @@ func TestRepositoryHealthUsesAttentionPrecedenceAndSafeDurations(t *testing.T) {
 		{name: "running", stats: runStatsAt("running", now.Add(-time.Hour), nil), wantHealth: "running", wantDuration: secondsPtr(time.Hour)},
 		{name: "failed beats overdue", cron: "0 * * * *", stats: runStatsAt("failed", now.Add(-3*time.Hour), &ended), wantHealth: "failed", wantOverdue: true, wantDuration: secondsPtr(time.Hour)},
 		{name: "cancelled", stats: runStatsAt("cancelled", now.Add(-time.Hour), &ended), wantHealth: "cancelled", wantDuration: secondsPtr(0)},
-		{name: "overdue beats cancelled", cron: "0 * * * *", stats: runStatsAt("cancelled", now.Add(-3*time.Hour), &ended), wantHealth: "overdue", wantOverdue: true, wantDuration: secondsPtr(time.Hour)},
+		{name: "cancelled beats overdue", cron: "0 * * * *", stats: runStatsAt("cancelled", now.Add(-3*time.Hour), &ended), wantHealth: "cancelled", wantOverdue: true, wantDuration: secondsPtr(time.Hour)},
 		{name: "overdue completed", cron: "0 * * * *", stats: runStatsAt("completed", now.Add(-3*time.Hour), &ended), wantHealth: "overdue", wantOverdue: true, wantDuration: secondsPtr(time.Hour)},
 		{name: "healthy", cron: "0 * * * *", stats: runStatsAt("completed", now.Add(-20*time.Minute), &ended), wantHealth: "healthy", wantDuration: secondsPtr(0)},
 		{name: "active is never overdue", cron: "0 * * * *", stats: runStatsAt("running", now.Add(-3*time.Hour), nil), wantHealth: "running", wantDuration: secondsPtr(3 * time.Hour)},
@@ -184,7 +184,9 @@ func TestRepositoryHealthSearchFilterSummaryAndSortAreDeterministic(t *testing.T
 	searched := searchRepositorySnapshot(input, "GITHUB.COM/ACME")
 	require.Len(t, searched, 5)
 	summary := summarizeRepositorySnapshot(searched)
-	require.Equal(t, RepositoryHealthSummary{Total: 5, Healthy: 1, Failed: 1, Pending: 1, Running: 1, Cancelled: 1, Overdue: 2, Stuck: 1}, summary)
+	require.Equal(t, RepositoryHealthSummary{Total: 5, Failed: 1, Pending: 1, Running: 1, Cancelled: 1, Overdue: 2, Stuck: 1}, summary)
+	healthy := filterRepositorySnapshot(searched, RepositoryHealthFilter{Health: "healthy"})
+	require.Equal(t, summary.Healthy, len(healthy), "Healthy summary card must equal its health filter")
 
 	syncing := filterRepositorySnapshot(searched, RepositoryHealthFilter{Health: "syncing"})
 	require.Len(t, syncing, 2)

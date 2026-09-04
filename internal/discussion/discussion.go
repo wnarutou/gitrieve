@@ -262,7 +262,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Printf("The latest update time among all discussions is: %s", lastUpdate)
 	}
 
-	cfg := config.GetIns()
+	cfg := config.GetExecutionConfig(ctx)
 	src := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: cfg.GitHubToken},
 	)
@@ -280,7 +280,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	// Fetch discussion list
 	for {
 		var query discussionsQuery
-		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+		err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 			permit, acquireErr := githubapi.Acquire(ctx, "graphql")
 			if acquireErr != nil {
 				return acquireErr
@@ -333,7 +333,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			// Fetch comments
 			for {
 				var commentsQuery commentsQuery
-				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+				err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 					permit, acquireErr := githubapi.Acquire(ctx, "graphql")
 					if acquireErr != nil {
 						return acquireErr
@@ -373,7 +373,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 					// Fetch replies
 					for {
 						var repliesQuery repliesQuery
-						err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+						err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 							permit, acquireErr := githubapi.Acquire(ctx, "graphql")
 							if acquireErr != nil {
 								return acquireErr

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/logger"
 	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -807,7 +808,7 @@ func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(repo typedef.Repository) []typedef.Repository {
+	expandRepos = func(_ context.Context, repo typedef.Repository) []typedef.Repository {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
@@ -984,6 +985,130 @@ func TestQueuedJobUsesStorageFromAcceptedRuntimeGeneration(t *testing.T) {
 	waitForJob(t, exec, jobIDs[0])
 }
 
+func TestQueuedJobUsesOneCompleteAcceptedConfigGeneration(t *testing.T) {
+	type observation struct {
+		component string
+		cfg       *config.Config
+		api       githubapi.Config
+		storages  []typedef.MultiStorage
+	}
+
+	blockerEntered := make(chan struct{})
+	blockerRelease := make(chan struct{})
+	observed := make(chan observation, 5)
+	record := func(component string) SyncFunc {
+		return func(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+			if component == "code" && repo.Name == "blocker" {
+				close(blockerEntered)
+				<-blockerRelease
+				return nil
+			}
+			apiConfig, ok := githubapi.ConfigFromContext(ctx)
+			require.True(t, ok, "%s runner has no frozen GitHub API coordinator", component)
+			observed <- observation{
+				component: component,
+				cfg:       config.GetExecutionConfig(ctx),
+				api:       apiConfig,
+				storages:  append([]typedef.MultiStorage(nil), storages...),
+			}
+			return nil
+		}
+	}
+	runners := Runners{
+		Code:       record("code"),
+		Release:    record("release"),
+		Issue:      record("issue"),
+		Wiki:       record("wiki"),
+		Discussion: record("discussion"),
+	}
+	oldConfig := &config.Config{
+		Repository: []typedef.Repository{
+			{Name: "blocker", URL: "github.com/acme/blocker"},
+			{
+				Name:               "target",
+				URL:                "github.com/acme/target",
+				Storage:            []string{"archive"},
+				DownloadReleases:   true,
+				DownloadIssues:     true,
+				DownloadWiki:       true,
+				DownloadDiscussion: true,
+			},
+		},
+		Storage: []typedef.MultiStorage{{
+			Storage:         typedef.Storage{Name: "archive", Type: "s3", Path: "old-path"},
+			Endpoint:        "old-endpoint",
+			Bucket:          "old-bucket",
+			Region:          "old-region",
+			AccessKeyID:     "old-access",
+			SecretAccessKey: "old-secret",
+		}},
+		GitHubToken:                 "old-token",
+		ConcurrencyNum:              1,
+		ReleaseSizeLimit:            101,
+		ReleaseNumLimit:             102,
+		RetryMaxCount:               103,
+		RetryBaseDelay:              104 * time.Millisecond,
+		SyncOverdueGrace:            105 * time.Minute,
+		SyncStuckThreshold:          106 * time.Hour,
+		GitHubAPIConcurrency:        107,
+		GitHubMinRequestInterval:    108 * time.Millisecond,
+		GitHubLowRemainingThreshold: 109,
+		GitHubScheduleJitter:        110 * time.Millisecond,
+	}
+	previousGlobal := config.GetIns()
+	config.SetIns(oldConfig)
+	t.Cleanup(func() { config.SetIns(previousGlobal) })
+	exec, _ := newTestExecutorForConfig(t, oldConfig, runners)
+
+	blockerIDs, err := exec.ExecuteJob("github.com/acme/blocker")
+	require.NoError(t, err)
+	<-blockerEntered
+	targetIDs, err := exec.ExecuteJob("github.com/acme/target")
+	require.NoError(t, err)
+
+	newConfig := config.Clone(oldConfig)
+	newConfig.GitHubToken = "new-token"
+	newConfig.ConcurrencyNum = 2
+	newConfig.ReleaseSizeLimit = 201
+	newConfig.ReleaseNumLimit = 202
+	newConfig.RetryMaxCount = 203
+	newConfig.RetryBaseDelay = 204 * time.Millisecond
+	newConfig.SyncOverdueGrace = 205 * time.Minute
+	newConfig.SyncStuckThreshold = 206 * time.Hour
+	newConfig.GitHubAPIConcurrency = 207
+	newConfig.GitHubMinRequestInterval = 208 * time.Millisecond
+	newConfig.GitHubLowRemainingThreshold = 209
+	newConfig.GitHubScheduleJitter = 210 * time.Millisecond
+	newConfig.Storage[0].Path = "new-path"
+	newConfig.Storage[0].Endpoint = "new-endpoint"
+	newConfig.Storage[0].Bucket = "new-bucket"
+	newConfig.Storage[0].Region = "new-region"
+	newConfig.Storage[0].AccessKeyID = "new-access"
+	newConfig.Storage[0].SecretAccessKey = "new-secret"
+	exec.RefreshConfig(newConfig)
+	config.SetIns(newConfig)
+	close(blockerRelease)
+
+	wantStorage := oldConfig.Storage[0]
+	seen := make(map[string]bool)
+	for range 5 {
+		got := <-observed
+		seen[got.component] = true
+		require.Equal(t, oldConfig, got.cfg, "%s runner mixed configuration generations", got.component)
+		require.Equal(t, githubapi.Config{
+			Concurrency:           oldConfig.GitHubAPIConcurrency,
+			MinRequestInterval:    oldConfig.GitHubMinRequestInterval,
+			LowRemainingThreshold: oldConfig.GitHubLowRemainingThreshold,
+		}, got.api, "%s runner selected the wrong GitHub coordinator", got.component)
+		require.Equal(t, []typedef.MultiStorage{wantStorage}, got.storages)
+	}
+	require.Equal(t, map[string]bool{
+		"code": true, "release": true, "issue": true, "wiki": true, "discussion": true,
+	}, seen)
+	waitForJob(t, exec, blockerIDs[0])
+	waitForJob(t, exec, targetIDs[0])
+}
+
 func TestExecuteJobAtGenerationContextDiscardsCommitWhenCancelledBeforePublish(t *testing.T) {
 	var runnerCalls atomic.Int32
 	runners := noOpRunners()
@@ -1029,6 +1154,62 @@ func TestExecuteJobAtGenerationContextDiscardsCommitWhenCancelledBeforePublish(t
 	require.Len(t, jobIDs, 1)
 	waitForJob(t, exec, jobIDs[0])
 	require.Equal(t, int32(1), runnerCalls.Load())
+}
+
+func TestReservedEligibilityRejectionIsTypedAndReleasesAdmission(t *testing.T) {
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name: "repo",
+		URL:  "github.com/acme/repo",
+	}, noOpRunners())
+	runtime := exec.RuntimeConfigSnapshot()
+
+	jobIDs, err := exec.ExecuteJobAtGenerationIfEligibleContext(
+		context.Background(),
+		"github.com/acme/repo",
+		runtime.Generation(),
+		func(_ context.Context, admitted *RuntimeConfigSnapshot, repo typedef.Repository) (bool, error) {
+			require.Equal(t, runtime.Generation(), admitted.Generation())
+			require.Equal(t, "github.com/acme/repo", repo.Key())
+			return false, nil
+		},
+	)
+	var noLongerEligible *RepositoryNoLongerEligibleError
+	require.ErrorAs(t, err, &noLongerEligible)
+	require.Equal(t, "github.com/acme/repo", noLongerEligible.RepositoryKey)
+	require.Empty(t, jobIDs)
+	require.Empty(t, executionStatusCounts(t, testDB))
+
+	jobIDs, err = exec.ExecuteJob("github.com/acme/repo")
+	require.NoError(t, err, "eligibility rejection must release the repository reservation")
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
+}
+
+func TestReservedEligibilityCancellationReleasesAdmissionWithoutPersistence(t *testing.T) {
+	exec, testDB := newTestExecutorForRepo(t, typedef.Repository{
+		Name: "repo",
+		URL:  "github.com/acme/repo",
+	}, noOpRunners())
+	runtime := exec.RuntimeConfigSnapshot()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	jobIDs, err := exec.ExecuteJobAtGenerationIfEligibleContext(
+		ctx,
+		"github.com/acme/repo",
+		runtime.Generation(),
+		func(context.Context, *RuntimeConfigSnapshot, typedef.Repository) (bool, error) {
+			cancel()
+			return false, context.Canceled
+		},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, jobIDs)
+	require.Empty(t, executionStatusCounts(t, testDB))
+
+	jobIDs, err = exec.ExecuteJob("github.com/acme/repo")
+	require.NoError(t, err, "cancelled eligibility must release the repository reservation")
+	require.Len(t, jobIDs, 1)
+	waitForJob(t, exec, jobIDs[0])
 }
 
 func TestExecuteJobLimitsActualRunnerConcurrencyAndKeepsOverflowPending(t *testing.T) {
@@ -1352,7 +1533,7 @@ func TestExecuteJobExpandedBatchIsAtomicWhenSecondRepositoryIsActive(t *testing.
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
@@ -1394,7 +1575,7 @@ func TestExecuteJobExpandedBatchRollsBackAllRowsWhenLaterPersistenceFails(t *tes
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
@@ -1433,7 +1614,7 @@ func TestExecuteJobRejectsDuplicateKeysWithinExpandedBatchBeforePersistence(t *t
 	}}}, noOpRunners())
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "https://github.com/acme/alpha"},
 			{Name: "alpha-copy", URL: "github.com/acme/alpha/"},

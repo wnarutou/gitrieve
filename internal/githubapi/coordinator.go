@@ -42,6 +42,38 @@ type permit struct {
 	once sync.Once
 }
 
+type scopeContextKey struct{}
+
+// Scope owns the API coordinator for one immutable runtime configuration
+// generation. Jobs from the same generation share pacing and quota state,
+// while an already-admitted old job never switches to a newly published one.
+type Scope struct {
+	cfg         Config
+	coordinator *coordinator
+}
+
+func NewScope(cfg Config) *Scope {
+	return &Scope{cfg: cfg, coordinator: newCoordinator(cfg)}
+}
+
+func WithScope(ctx context.Context, scope *Scope) context.Context {
+	if scope == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, scopeContextKey{}, scope)
+}
+
+func ConfigFromContext(ctx context.Context) (Config, bool) {
+	if ctx == nil {
+		return Config{}, false
+	}
+	scope, ok := ctx.Value(scopeContextKey{}).(*Scope)
+	if !ok || scope == nil {
+		return Config{}, false
+	}
+	return scope.cfg, true
+}
+
 var current atomic.Pointer[coordinator]
 var publicationMu sync.RWMutex
 
@@ -102,6 +134,11 @@ func readPublication(read func()) {
 func Configure(cfg Config) { Publish(cfg, nil) }
 
 func Acquire(ctx context.Context, resource string) (Permit, error) {
+	if ctx != nil {
+		if scope, ok := ctx.Value(scopeContextKey{}).(*Scope); ok && scope != nil {
+			return scope.coordinator.acquire(ctx, resource)
+		}
+	}
 	c := loadCoordinator()
 	return c.acquire(ctx, resource)
 }

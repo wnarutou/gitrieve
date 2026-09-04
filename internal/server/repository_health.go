@@ -149,20 +149,20 @@ func latestDuration(stats db.RepositoryRunStats, hasRuns bool, now time.Time) *i
 
 func repositoryHealthStatus(overview RepositoryOverview, hasRuns bool) string {
 	switch {
-	case overview.Stuck:
-		return "stuck"
-	case overview.LastStatus == string(StatusFailed):
-		return "failed"
-	case overview.Overdue:
-		return "overdue"
 	case !hasRuns:
 		return "never_synced"
-	case overview.LastStatus == string(StatusCancelled):
-		return "cancelled"
+	case overview.Stuck:
+		return "stuck"
 	case overview.LastStatus == string(StatusPending):
 		return "pending"
 	case overview.LastStatus == string(StatusRunning):
 		return "running"
+	case overview.LastStatus == string(StatusFailed):
+		return "failed"
+	case overview.LastStatus == string(StatusCancelled):
+		return "cancelled"
+	case overview.Overdue:
+		return "overdue"
 	default:
 		return "healthy"
 	}
@@ -195,7 +195,9 @@ func summarizeRepositorySnapshot(in []RepositoryOverview) RepositoryHealthSummar
 		case string(StatusCancelled):
 			summary.Cancelled++
 		default:
-			summary.Healthy++
+			if overview.HealthStatus == "healthy" {
+				summary.Healthy++
+			}
 		}
 		if overview.Overdue {
 			summary.Overdue++

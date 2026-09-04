@@ -410,12 +410,23 @@ func TestReloadConfig(t *testing.T) {
 	s := server.NewConfigTestServer(config.GetIns(), testDB, refresher)
 	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 
-	writeFile(t, path, "repository:\n  - name: two\n    url: github.com/two/repo\n    cron: '@every 1m'\n")
+	onDisk := []byte("# this is the generation Reload must publish\nrepository:\n  - name: two\n    url: github.com/two/repo\n    cron: '@every 1m'\n")
+	require.NoError(t, os.WriteFile(path, onDisk, 0o644))
+	afterRead := []byte("# operator edit made after Reload read the file\nrepository:\n  - name: three\n    url: github.com/three/repo\n")
+	s.SetReloadConfig(func() error {
+		if err := config.Reload(); err != nil {
+			return err
+		}
+		return os.WriteFile(path, afterRead, 0o644)
+	})
 	code, _ := getJSON(t, s, http.MethodPost, "/api/config/reload", "")
 	require.Equal(t, 200, code)
 	require.Equal(t, "two", s.Cfg().Repository[0].Name)
 	require.Len(t, refresher.configs, 1)
 	require.Equal(t, "@every 1m", refresher.configs[0].Repository[0].Cron)
+	afterReload, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, afterRead, afterReload, "reload must not overwrite bytes edited after its read")
 }
 
 func TestConfigSnapshotAccessorCannotMutatePublishedAPIConfig(t *testing.T) {

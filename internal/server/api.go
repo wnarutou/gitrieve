@@ -25,8 +25,9 @@ type API struct {
 	config              *config.Config
 	db                  *db.DB
 	executor            *executor.Executor
+	reloadConfig        func() error
 	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
-	bulkExecute         func(context.Context, string, uint64) ([]string, error)
+	bulkExecute         func(context.Context, string, uint64, executor.EligibilityCheck) ([]string, error)
 	scheduleRefresher   ScheduleRefresher
 }
 
@@ -41,10 +42,10 @@ func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
 	if exec != nil {
 		initial = exec.RuntimeConfigSnapshot().Config()
 	}
-	api := &API{config: initial, db: db, executor: exec}
+	api := &API{config: initial, db: db, executor: exec, reloadConfig: config.Reload}
 	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
 	if exec != nil {
-		api.bulkExecute = exec.ExecuteJobAtGenerationContext
+		api.bulkExecute = exec.ExecuteJobAtGenerationIfEligibleContext
 	}
 	return api
 }
@@ -80,6 +81,15 @@ func (a *API) publishPersistAndRefreshConfigLocked(next *config.Config, saveFail
 	if err := config.SaveSnapshot(published); err != nil {
 		message = saveFailurePrefix + err.Error()
 	}
+	return published, joinMessages(message, a.refreshSchedules(published))
+}
+
+// publishAndRefreshConfigLocked installs one in-memory generation and updates
+// schedules without writing config.yaml. Reload uses this path because the
+// operator's on-disk bytes are the source of truth for that operation.
+func (a *API) publishAndRefreshConfigLocked(next *config.Config) (*config.Config, string) {
+	published := a.publishConfigLocked(next)
+	message := ""
 	return published, joinMessages(message, a.refreshSchedules(published))
 }
 
@@ -202,7 +212,11 @@ bulkLoop:
 			break
 		}
 
-		_, executeErr := a.bulkExecute(ctx, candidate.Key(), runtime.Generation())
+		_, executeErr := a.bulkExecute(ctx, candidate.Key(), runtime.Generation(),
+			func(checkCtx context.Context, admitted *executor.RuntimeConfigSnapshot, repository typedef.Repository) (bool, error) {
+				return a.bulkRepositoryEligible(checkCtx, admitted, repository.Key(), req.Selector, time.Now())
+			})
+		var noLongerEligible *executor.RepositoryNoLongerEligibleError
 		switch {
 		case executeErr == nil:
 			result.Queued++
@@ -214,6 +228,8 @@ bulkLoop:
 		case errors.Is(executeErr, executor.ErrRepositoryNotFound):
 			result.NoLongerEligible++
 		case errors.Is(executeErr, executor.ErrConfigGenerationChanged):
+			result.NoLongerEligible++
+		case errors.As(executeErr, &noLongerEligible):
 			result.NoLongerEligible++
 		default:
 			result.FailedToEnqueue++

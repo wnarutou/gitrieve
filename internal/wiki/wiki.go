@@ -35,10 +35,10 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		return err
 	}
 
-	cfg := config.GetIns()
+	cfg := config.GetExecutionConfig(ctx)
 	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
 
-	gitrepo, _, err := client.Repositories.Get(context.Background(), r.Owner, r.Name)
+	gitrepo, _, err := client.Repositories.Get(ctx, r.Owner, r.Name)
 	if err != nil {
 		ui.Errorf("Get repository %s fail", repo.URL)
 		return err

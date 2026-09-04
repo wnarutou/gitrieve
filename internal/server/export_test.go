@@ -44,10 +44,18 @@ func (s *TestServer) SetBulkRepositoryStats(load func(context.Context, typedef.R
 	s.api.bulkRepositoryStats = load
 }
 
+// SetReloadConfig replaces the disk-read operation so tests can make a
+// deterministic edit after the read but before API publication completes.
+func (s *TestServer) SetReloadConfig(reload func() error) {
+	s.api.reloadConfig = reload
+}
+
 // SetBulkExecute replaces bulk's final Executor call for deterministic error
 // and cancellation branch coverage.
 func (s *TestServer) SetBulkExecute(execute func(context.Context, string, uint64) ([]string, error)) {
-	s.api.bulkExecute = execute
+	s.api.bulkExecute = func(ctx context.Context, key string, generation uint64, _ executor.EligibilityCheck) ([]string, error) {
+		return execute(ctx, key, generation)
+	}
 }
 
 // BulkRepositoryStatsQueryPlan returns SQLite's plan for the exact production

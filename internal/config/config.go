@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
@@ -42,6 +43,37 @@ var vp *viper.Viper
 var stateMu sync.Mutex
 var ins atomic.Pointer[Config]
 var publishGitHubAPI = githubapi.Publish
+
+type executionConfigContextKey struct{}
+
+// ExecutionSnapshot is an immutable configuration generation carried by one
+// admitted executor job. Its contents are never republished process-wide.
+type ExecutionSnapshot struct {
+	config *Config
+}
+
+func NewExecutionSnapshot(cfg *Config) *ExecutionSnapshot {
+	return &ExecutionSnapshot{config: Clone(cfg)}
+}
+
+// WithExecutionSnapshot binds a frozen configuration generation to ctx.
+func WithExecutionSnapshot(ctx context.Context, snapshot *ExecutionSnapshot) context.Context {
+	if snapshot == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, executionConfigContextKey{}, snapshot)
+}
+
+// GetExecutionConfig returns the job-bound configuration when present, and
+// preserves the package-global behavior for CLI/daemon callers otherwise.
+func GetExecutionConfig(ctx context.Context) *Config {
+	if ctx != nil {
+		if snapshot, ok := ctx.Value(executionConfigContextKey{}).(*ExecutionSnapshot); ok && snapshot != nil {
+			return Clone(snapshot.config)
+		}
+	}
+	return GetIns()
+}
 
 // configPublicationReadTestHook is a package-private synchronization seam for
 // tests that need to substitute the publication read gate itself.
@@ -274,11 +306,19 @@ func GetReleaseNumLimit() int {
 	return currentConfig().ReleaseNumLimit
 }
 
+func GetReleaseNumLimitContext(ctx context.Context) int {
+	return executionConfig(ctx).ReleaseNumLimit
+}
+
 // GetReleaseSizeLimit returns the max total release size to keep. Init seeds it
 // to 300000000 when the config value is zero; a negative value means "no
 // limit". It is read-only so it is safe under concurrent workers.
 func GetReleaseSizeLimit() int {
 	return currentConfig().ReleaseSizeLimit
+}
+
+func GetReleaseSizeLimitContext(ctx context.Context) int {
+	return executionConfig(ctx).ReleaseSizeLimit
 }
 
 // GetConcurrencyNum returns the max number of concurrent scheduler jobs. Init
@@ -318,6 +358,11 @@ func GetGitHubAPIConfig() githubapi.Config {
 	return gitHubAPIConfig(currentConfig())
 }
 
+// GitHubAPIConfigFrom returns the API-coordination inputs belonging to cfg.
+func GitHubAPIConfigFrom(cfg *Config) githubapi.Config {
+	return gitHubAPIConfig(cfg)
+}
+
 func gitHubAPIConfig(cfg *Config) githubapi.Config {
 	if cfg == nil {
 		return githubapi.Config{}
@@ -332,6 +377,20 @@ func GetRetryConfig() retry.Config {
 		MaxRetries: GetRetryMaxCount(),
 		BaseDelay:  GetRetryBaseDelay(),
 	}
+}
+
+func GetRetryConfigContext(ctx context.Context) retry.Config {
+	cfg := executionConfig(ctx)
+	return retry.Config{MaxRetries: cfg.RetryMaxCount, BaseDelay: cfg.RetryBaseDelay}
+}
+
+func executionConfig(ctx context.Context) *Config {
+	if ctx != nil {
+		if snapshot, ok := ctx.Value(executionConfigContextKey{}).(*ExecutionSnapshot); ok && snapshot != nil && snapshot.config != nil {
+			return snapshot.config
+		}
+	}
+	return currentConfig()
 }
 
 // validateIdentity ensures every repository entry has a usable identity (a
