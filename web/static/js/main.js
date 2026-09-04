@@ -689,6 +689,11 @@ async function renderRepositories(expectedRouteEpoch) {
         const detail = r.latest_execution_id
             ? '<button class="btn btn-sm btn-execution-details" data-key="' + esc(repoKey(r)) + '">Details</button>' : '';
         return `<tr>
+            <td class="actions">${detail}
+                <button class="btn btn-sm btn-primary btn-run-repo" data-key="${esc(repoKey(r))}">Execute</button>
+                <button class="btn btn-sm btn-edit-repo" data-key="${esc(repoKey(r))}">Edit</button>
+                <button class="btn btn-sm btn-danger btn-del-repo" data-key="${esc(repoKey(r))}">Delete</button>
+            </td>
             <td>${repositoryHealthBadge(r)}</td>
             <td><strong>${esc(r.Name)}</strong><br><span class="muted">${esc(r.URL || '-')}</span></td>
             <td>${fmtTime(r.last_attempt_time)}</td>
@@ -696,11 +701,6 @@ async function renderRepositories(expectedRouteEpoch) {
             <td>${esc(r.last_duration_seconds === null || r.last_duration_seconds === undefined ? '-' : r.last_duration_seconds + 's')}</td>
             <td class="muted" title="${esc(r.schedule_error || '')}">${esc(nextRun)}</td>
             <td class="err-cell" title="${esc(r.last_error_message || '')}">${esc(r.last_error_message || '-')}</td>
-            <td class="actions">${detail}
-                <button class="btn btn-sm btn-primary btn-run-repo" data-key="${esc(repoKey(r))}">Execute</button>
-                <button class="btn btn-sm btn-edit-repo" data-key="${esc(repoKey(r))}">Edit</button>
-                <button class="btn btn-sm btn-danger btn-del-repo" data-key="${esc(repoKey(r))}">Delete</button>
-            </td>
         </tr>`;
     }).join('');
 
@@ -726,7 +726,7 @@ async function renderRepositories(expectedRouteEpoch) {
             </div>
         </div></div>
         <div class="panel repository-table">
-            ${repos.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Status</th><th>Name / URL</th><th>Last attempt</th><th>Last success</th><th>Duration</th><th>Next run</th><th>Error summary</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
+            ${repos.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Actions</th><th>Status</th><th>Name / URL</th><th>Last attempt</th><th>Last success</th><th>Duration</th><th>Next run</th><th>Error summary</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
                 '<div class="empty">No repositories match this view.</div>'}
             ${repos.length ? paginationHTML(state.reposPage, pages, total, 'repos') : ''}
         </div>`;
