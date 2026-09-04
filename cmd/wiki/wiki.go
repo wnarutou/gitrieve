@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"github.com/wnarutou/gitrieve/internal/ui"
 	"github.com/wnarutou/gitrieve/internal/wiki"
@@ -53,6 +54,10 @@ func runWiki(cmd *cobra.Command, args []string) {
 			if ctx.Err() != nil {
 				ui.Printf("Download cancelled")
 				break
+			}
+			if reason, ok := syncresult.SkippedReason(err); ok {
+				ui.Printf("Skipped: %s", reason)
+				continue
 			}
 			ui.Errorf("Error running %s, %s", repo.Name, err)
 			// move on to next repo

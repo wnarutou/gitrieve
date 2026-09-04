@@ -3,8 +3,8 @@ package db
 import "fmt"
 
 // Migrate upgrades an existing database to the current schema. Additive-only:
-// it adds the repo_key column to executions when missing and never backfills or
-// drops data. Call once at server startup (after Initialize).
+// it adds missing schema without backfilling, rewriting, or dropping data. Call
+// once at server startup (after Initialize).
 func Migrate(d *DB) error {
 	has, err := columnExists(d, "executions", "repo_key")
 	if err != nil {
@@ -14,6 +14,9 @@ func Migrate(d *DB) error {
 		if _, err := d.Exec(`ALTER TABLE executions ADD COLUMN repo_key TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("add executions.repo_key: %w", err)
 		}
+	}
+	if _, err := d.Exec(componentSchema + executionIndexSchema); err != nil {
+		return fmt.Errorf("add component execution schema: %w", err)
 	}
 	return nil
 }

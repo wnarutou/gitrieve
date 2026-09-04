@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/db"
+	internalserver "github.com/wnarutou/gitrieve/internal/server"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -24,6 +28,32 @@ func TestServerRootRoute(t *testing.T) {
 	if resp.Code != 200 {
 		t.Errorf("Expected status 200, got %d", resp.Code)
 	}
+}
+
+func TestServerReconcilesInterruptedExecutionsBeforeServing(t *testing.T) {
+	executionID := fmt.Sprintf("interrupted-startup-%d", time.Now().UnixNano())
+	database, err := db.Initialize(internalserver.GetServerConfig().DbPath)
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+	_, err = database.Exec(`
+		INSERT INTO executions (id, job_name, repo_key, start_time, status)
+		VALUES (?, ?, ?, ?, ?)`, executionID, "repo", "github.com/test/interrupted", time.Now(), "running")
+	require.NoError(t, err)
+	require.NoError(t, database.CreateComponents(context.Background(), executionID, []db.ComponentName{db.ComponentCode}))
+	require.NoError(t, database.StartComponent(context.Background(), executionID, db.ComponentCode, time.Now()))
+	require.NoError(t, database.Close())
+
+	server := NewServer(nil)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	var executionStatus, componentStatus string
+	require.NoError(t, server.database.QueryRow(
+		`SELECT status FROM executions WHERE id = ?`, executionID,
+	).Scan(&executionStatus))
+	require.NoError(t, server.database.QueryRow(
+		`SELECT status FROM execution_components WHERE execution_id = ?`, executionID,
+	).Scan(&componentStatus))
+	require.Equal(t, "failed", executionStatus)
+	require.Equal(t, "failed", componentStatus)
 }
 
 func TestServerStartsConfiguredCronJobs(t *testing.T) {

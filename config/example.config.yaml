@@ -67,6 +67,8 @@ githubApiConcurrency: 2
 githubMinRequestInterval: 200ms
 githubLowRemainingThreshold: 100
 githubScheduleJitter: 30s
+syncOverdueGrace: 30m
+syncStuckThreshold: 24h
 cocurrencyNum: 6
 releaseSizeLimit: 300000000
 releaseNumLimit: 3

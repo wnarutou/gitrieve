@@ -54,6 +54,43 @@ code/wiki/issue/discussion/release. The lock is per-host and per-working-directo
 multi-host writes to shared storage (e.g. two machines writing one S3 bucket) are
 not guarded. Lock files are never deleted.
 
+### Server repository sync health
+
+`executions` remains the historical source of truth; do not add a materialized
+repository-state table without a separate design. `internal/db.RepositoryRunStats`
+uses `idx_executions_repo_start` for each latest attempt and
+`idx_executions_repo_status_end` for counts and latest success. Preserve those
+access paths and the 6,000 repositories x 100 executions benchmark when changing
+the overview query.
+
+Server cron, `POST /api/jobs`, and `POST /api/jobs/bulk` all enqueue through the
+same `Executor`. `cocurrencyNum` (intentional legacy spelling) caps actual
+running work, not just scheduler callbacks. Pending and running work must remain
+cancellable, and a repository with an active execution must not be enqueued a
+second time. Startup reconciles orphaned pending/running executions and active
+component rows to failed.
+
+Overall `completed` means every enabled component is `completed` or `skipped`.
+Any enabled component failure makes the execution `failed`, but ordinary
+failure does not prevent later enabled components from running. A skip is only
+for a recognizable unsupported capability, never for permission, network,
+storage, parsing, or rate-limit errors. Historical executions may legitimately
+have no component rows.
+
+Repository health precedence is never-synced, stuck, active pending/running,
+failed/cancelled, overdue, then healthy. Keep last attempt separate from last
+success, and compute summary counts across all search matches before health/
+diagnostic filters and pagination. Bulk retry must recompute and confirm the
+current eligible count, then account for partial outcomes.
+
+Stuck classification applies when the latest execution has remained either
+`pending` or `running` beyond `syncStuckThreshold`; do not narrow it to only
+running work.
+
+**Critical UI invariant:** the Repositories page refreshes only on an explicit
+user request. Never add polling, timer-triggered reloads, or SSE-completion
+reloads for this page.
+
 ### Deletion-safe sync (critical invariant — do not regress)
 A core design goal: **once code and history are pulled locally, a sync must never delete them**, even when the upstream repo is taken down, DMCA-disabled, deleted, made private, or replaced with a single README. This makes gitrieve a true archive/backup tool, not a mirror. When modifying `internal/repository/repository.go` (`Sync`), preserve these guarantees:
 
@@ -94,6 +131,8 @@ githubApiConcurrency: <uint, default 2>
 githubMinRequestInterval: <duration, default 200ms>
 githubLowRemainingThreshold: <int, default 100>
 githubScheduleJitter: <duration, default 30s; 0s disables daemon staggering>
+syncOverdueGrace: <duration, default 30m>
+syncStuckThreshold: <duration, default 24h>
 ```
 
 ## Testing

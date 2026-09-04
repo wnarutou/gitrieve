@@ -124,6 +124,16 @@ gitrieve server
 
 From the UI you can trigger archive jobs, view real-time logs, and edit repository/storage configuration without touching `config.yaml` by hand. Repository cron schedules are refreshed immediately after repository edits, config imports, and config reloads. The server is configured via an optional `server` section in `config.yaml` (host, port, and optional bearer-token auth).
 
+The Repositories page provides server-side health counts, failed/never/overdue/
+stuck filters, attention-first sorting, component detail, and safe bulk retry.
+It distinguishes the latest attempt from the latest fully successful backup.
+Stuck includes executions that remain either pending or running beyond
+`syncStuckThreshold`.
+An unsupported enabled component is recorded as skipped; a real component
+failure makes the overall execution fail. The page **never refreshes
+automatically** from polling, timers, or job-completion SSE events: use its
+Refresh button (or revisit the page) when you want a new snapshot.
+
 See the [Web UI guide](docs/web-ui.md) and the [API reference](docs/api.md) for details.
 
 ## Configuration
@@ -135,9 +145,21 @@ githubApiConcurrency: 2
 githubMinRequestInterval: 200ms
 githubLowRemainingThreshold: 100
 githubScheduleJitter: 30s
+syncOverdueGrace: 30m
+syncStuckThreshold: 24h
+cocurrencyNum: 6
 ```
 
 `githubScheduleJitter: 0s` disables staggering. Staggering applies only to daemon cron jobs; manual commands and Web API jobs start immediately. These settings reduce bursts but do not increase GitHub quota and do not coordinate separate processes or hosts.
+
+`syncOverdueGrace` and `syncStuckThreshold` default to `30m` and `24h`;
+the stuck threshold applies to both pending and running executions, and
+non-positive values select those defaults. The existing, intentionally spelled
+`cocurrencyNum` setting limits actual running executor work across server cron,
+manual, and bulk requests. Extra work remains pending, and duplicate active
+work for one repository is rejected. On restart, the server marks executions
+and component rows left pending/running by the prior process as failed so they
+cannot remain active forever.
 
 For configuration, you can check out this [example](config/example.config.yaml).
 
@@ -194,4 +216,3 @@ docker compose up -d
 
 The released image is a multi-arch manifest covering `linux/amd64` and
 `linux/arm64`, so it works on both x86_64 and Apple Silicon machines.
-

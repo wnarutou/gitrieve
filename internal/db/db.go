@@ -5,6 +5,32 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo required
 )
 
+const componentSchema = `
+	CREATE TABLE IF NOT EXISTS execution_components (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		execution_id TEXT NOT NULL,
+		component TEXT NOT NULL,
+		status TEXT NOT NULL,
+		start_time DATETIME,
+		end_time DATETIME,
+		error_message TEXT,
+		UNIQUE(execution_id, component),
+		FOREIGN KEY (execution_id) REFERENCES executions(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_execution_components_execution
+		ON execution_components(execution_id);
+`
+
+const executionIndexSchema = `
+	CREATE INDEX IF NOT EXISTS idx_executions_repo_start
+		ON executions(repo_key, start_time DESC);
+	CREATE INDEX IF NOT EXISTS idx_executions_repo_status_end
+		ON executions(repo_key, status, end_time DESC);
+	CREATE INDEX IF NOT EXISTS idx_executions_status
+		ON executions(status);
+`
+
 type DB struct {
 	*sql.DB
 }
@@ -60,7 +86,18 @@ func Initialize(path string) (*DB, error) {
 			message TEXT NOT NULL,
 			FOREIGN KEY (execution_id) REFERENCES executions(id)
 		);
-	`)
+	` + componentSchema)
+	if err != nil {
+		return &DB{db}, err
+	}
+
+	hasRepoKey, err := columnExists(&DB{db}, "executions", "repo_key")
+	if err != nil {
+		return &DB{db}, err
+	}
+	if hasRepoKey {
+		_, err = db.Exec(executionIndexSchema)
+	}
 
 	return &DB{db}, err
 }

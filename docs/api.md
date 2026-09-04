@@ -46,6 +46,14 @@ Requests missing or mismatching the token are rejected. When `authEnabled` is `f
 
 ## Jobs
 
+All server-originated work (cron, single-job requests, and bulk retries) enters
+the same executor queue. `cocurrencyNum` (the existing spelling) limits actual
+running work; accepted work remains `pending` until a slot is available. A
+repository cannot have two pending/running executions. On server startup, any
+execution and component left pending/running by the previous process is marked
+`failed` with an interruption message, so a restart cannot leave permanent
+active rows.
+
 ### Create a job
 
 Trigger an archive job for a repository defined in configuration.
@@ -71,14 +79,14 @@ POST /api/jobs
 ```json
 {
   "job_ids": ["1719800000", "1719800001"],
-  "status": "running"
+  "status": "pending"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `job_ids` | array of string | One job identifier per expanded repository; pass each to the logs/cancel endpoints. A `repo`-type entry yields a single ID; a `user`/`org` entry yields one ID per concrete member repository |
-| `status` | string | Initial status, one of `pending` \| `running` \| `completed` \| `failed` \| `cancelled` |
+| `status` | string | Always `pending`: accepted jobs wait for an executor slot before becoming `running` |
 
 **Example**
 
@@ -92,10 +100,82 @@ curl -X POST http://localhost:8080/api/jobs \
 
 | Code | Meaning |
 |---|---|
-| 200 | Job started |
+| 200 | Job queued |
 | 400 | Invalid request body |
+| 409 | The repository already has a `pending` or `running` execution |
 | 404 | Repository not found in configuration |
 | 500 | Failed to start the job |
+
+---
+
+### Bulk retry repositories
+
+Retry the current server-side set of failed, cancelled, or overdue repositories.
+The request selects repositories rather than supplying a page-sized ID list.
+
+```
+POST /api/jobs/bulk
+```
+
+**Request body**
+
+```json
+{
+  "selector": {
+    "search": "github.com/acme",
+    "health": "failed",
+    "overdue": false
+  },
+  "expected_count": 37
+}
+```
+
+`selector.search`, `selector.health`, and `selector.overdue` use the same
+meaning as the repository-list filters. The server intersects that selection
+with repositories currently eligible to retry: latest status `failed` or
+`cancelled`, or `overdue=true`. Stuck executions are active and are never
+eligible; cancel them first. `expected_count` is the count the operator
+confirmed in the UI.
+
+The server recomputes the eligible count immediately before enqueueing. If it
+differs from `expected_count`, the response is `409 Conflict` with the new
+count, and the client must show a new confirmation:
+
+```json
+{
+  "code": 409,
+  "data": {"actual_count": 39},
+  "message": "Eligible repository count changed"
+}
+```
+
+On success, every repository in the confirmed snapshot is accounted for:
+
+```json
+{
+  "code": 200,
+  "data": {
+    "requested": 37,
+    "queued": 34,
+    "skipped_active": 1,
+    "no_longer_eligible": 1,
+    "failed_to_enqueue": 1
+  },
+  "message": ""
+}
+```
+
+The endpoint rechecks each repository and continues after an individual
+failure. Therefore `requested` always equals `queued + skipped_active +
+no_longer_eligible + failed_to_enqueue`. It intentionally does not return
+thousands of job IDs; use the Jobs page/API for individual executions.
+
+| Code | Meaning |
+|---|---|
+| 200 | Confirmed set processed; inspect the outcome counts for partial results |
+| 400 | Malformed selector or expected count |
+| 409 | Eligible count changed; confirm again using `actual_count` |
+| 500 | Executor unavailable or initial repository snapshot failed |
 
 ---
 
@@ -215,6 +295,60 @@ curl "http://localhost:8080/api/jobs?repository=github.com/wnarutou/gitrieve"
 
 ---
 
+### List job components
+
+Return the persisted component outcomes for one execution.
+
+```
+GET /api/jobs/:id/components
+```
+
+```json
+{
+  "code": 200,
+  "data": {
+    "components": [
+      {
+        "id": 1,
+        "execution_id": "1719800000",
+        "component": "code",
+        "status": "completed",
+        "start_time": "2026-08-05T10:00:00Z",
+        "end_time": "2026-08-05T10:02:00Z",
+        "error_message": ""
+      },
+      {
+        "id": 2,
+        "execution_id": "1719800000",
+        "component": "wiki",
+        "status": "skipped",
+        "start_time": "2026-08-05T10:02:00Z",
+        "end_time": "2026-08-05T10:02:01Z",
+        "error_message": "repository has no wiki"
+      }
+    ]
+  },
+  "message": ""
+}
+```
+
+`component` is `code`, `release`, `issues`, `wiki`, or `discussion`. Component
+status is `pending`, `running`, `completed`, `failed`, `skipped`, or
+`cancelled`. Disabled optional components have no row. A legitimate unsupported
+capability is `skipped` and does not fail the overall execution; any enabled
+component `failed` makes the overall execution `failed`, although later
+components are still attempted. Historical executions created before component
+tracking return an empty `components` array.
+
+| Code | Meaning |
+|---|---|
+| 200 | Components returned |
+| 400 | Job ID is empty |
+| 404 | Execution does not exist |
+| 500 | Component lookup failed |
+
+---
+
 ### Stream job logs (SSE)
 
 Stream the logs of a job in real time using Server-Sent Events.
@@ -286,7 +420,7 @@ Repositories are read from and written back to `config.yaml`. The `:id` path par
 
 ### List repositories
 
-List repositories from `config.yaml` (see [Configuration](../README.md#configuration)) with per-repository execution stats, pagination, and an optional fuzzy name-or-URL filter.
+List repositories from `config.yaml` (see [Configuration](../README.md#configuration)) with fleet health, server-side filtering/sorting, and pagination.
 
 ```
 GET /api/repositories
@@ -297,8 +431,13 @@ GET /api/repositories
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `page` | int | `1` | Page number (1-based) |
-| `limit` | int | `20` | Items per page; clamped to `1`–`100` |
+| `limit` | int | `20` | Items per page; values outside `1`–`100` are rejected |
 | `search` | string | — | Fuzzy (partial) match on repository **name or URL**, case-insensitive for ASCII |
+| `health` | string | — | `healthy`, `failed`, `overdue`, `stuck`, `never_synced`, `cancelled`, `pending`, `running`, or `syncing` (`pending` plus `running`) |
+| `overdue` | bool | — | `true` or `false`; independent of the primary health category |
+| `stuck` | bool | — | `true` or `false`; independent of the primary health category |
+| `sort` | string | `attention` | `attention`, `name`, `last_attempt`, or `last_success` |
+| `direction` | string | `asc` | `asc` or `desc` |
 
 **Response `data`** — a paginated object (not a bare array). Each item embeds the repository fields (PascalCase, matching the `repository:` config entries) plus lower-cased execution stats.
 
@@ -323,10 +462,31 @@ GET /api/repositories
       "next_run_time": "2026-08-05T11:00:00Z",
       "total_runs": 42,
       "success_runs": 40,
-      "failed_runs": 2
+      "failed_runs": 2,
+      "last_status": "failed",
+      "health_status": "failed",
+      "last_attempt_time": "2026-08-05T10:02:30Z",
+      "last_success_time": "2026-08-04T10:02:30Z",
+      "last_duration_seconds": 151,
+      "latest_execution_id": "1719800000",
+      "last_error_message": "issues: API rate limit exceeded",
+      "overdue": false,
+      "stuck": false,
+      "schedule_error": ""
     }
   ],
-  "total": 42,
+  "summary": {
+    "total": 6000,
+    "healthy": 5800,
+    "failed": 75,
+    "pending": 10,
+    "running": 15,
+    "never_synced": 100,
+    "cancelled": 0,
+    "overdue": 120,
+    "stuck": 2
+  },
+  "total": 6000,
   "page": 1,
   "limit": 20
 }
@@ -346,11 +506,36 @@ GET /api/repositories
 | `repositories[].total_runs` | int | Total executions for the repository |
 | `repositories[].success_runs` | int | Executions that finished `completed` |
 | `repositories[].failed_runs` | int | Executions that finished `failed` |
+| `repositories[].last_status` | string | Raw latest execution status; empty when no execution exists |
+| `repositories[].health_status` | string | Mutually exclusive display health category |
+| `repositories[].last_attempt_time` | string \| null | Start time of the newest attempt, successful or not |
+| `repositories[].last_success_time` | string \| null | End time of the newest overall `completed` execution |
+| `repositories[].last_duration_seconds` | int \| null | Latest execution duration; active executions use elapsed time |
+| `repositories[].latest_execution_id` | string | ID used by logs and component-detail endpoints |
+| `repositories[].last_error_message` | string | Concise latest execution error summary |
+| `repositories[].overdue` | bool | Whether the latest accepted attempt predates the latest cron occurrence outside the grace window |
+| `repositories[].stuck` | bool | Whether the latest execution has remained `pending` or `running` beyond the stuck threshold |
+| `repositories[].schedule_error` | string | Invalid cron diagnostic; such a row cannot be classified overdue |
+| `summary` | object | Fleet counts across all `search` matches, before health/overdue/stuck filters and pagination |
 | `total` | int | Total matching repositories (before pagination) |
 | `page` | int | Current page |
 | `limit` | int | Items per page |
 
 Other embedded repository fields (`UseCache`, `AllBranches`, `Depth`, `DownloadReleases`, `DownloadIssues`, `DownloadWiki`, `DownloadDiscussion`) are the boolean/int options from the config entry.
+
+`last_attempt_time` answers when any attempt most recently began;
+`last_success_time` answers when a fully successful backup most recently
+finished. A newer failure therefore never makes an older successful backup look
+fresh. Overall `completed` means every enabled component completed or was
+legitimately skipped.
+
+Health precedence is `never_synced`, `stuck`, active `pending`/`running`,
+`failed`/`cancelled`, `overdue`, then `healthy`. Summary overdue/stuck counts
+are independent diagnostics and can overlap the mutually exclusive status
+counts. Summary counts cover the whole search-matched fleet, not just the
+current page and not just rows selected by the health/overdue/stuck filters.
+`summary.healthy` is exactly the count selected by `health=healthy` for that
+same search; a completed but overdue repository is not counted as healthy.
 
 **Examples**
 
@@ -366,6 +551,9 @@ curl "http://localhost:8080/api/repositories?search=github.com/wnarutou"
 
 # Page 2 with a custom limit
 curl "http://localhost:8080/api/repositories?page=2&limit=50"
+
+# Combine server-side health diagnostics and attention ordering
+curl "http://localhost:8080/api/repositories?health=failed&overdue=true&sort=attention"
 ```
 
 **Status codes**
@@ -373,6 +561,7 @@ curl "http://localhost:8080/api/repositories?page=2&limit=50"
 | Code | Meaning |
 |---|---|
 | 200 | Repositories returned |
+| 400 | Invalid page, limit, health, overdue, stuck, sort, or direction |
 | 500 | Failed to query execution stats |
 
 ---
@@ -696,6 +885,20 @@ curl http://localhost:8080/api/metrics
 ---
 
 ## Config
+
+Repository health uses two global duration settings:
+
+```yaml
+syncOverdueGrace: 30m
+syncStuckThreshold: 24h
+```
+
+`syncOverdueGrace` delays missed-schedule classification until a cron
+occurrence is outside its grace window. `syncStuckThreshold` flags a `pending`
+or `running` execution whose elapsed time is abnormally long. These are also
+the defaults;
+non-positive values select the defaults. Both settings participate in config
+load/save, export/import, apply, and reload.
 
 ### Export config
 

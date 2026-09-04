@@ -206,6 +206,8 @@ func diffGlobals(cur *config.Config, imp *config.ExportConfig) []FieldChange {
 		{"releaseNumLimit", cur.ReleaseNumLimit, imp.ReleaseNumLimit},
 		{"retryMaxCount", cur.RetryMaxCount, imp.RetryMaxCount},
 		{"retryBaseDelay", cur.RetryBaseDelay.String(), time.Duration(imp.RetryBaseDelay).String()},
+		{"syncOverdueGrace", cur.SyncOverdueGrace.String(), time.Duration(imp.SyncOverdueGrace).String()},
+		{"syncStuckThreshold", cur.SyncStuckThreshold.String(), time.Duration(imp.SyncStuckThreshold).String()},
 		{"githubApiConcurrency", cur.GitHubAPIConcurrency, imp.GitHubAPIConcurrency},
 		{"githubMinRequestInterval", cur.GitHubMinRequestInterval.String(), time.Duration(imp.GitHubMinRequestInterval).String()},
 		{"githubLowRemainingThreshold", cur.GitHubLowRemainingThreshold, imp.GitHubLowRemainingThreshold},
@@ -261,7 +263,7 @@ func buildWarnings(serverChanges []FieldChange) []string {
 // ExportConfig returns the full current config as YAML, usable directly as
 // config.yaml (secrets in plaintext — the export is the source of truth).
 func (a *API) ExportConfig(c *gin.Context) {
-	yamlStr, err := config.ExportFrom(a.config)
+	yamlStr, err := config.ExportFrom(a.configSnapshot())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "导出配置失败: " + err.Error()})
 		return
@@ -288,9 +290,10 @@ func (a *API) PreviewImport(c *gin.Context) {
 	}
 
 	curServer := config.GetServerSection()
-	repos := diffRepositories(a.config.Repository, doc.Repository)
-	storages := diffStorages(a.config.Storage, doc.Storage)
-	globals := diffGlobals(a.config, doc)
+	current := a.configSnapshot()
+	repos := diffRepositories(current.Repository, doc.Repository)
+	storages := diffStorages(current.Storage, doc.Storage)
+	globals := diffGlobals(current, doc)
 	serverChanges := diffServer(curServer, doc.Server)
 
 	data := ImportPreviewData{
@@ -312,9 +315,9 @@ func (a *API) PreviewImport(c *gin.Context) {
 // ApplyImport applies a previously-previewed import. Choices select, per entry,
 // whether the imported or the existing value wins; entries without a choice use
 // the documented defaults (added/modified/globals/server -> imported, deleted ->
-// keep). Builds a complete replacement config and publishes it atomically, then
-// persists via config.Save(); the server section is written to viper (never
-// hot-applied).
+// keep). Builds a complete replacement config, then publishes, persists, and
+// refreshes schedules as one serialized generation. The server section is
+// written to viper but never hot-applied.
 func (a *API) ApplyImport(c *gin.Context) {
 	var req ImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -331,17 +334,14 @@ func (a *API) ApplyImport(c *gin.Context) {
 		return
 	}
 
-	result := a.applyImport(doc, &req)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "配置已应用（内存）但未能持久化: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	a.configMu.Lock()
+	result, next := a.applyImportLocked(doc, &req)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "配置已应用（内存）但未能持久化: ")
+	a.configMu.Unlock()
 	c.JSON(http.StatusOK, Response{Code: 200, Data: result, Message: msg})
 }
 
-func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportResult {
+func (a *API) applyImportLocked(doc *config.ExportConfig, req *ImportRequest) (ImportResult, *config.Config) {
 	var result ImportResult
 	// Build a NEW config instance instead of mutating a.config in place: job
 	// goroutines read a.config / ins / e.cfg.Load() concurrently, and atomic
@@ -350,7 +350,8 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	// built kept/keptSt arrays and writes scalar globals, never mutating shared
 	// backing arrays or nested objects. The new instance is published once it is
 	// fully built (see the publish block before return).
-	next := *a.config
+	current := config.Clone(a.config)
+	next := *current
 	choice := func(m map[string]string, key string, def string) string {
 		if v, ok := m[key]; ok {
 			return v
@@ -361,7 +362,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	// Recompute the classification so choices apply only to the classes the
 	// user actually saw in the preview (modified / deleted). This reads the
 	// current config before any merge.
-	repoDiff := diffRepositories(a.config.Repository, doc.Repository)
+	repoDiff := diffRepositories(current.Repository, doc.Repository)
 	modifiedRepos := map[string]bool{}
 	deletedRepos := map[string]bool{}
 	for _, e := range repoDiff.Modified {
@@ -370,7 +371,7 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 	for _, e := range repoDiff.Deleted {
 		deletedRepos[e.Key] = true
 	}
-	stDiff := diffStorages(a.config.Storage, doc.Storage)
+	stDiff := diffStorages(current.Storage, doc.Storage)
 	modifiedStorages := map[string]bool{}
 	deletedStorages := map[string]bool{}
 	for _, e := range stDiff.Modified {
@@ -482,6 +483,20 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 			result.GlobalsUpdated++
 		}
 	}
+	if choice(req.Choices.GlobalChoices, "syncOverdueGrace", "imported") == "imported" {
+		d := time.Duration(doc.SyncOverdueGrace)
+		if next.SyncOverdueGrace != d {
+			next.SyncOverdueGrace = d
+			result.GlobalsUpdated++
+		}
+	}
+	if choice(req.Choices.GlobalChoices, "syncStuckThreshold", "imported") == "imported" {
+		d := time.Duration(doc.SyncStuckThreshold)
+		if next.SyncStuckThreshold != d {
+			next.SyncStuckThreshold = d
+			result.GlobalsUpdated++
+		}
+	}
 	if choice(req.Choices.GlobalChoices, "githubApiConcurrency", "imported") == "imported" && next.GitHubAPIConcurrency != doc.GitHubAPIConcurrency {
 		next.GitHubAPIConcurrency = doc.GitHubAPIConcurrency
 		result.GlobalsUpdated++
@@ -528,30 +543,24 @@ func (a *API) applyImport(doc *config.ExportConfig, req *ImportRequest) ImportRe
 		result.ServerUpdated++
 	}
 
-	// Publish the fully-built replacement in one place: repoint the API, the
-	// package-global ins (which config.Save() reads), and the executor's atomic
-	// pointer. Concurrent readers (job goroutines) observe either the complete
-	// old or the complete new instance, never a torn one.
-	a.config = &next
-	config.SetIns(&next)
-	if a.executor != nil {
-		a.executor.RefreshConfig(&next)
-	}
-
-	return result
+	// The caller publishes this fully-built replacement only after every
+	// selected section has been applied.
+	return result, &next
 }
 
 // ReloadConfig re-reads config.yaml from disk, repoints the API and executor at
 // the fresh config instance, and replaces the running server's cron schedules.
 // The `server:` section is NOT hot-applied and still requires a restart.
 func (a *API) ReloadConfig(c *gin.Context) {
-	if err := config.Reload(); err != nil {
+	a.configMu.Lock()
+	snapshot, err := a.readReloadSnapshot()
+	if err != nil {
+		a.configMu.Unlock()
 		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "重载配置失败: " + err.Error()})
 		return
 	}
-	a.config = config.GetIns()
-	if a.executor != nil {
-		a.executor.RefreshConfig(config.GetIns())
-	}
-	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: a.refreshSchedules()})
+	published := a.publishReloadConfigLocked(snapshot)
+	message := a.refreshSchedules(published)
+	a.configMu.Unlock()
+	c.JSON(http.StatusOK, Response{Code: 200, Data: gin.H{}, Message: message})
 }

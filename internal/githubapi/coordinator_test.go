@@ -3,6 +3,7 @@ package githubapi
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,426 @@ func TestCoordinatorLimitsConcurrentRequests(t *testing.T) {
 	p2, err := c.acquire(context.Background(), "core")
 	require.NoError(t, err)
 	p2.Done(Observation{})
+}
+
+func installCoordinatorForTest(t *testing.T, cfg Config) {
+	t.Helper()
+	previous := current.Load()
+	publicationMu.Lock()
+	current.Store(newCoordinator(cfg))
+	publicationMu.Unlock()
+	t.Cleanup(func() {
+		publicationMu.Lock()
+		current.Store(previous)
+		publicationMu.Unlock()
+	})
+}
+
+func TestScopesShareOneProcessArbiterAcrossGenerations(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	oldPermit, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	var releaseOld sync.Once
+	t.Cleanup(func() { releaseOld.Do(func() { oldPermit.Done(Observation{}) }) })
+
+	Configure(Config{Concurrency: 1})
+	newScope := NewScope(Config{Concurrency: 1})
+	waitCtx, cancel := context.WithTimeout(WithScope(context.Background(), newScope), 40*time.Millisecond)
+	defer cancel()
+	newPermit, err := Acquire(waitCtx, "core")
+	if newPermit != nil {
+		newPermit.Done(Observation{})
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "new-generation traffic bypassed the held old-generation permit")
+
+	releaseOld.Do(func() { oldPermit.Done(Observation{}) })
+	acquireCtx, acquireCancel := context.WithTimeout(WithScope(context.Background(), newScope), time.Second)
+	defer acquireCancel()
+	newPermit, err = Acquire(acquireCtx, "core")
+	require.NoError(t, err)
+	newPermit.Done(Observation{})
+}
+
+func TestScopePublicationPreservesObservedSecondaryPause(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	permit, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	permit.Done(Observation{Secondary: true, RetryAfter: time.Second})
+
+	Configure(Config{Concurrency: 1})
+	newScope := NewScope(Config{Concurrency: 1})
+	waitCtx, cancel := context.WithTimeout(WithScope(context.Background(), newScope), 40*time.Millisecond)
+	defer cancel()
+	permit, err = Acquire(waitCtx, "graphql")
+	if permit != nil {
+		permit.Done(Observation{})
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "new-generation traffic bypassed an old-generation secondary pause")
+}
+
+func TestProcessArbiterCancellationAndResizeWakeSafely(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	first, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	var releaseFirst sync.Once
+	t.Cleanup(func() { releaseFirst.Do(func() { first.Done(Observation{}) }) })
+
+	newScope := NewScope(Config{Concurrency: 1})
+	type acquireResult struct {
+		permit Permit
+		err    error
+	}
+	cancelCtx, cancelWaiter := context.WithCancel(WithScope(context.Background(), newScope))
+	cancelStarted := make(chan struct{})
+	cancelled := make(chan acquireResult, 1)
+	go func() {
+		close(cancelStarted)
+		permit, acquireErr := Acquire(cancelCtx, "core")
+		cancelled <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	<-cancelStarted
+	select {
+	case result := <-cancelled:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("waiter bypassed the process-wide concurrency limit")
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancelWaiter()
+	result := <-cancelled
+	require.Nil(t, result.permit)
+	require.ErrorIs(t, result.err, context.Canceled)
+
+	secondDone := make(chan acquireResult, 1)
+	go func() {
+		permit, acquireErr := Acquire(WithScope(context.Background(), newScope), "core")
+		secondDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	select {
+	case result = <-secondDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("waiter returned before the concurrency limit was raised")
+	case <-time.After(30 * time.Millisecond):
+	}
+	Configure(Config{Concurrency: 2})
+	select {
+	case result = <-secondDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.permit)
+	case <-time.After(time.Second):
+		t.Fatal("raising concurrency did not wake a waiter")
+	}
+	second := result.permit
+	var releaseSecond sync.Once
+	t.Cleanup(func() { releaseSecond.Do(func() { second.Done(Observation{}) }) })
+
+	Configure(Config{Concurrency: 1})
+	thirdDone := make(chan acquireResult, 1)
+	go func() {
+		permit, acquireErr := Acquire(WithScope(context.Background(), NewScope(Config{Concurrency: 1})), "core")
+		thirdDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	select {
+	case result = <-thirdDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("lowered concurrency admitted work before active calls drained")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseFirst.Do(func() { first.Done(Observation{}) })
+	select {
+	case result = <-thirdDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("lowered concurrency admitted work while active calls still equaled the limit")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseSecond.Do(func() { second.Done(Observation{}) })
+	select {
+	case result = <-thirdDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.permit)
+		result.permit.Done(Observation{})
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not resume after active calls drained below the lowered limit")
+	}
+}
+
+func TestReadPublicationUsesReadBoundary(t *testing.T) {
+	gateHeld := make(chan bool, 1)
+	gateReleased := make(chan bool, 1)
+	hook := &publicationReadBoundaryTestHook{
+		afterLock: func() {
+			unexpectedlyUnlocked := publicationMu.TryLock()
+			if unexpectedlyUnlocked {
+				publicationMu.Unlock()
+			}
+			gateHeld <- !unexpectedlyUnlocked
+		},
+		afterUnlock: func() {
+			unlocked := publicationMu.TryLock()
+			if unlocked {
+				publicationMu.Unlock()
+			}
+			gateReleased <- unlocked
+		},
+	}
+	publicationReadBoundaryHookForTest.Store(hook)
+	t.Cleanup(func() { publicationReadBoundaryHookForTest.CompareAndSwap(hook, nil) })
+
+	callbackCalled := false
+	ReadPublication(func() { callbackCalled = true })
+	require.True(t, callbackCalled)
+	select {
+	case held := <-gateHeld:
+		require.True(t, held, "ReadPublication callback ran without the publication read lock")
+	default:
+		t.Fatal("ReadPublication bypassed the publication read boundary")
+	}
+	select {
+	case released := <-gateReleased:
+		require.True(t, released, "ReadPublication retained the publication read lock")
+	default:
+		t.Fatal("ReadPublication bypassed the publication unlock boundary")
+	}
+}
+
+func TestAcquireWaitsForPublicationBeforeSelectingCoordinator(t *testing.T) {
+	previous := current.Load()
+	old := newCoordinator(Config{Concurrency: 1})
+	publicationMu.Lock()
+	current.Store(old)
+	publicationMu.Unlock()
+	t.Cleanup(func() {
+		publicationMu.Lock()
+		current.Store(previous)
+		publicationMu.Unlock()
+	})
+
+	oldPermit, err := old.acquire(context.Background(), "core")
+	require.NoError(t, err)
+	t.Cleanup(func() { oldPermit.Done(Observation{}) })
+
+	publishEntered := make(chan struct{})
+	publishRelease := make(chan struct{})
+	publishDone := make(chan struct{})
+	var publishReleaseOnce sync.Once
+	selectionEntered := make(chan struct{})
+	selectionProceed := make(chan struct{})
+	selectionGateHeld := make(chan bool, 1)
+	var selectionProceedOnce sync.Once
+	type acquireResult struct {
+		permit Permit
+		err    error
+	}
+	acquireDone := make(chan acquireResult, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	var workers sync.WaitGroup
+	hook := &publicationReadBoundaryTestHook{
+		beforeLock: func() {
+			close(selectionEntered)
+			<-selectionProceed
+		},
+		afterLock: func() {
+			unexpectedlyUnlocked := publicationMu.TryLock()
+			if unexpectedlyUnlocked {
+				publicationMu.Unlock()
+			}
+			selectionGateHeld <- !unexpectedlyUnlocked
+		},
+	}
+	t.Cleanup(func() {
+		cancel()
+		publishReleaseOnce.Do(func() { close(publishRelease) })
+		selectionProceedOnce.Do(func() { close(selectionProceed) })
+		workers.Wait()
+		publicationReadBoundaryHookForTest.CompareAndSwap(hook, nil)
+		select {
+		case result := <-acquireDone:
+			if result.permit != nil {
+				result.permit.Done(Observation{})
+			}
+		default:
+		}
+	})
+
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		Publish(Config{Concurrency: 2}, func() {
+			close(publishEntered)
+			<-publishRelease
+		})
+		close(publishDone)
+	}()
+	select {
+	case <-publishEntered:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for publication writer")
+	}
+
+	publicationReadBoundaryHookForTest.Store(hook)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		permit, acquireErr := Acquire(ctx, "core")
+		acquireDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+
+	select {
+	case <-selectionEntered:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for Acquire to reach the pre-selection barrier")
+	}
+	select {
+	case result := <-acquireDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("Acquire returned while blocked inside coordinator selection")
+	default:
+	}
+	if publicationMu.TryRLock() {
+		publicationMu.RUnlock()
+		t.Fatal("publication writer did not hold the selection gate")
+	}
+
+	publishReleaseOnce.Do(func() { close(publishRelease) })
+	select {
+	case <-publishDone:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for publication writer completion")
+	}
+	selectionProceedOnce.Do(func() { close(selectionProceed) })
+
+	select {
+	case gateHeld := <-selectionGateHeld:
+		require.True(t, gateHeld, "coordinator selection did not hold the publication read gate")
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for coordinator selection gate acquisition")
+	}
+
+	select {
+	case result := <-acquireDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.permit)
+		selectedPermit, ok := result.permit.(*permit)
+		require.True(t, ok)
+		require.Same(t, old, selectedPermit.c, "publication must reconfigure the stable arbiter in place")
+		require.Same(t, current.Load(), selectedPermit.c)
+		result.permit.Done(Observation{})
+	case <-ctx.Done():
+		t.Fatal("Acquire remained blocked on the saturated old coordinator")
+	}
+}
+
+func TestAcquireReleasesPublicationLockBeforeWaitingForPermit(t *testing.T) {
+	previous := current.Load()
+	old := newCoordinator(Config{Concurrency: 1})
+	publicationMu.Lock()
+	current.Store(old)
+	publicationMu.Unlock()
+	t.Cleanup(func() {
+		publicationMu.Lock()
+		current.Store(previous)
+		publicationMu.Unlock()
+	})
+
+	oldPermit, err := old.acquire(context.Background(), "core")
+	require.NoError(t, err)
+	t.Cleanup(func() { oldPermit.Done(Observation{}) })
+
+	selectionGateHeld := make(chan bool, 1)
+	selectionGateReleased := make(chan bool, 1)
+	hook := &publicationReadBoundaryTestHook{
+		afterLock: func() {
+			unexpectedlyUnlocked := publicationMu.TryLock()
+			if unexpectedlyUnlocked {
+				publicationMu.Unlock()
+			}
+			selectionGateHeld <- !unexpectedlyUnlocked
+		},
+		afterUnlock: func() {
+			unlocked := publicationMu.TryLock()
+			if unlocked {
+				publicationMu.Unlock()
+			}
+			selectionGateReleased <- unlocked
+		},
+	}
+	publicationReadBoundaryHookForTest.Store(hook)
+
+	type acquireResult struct {
+		permit Permit
+		err    error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	acquireDone := make(chan acquireResult, 1)
+	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		workers.Wait()
+		publicationReadBoundaryHookForTest.CompareAndSwap(hook, nil)
+		select {
+		case result := <-acquireDone:
+			if result.permit != nil {
+				result.permit.Done(Observation{})
+			}
+		default:
+		}
+	})
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		permit, acquireErr := Acquire(ctx, "core")
+		acquireDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+
+	select {
+	case gateHeld := <-selectionGateHeld:
+		require.True(t, gateHeld, "coordinator selection did not hold the publication read gate")
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for coordinator selection gate acquisition")
+	}
+	select {
+	case gateReleased := <-selectionGateReleased:
+		require.True(t, gateReleased, "coordinator selection retained the publication read gate")
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for coordinator selection gate release")
+	}
+
+	publishDone := make(chan struct{})
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		Publish(Config{Concurrency: 1}, nil)
+		close(publishDone)
+	}()
+	select {
+	case <-publishDone:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("publication was blocked while Acquire waited for a permit")
+	}
+
+	cancel()
+	select {
+	case result := <-acquireDone:
+		require.Nil(t, result.permit)
+		require.ErrorIs(t, result.err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for canceled Acquire")
+	}
 }
 
 func TestCoordinatorPausesOnlyObservedResource(t *testing.T) {

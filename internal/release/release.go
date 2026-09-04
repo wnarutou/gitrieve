@@ -35,8 +35,8 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	releaseNumLimit := config.GetReleaseNumLimit()
-	releaseSizeLimit := config.GetReleaseSizeLimit()
+	releaseNumLimit := config.GetReleaseNumLimitContext(ctx)
+	releaseSizeLimit := config.GetReleaseSizeLimitContext(ctx)
 	r, err := scm.NewRepository(repo.URL)
 	if err != nil {
 		return err
@@ -49,7 +49,7 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 		return err
 	}
 	defer unlock()
-	c, err := github.New()
+	c, err := github.NewWithContext(ctx)
 	if err != nil {
 		return err
 	}

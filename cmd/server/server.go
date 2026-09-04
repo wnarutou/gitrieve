@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -61,6 +62,9 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	if err := db.Migrate(database); err != nil {
 		ui.ErrorfExit("Failed to migrate database: %s", err)
 	}
+	if err := database.ReconcileInterrupted(context.Background(), time.Now()); err != nil {
+		ui.ErrorfExit("Failed to reconcile interrupted executions: %s", err)
+	}
 
 	// Initialize logger
 	log := logger.NewLogger(database)
@@ -106,9 +110,11 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	}
 
 	apiGroup.POST("/api/jobs", api.CreateJob)
+	apiGroup.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	apiGroup.DELETE("/api/jobs/:id", api.CancelJob)
 	apiGroup.GET("/api/jobs", api.GetJobs)
 	apiGroup.GET("/api/jobs/:id/logs", api.GetJobLogs)
+	apiGroup.GET("/api/jobs/:id/components", api.GetJobComponents)
 	apiGroup.GET("/api/repositories", api.GetRepositories)
 	apiGroup.POST("/api/repositories", api.CreateRepository)
 	// *id catch-all: the identity key is a URL like github.com/owner/repo and
@@ -128,9 +134,17 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 }
 
 func (s *Server) setupTestRoutes(db *db.DB) {
+	s.router.POST("/api/jobs/bulk", func(c *gin.Context) {
+		api := internalserver.NewAPI(&config.Config{}, db, nil)
+		api.BulkCreateJobs(c)
+	})
 	s.router.GET("/api/jobs", func(c *gin.Context) {
 		api := internalserver.NewAPI(&config.Config{}, db, nil)
 		api.GetJobs(c)
+	})
+	s.router.GET("/api/jobs/:id/components", func(c *gin.Context) {
+		api := internalserver.NewAPI(&config.Config{}, db, nil)
+		api.GetJobComponents(c)
 	})
 }
 
@@ -192,14 +206,17 @@ func (s *Server) Close() error {
 	s.schedulerMu.Lock()
 	defer s.schedulerMu.Unlock()
 
-	var schedulerErr, databaseErr error
+	var schedulerErr, executorErr, databaseErr error
 	if s.scheduler != nil {
 		schedulerErr = s.scheduler.Shutdown()
+	}
+	if s.executor != nil {
+		executorErr = s.executor.Close()
 	}
 	if s.database != nil {
 		databaseErr = s.database.Close()
 	}
-	return errors.Join(schedulerErr, databaseErr)
+	return errors.Join(schedulerErr, executorErr, databaseErr)
 }
 
 var Cmd = &cobra.Command{

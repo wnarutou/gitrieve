@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 	"gopkg.in/yaml.v3"
@@ -25,18 +26,21 @@ func TestDurationStringYAML(t *testing.T) {
 
 	// A bad duration is rejected.
 	var doc ExportConfig
-	require.Error(t, yaml.Unmarshal([]byte("retryBaseDelay: 5pigs"), &doc))
+	err = yaml.Unmarshal([]byte("retryBaseDelay: 5pigs"), &doc)
+	require.ErrorContains(t, err, "invalid duration")
 }
 
 func TestExportFromRoundTrip(t *testing.T) {
 	writeTmpConfig(t, "server:\n  host: 127.0.0.1\n  port: \"8081\"\n")
 
 	cfg := &Config{
-		Repository:     []typedef.Repository{{Name: "r1", URL: "github.com/a/b"}},
-		Storage:        []typedef.MultiStorage{{Storage: typedef.Storage{Name: "local", Type: "file", Path: "/tmp"}}},
-		GitHubToken:    "tok",
-		ConcurrencyNum: 3,
-		RetryBaseDelay: 5 * time.Second,
+		Repository:         []typedef.Repository{{Name: "r1", URL: "github.com/a/b"}},
+		Storage:            []typedef.MultiStorage{{Storage: typedef.Storage{Name: "local", Type: "file", Path: "/tmp"}}},
+		GitHubToken:        "tok",
+		ConcurrencyNum:     3,
+		RetryBaseDelay:     5 * time.Second,
+		SyncOverdueGrace:   45 * time.Minute,
+		SyncStuckThreshold: 12 * time.Hour,
 	}
 	yamlStr, err := ExportFrom(cfg)
 	require.NoError(t, err)
@@ -44,13 +48,17 @@ func TestExportFromRoundTrip(t *testing.T) {
 	require.Contains(t, yamlStr, "url: github.com/a/b")
 	require.Contains(t, yamlStr, "githubToken: tok")
 	require.Contains(t, yamlStr, "retryBaseDelay: 5s")
+	require.Contains(t, yamlStr, "syncOverdueGrace: 45m0s")
+	require.Contains(t, yamlStr, "syncStuckThreshold: 12h0m0s")
 	require.Contains(t, yamlStr, "server:")
 	require.Contains(t, yamlStr, "host: 127.0.0.1")
 
 	// Round-trip: the exported YAML parses back with the same globals.
-	var doc ExportConfig
-	require.NoError(t, yaml.Unmarshal([]byte(yamlStr), &doc))
+	doc, err := ParseImport(yamlStr)
+	require.NoError(t, err)
 	require.Equal(t, DurationString(5*time.Second), doc.RetryBaseDelay)
+	require.Equal(t, DurationString(45*time.Minute), doc.SyncOverdueGrace)
+	require.Equal(t, DurationString(12*time.Hour), doc.SyncStuckThreshold)
 	require.Equal(t, "tok", doc.GitHubToken)
 	require.Equal(t, "127.0.0.1", doc.Server.Host)
 }
@@ -82,6 +90,31 @@ func TestReload(t *testing.T) {
 	Path = ""
 }
 
+func TestReadReloadSnapshotDoesNotPublishUntilExplicitBoundary(t *testing.T) {
+	writeTmpConfig(t, "githubToken: old\nrepository:\n  - name: old\n    url: github.com/acme/old\n")
+	reloadFile, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	readBytes := []byte("githubToken: read\nrepository:\n  - name: read\n    url: github.com/acme/read\n")
+	_, err = reloadFile.Write(readBytes)
+	require.NoError(t, err)
+	require.NoError(t, reloadFile.Close())
+	Path = reloadFile.Name()
+	t.Cleanup(func() { Path = "" })
+
+	loaded, err := ReadReloadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, "old", GetIns().GitHubToken, "validated disk read must remain unpublished")
+	require.Equal(t, "read", loaded.Config().GitHubToken)
+
+	afterRead := []byte("# external edit after read\ngithubToken: edited\n")
+	require.NoError(t, os.WriteFile(Path, afterRead, 0o644))
+	PublishReloadSnapshot(loaded, nil)
+	require.Equal(t, "read", GetIns().GitHubToken)
+	actual, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Equal(t, afterRead, actual, "publishing a read snapshot must never rewrite later disk edits")
+}
+
 func TestReloadRejectsIdentitylessRepo(t *testing.T) {
 	writeTmpConfig(t, "repository:\n  - name: one\n    url: github.com/one/repo\n")
 	tmp, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
@@ -101,8 +134,10 @@ func TestReloadAfterSave(t *testing.T) {
 	writeTmpConfig(t, "githubToken: aaa\nrepository:\n  - name: one\n    url: github.com/one/repo\n")
 	require.Equal(t, "aaa", GetIns().GitHubToken)
 
-	// Simulate applyImport mutating the in-memory config, then persisting.
-	GetIns().GitHubToken = "zzz"
+	// Simulate applyImport publishing a copy-on-write config, then persisting.
+	next := GetIns()
+	next.GitHubToken = "zzz"
+	SetIns(next)
 	require.NoError(t, Save())
 
 	// The operator restores/edits config.yaml on disk to something else.
@@ -117,6 +152,84 @@ func TestReloadAfterSave(t *testing.T) {
 	require.Equal(t, "bbb", GetIns().GitHubToken, "reload must reflect the file, not stale Save() overrides")
 	require.Equal(t, "two", GetIns().Repository[0].Name)
 	Path = ""
+}
+
+func TestSaveSnapshotPersistsTheSuppliedGeneration(t *testing.T) {
+	writeTmpConfig(t, "githubToken: initial\nrepository:\n  - name: initial\n    url: github.com/acme/initial\n")
+	newer := &Config{GitHubToken: "newer", Repository: []typedef.Repository{{Name: "newer", URL: "github.com/acme/newer"}}}
+	SetIns(newer)
+	older := &Config{GitHubToken: "older", Repository: []typedef.Repository{{Name: "older", URL: "github.com/acme/older"}}}
+
+	require.NoError(t, SaveSnapshot(older))
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "githubtoken: older")
+	require.Contains(t, string(saved), "name: older")
+	require.Equal(t, "newer", GetIns().GitHubToken, "saving an explicit snapshot must not republish it")
+}
+
+func TestReloadAndSaveShareOneCoherentStateBoundary(t *testing.T) {
+	writeTmpConfig(t, "githubToken: old\nrepository:\n  - name: old\n    url: github.com/acme/old\n")
+	newFile, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	_, err = newFile.WriteString("githubToken: new\ngithubApiConcurrency: 7\nrepository:\n  - name: new\n    url: github.com/acme/new\n")
+	require.NoError(t, err)
+	require.NoError(t, newFile.Close())
+	Path = newFile.Name()
+	t.Cleanup(func() { Path = "" })
+
+	previousReadConfigFile := readConfigFile
+	readComplete := make(chan struct{})
+	readRelease := make(chan struct{})
+	readConfigFile = func(v *viper.Viper) error {
+		err := previousReadConfigFile(v)
+		if err != nil {
+			return err
+		}
+		close(readComplete)
+		<-readRelease
+		return nil
+	}
+	t.Cleanup(func() { readConfigFile = previousReadConfigFile })
+
+	reloadDone := make(chan error, 1)
+	go func() { reloadDone <- Reload() }()
+	<-readComplete
+
+	// The disk generation has been read, but Reload has not parsed or installed
+	// it yet. Reload must already own stateMu before Save is launched here.
+	reloadOwnsState := !stateMu.TryLock()
+	if !reloadOwnsState {
+		stateMu.Unlock()
+	}
+	saveStarted := make(chan struct{})
+	saveDone := make(chan error, 1)
+	go func() {
+		close(saveStarted)
+		saveDone <- Save()
+	}()
+	<-saveStarted
+
+	// On the broken implementation Reload does not own the lock, so Save can
+	// finish in the read-to-install window and overwrite generation B with A.
+	var saveErr error
+	if !reloadOwnsState {
+		saveErr = <-saveDone
+	}
+	close(readRelease)
+
+	reloadErr := <-reloadDone
+	if reloadOwnsState {
+		saveErr = <-saveDone
+	}
+	require.NoError(t, reloadErr)
+	require.NoError(t, saveErr)
+	require.True(t, reloadOwnsState, "reload did not serialize the disk read-to-install window against Save")
+	require.Equal(t, "new", GetIns().GitHubToken)
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "githubtoken: new")
+	require.NotContains(t, string(saved), "githubtoken: old")
 }
 
 func TestGetServerSectionReadsFromConfigFile(t *testing.T) {
@@ -166,6 +279,8 @@ server:
 	require.Equal(t, "local", doc.Storage[0].Name)
 	require.Equal(t, "tok", doc.GitHubToken)
 	require.Equal(t, DurationString(5*time.Second), doc.RetryBaseDelay)
+	require.Equal(t, DurationString(DefaultSyncOverdueGrace), doc.SyncOverdueGrace)
+	require.Equal(t, DurationString(DefaultSyncStuckThreshold), doc.SyncStuckThreshold)
 	require.Equal(t, "127.0.0.1", doc.Server.Host)
 	require.Equal(t, "8081", doc.Server.Port)
 }

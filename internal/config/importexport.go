@@ -10,6 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var readConfigFile = func(v *viper.Viper) error { return v.ReadInConfig() }
+
 // ServerSection mirrors the `server:` section of config.yaml. It carries both
 // yaml and mapstructure tags so it can be (de)serialized directly and read via
 // viper's UnmarshalKey.
@@ -33,7 +35,7 @@ func (d DurationString) MarshalYAML() (interface{}, error) {
 
 func (d *DurationString) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode {
-		return fmt.Errorf("retryBaseDelay must be a string or integer")
+		return fmt.Errorf("duration must be a string or integer")
 	}
 	if node.Tag == "!!int" {
 		n, err := strconv.ParseInt(node.Value, 10, 64)
@@ -45,7 +47,7 @@ func (d *DurationString) UnmarshalYAML(node *yaml.Node) error {
 	}
 	parsed, err := time.ParseDuration(node.Value)
 	if err != nil {
-		return fmt.Errorf("invalid retryBaseDelay %q: %w", node.Value, err)
+		return fmt.Errorf("invalid duration %q: %w", node.Value, err)
 	}
 	*d = DurationString(parsed)
 	return nil
@@ -62,6 +64,8 @@ type ExportConfig struct {
 	ReleaseNumLimit             int                    `yaml:"releaseNumLimit"`
 	RetryMaxCount               int                    `yaml:"retryMaxCount"`
 	RetryBaseDelay              DurationString         `yaml:"retryBaseDelay"`
+	SyncOverdueGrace            DurationString         `yaml:"syncOverdueGrace"`
+	SyncStuckThreshold          DurationString         `yaml:"syncStuckThreshold"`
 	GitHubAPIConcurrency        uint                   `yaml:"githubApiConcurrency"`
 	GitHubMinRequestInterval    DurationString         `yaml:"githubMinRequestInterval"`
 	GitHubLowRemainingThreshold int                    `yaml:"githubLowRemainingThreshold"`
@@ -75,7 +79,9 @@ type ExportConfig struct {
 // it falls back to the global viper singleton so callers can still override
 // settings directly.
 func GetServerSection() ServerSection {
-	v := GetViper()
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	v := vp
 	if v == nil {
 		v = viper.GetViper()
 	}
@@ -110,6 +116,8 @@ func ExportFrom(cfg *Config) (string, error) {
 		ReleaseNumLimit:             cfg.ReleaseNumLimit,
 		RetryMaxCount:               cfg.RetryMaxCount,
 		RetryBaseDelay:              DurationString(cfg.RetryBaseDelay),
+		SyncOverdueGrace:            DurationString(cfg.SyncOverdueGrace),
+		SyncStuckThreshold:          DurationString(cfg.SyncStuckThreshold),
 		GitHubAPIConcurrency:        cfg.GitHubAPIConcurrency,
 		GitHubMinRequestInterval:    DurationString(cfg.GitHubMinRequestInterval),
 		GitHubLowRemainingThreshold: cfg.GitHubLowRemainingThreshold,
@@ -128,34 +136,78 @@ func Export() (string, error) {
 	return ExportFrom(GetIns())
 }
 
-// Reload re-reads the config file into the package global. Unlike Init it never
-// exits the process: on any error the previous in-memory config is kept and the
-// error returned (the running server must survive a bad config file).
-func Reload() error {
+// ReloadSnapshot is a validated, unpublished config-file generation. Its
+// internals remain private so callers cannot mutate the config or viper state
+// between the read and the unified publication boundary.
+type ReloadSnapshot struct {
+	config *Config
+	viper  *viper.Viper
+}
+
+// Config returns a defensive copy of the unpublished disk generation.
+func (s *ReloadSnapshot) Config() *Config {
+	if s == nil {
+		return nil
+	}
+	return Clone(s.config)
+}
+
+// ReadReloadSnapshot reads, unmarshals, defaults, and validates config.yaml
+// without changing any package-global or runtime state.
+func ReadReloadSnapshot() (*ReloadSnapshot, error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return readReloadSnapshotLocked()
+}
+
+func readReloadSnapshotLocked() (*ReloadSnapshot, error) {
 	if vp == nil {
-		return fmt.Errorf("config not initialized")
+		return nil, fmt.Errorf("config not initialized")
 	}
 	// A fresh viper avoids inheriting override keys: Save()/SetServerField leave
 	// vp.Set() overrides that ReadInConfig never clears, so Unmarshal would merge
 	// the stale overrides on top of the freshly-read file.
 	nv := viper.New()
 	nv.SetConfigFile(Path)
-	if err := nv.ReadInConfig(); err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
+	if err := readConfigFile(nv); err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 	var next Config
 	if err := nv.Unmarshal(&next); err != nil {
-		return fmt.Errorf("failed to unmarshal config file: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
 	}
 	seedDefaults(&next)
 	if !nv.IsSet("githubScheduleJitter") {
 		next.GitHubScheduleJitter = 30 * time.Second
 	}
 	if err := validateIdentity(&next); err != nil {
+		return nil, err
+	}
+	return &ReloadSnapshot{config: Clone(&next), viper: nv}, nil
+}
+
+// PublishReloadSnapshot installs a previously validated disk generation
+// without re-reading or writing config.yaml. Package config, GitHub policy, and
+// install's immutable runtime state share the normal publication boundary.
+func PublishReloadSnapshot(snapshot *ReloadSnapshot, install func(*Config)) *Config {
+	if snapshot == nil {
+		return nil
+	}
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return publishSnapshotLocked(snapshot.config, snapshot.viper, install)
+}
+
+// Reload preserves the package-level behavior for non-server callers while
+// holding stateMu across the complete disk-read-to-publication operation.
+func Reload() error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	snapshot, err := readReloadSnapshotLocked()
+	if err != nil {
 		return err
 	}
-	vp = nv
-	SetIns(&next)
+	publishSnapshotLocked(snapshot.config, snapshot.viper, nil)
 	return nil
 }
 
@@ -168,6 +220,12 @@ func seedExportDefaults(doc *ExportConfig, jitterPresent bool) {
 	}
 	if time.Duration(doc.RetryBaseDelay) <= 0 {
 		doc.RetryBaseDelay = DurationString(5 * time.Second)
+	}
+	if time.Duration(doc.SyncOverdueGrace) <= 0 {
+		doc.SyncOverdueGrace = DurationString(DefaultSyncOverdueGrace)
+	}
+	if time.Duration(doc.SyncStuckThreshold) <= 0 {
+		doc.SyncStuckThreshold = DurationString(DefaultSyncStuckThreshold)
 	}
 	if doc.ConcurrencyNum == 0 {
 		doc.ConcurrencyNum = 3
@@ -271,6 +329,8 @@ func ValidateImport(doc *ExportConfig) []string {
 // never re-reads the server section, so this only takes effect after a restart.
 // Returns an error when the config was never initialized.
 func SetServerField(field string, value interface{}) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	if vp == nil {
 		return fmt.Errorf("config not initialized")
 	}

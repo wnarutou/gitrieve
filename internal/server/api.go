@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,10 +21,18 @@ import (
 )
 
 type API struct {
-	config            *config.Config
-	db                *db.DB
-	executor          *executor.Executor
-	scheduleRefresher ScheduleRefresher
+	configMu            sync.RWMutex
+	config              *config.Config
+	db                  *db.DB
+	executor            *executor.Executor
+	readReloadSnapshot  func() (*config.ReloadSnapshot, error)
+	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
+	bulkExecute         func(context.Context, string, uint64, executor.EligibilityCheck) ([]string, error)
+	scheduleRefresher   ScheduleRefresher
+
+	// Test-only synchronization seam used to pause inside the unified
+	// publication callback after the Executor runtime store.
+	afterRuntimePublishForTest func()
 }
 
 // ScheduleRefresher updates the live server scheduler after repository or
@@ -32,18 +42,74 @@ type ScheduleRefresher interface {
 }
 
 func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
-	return &API{config: cfg, db: db, executor: exec}
+	initial := config.Clone(cfg)
+	if exec != nil {
+		initial = exec.RuntimeConfigSnapshot().Config()
+	}
+	api := &API{config: initial, db: db, executor: exec, readReloadSnapshot: config.ReadReloadSnapshot}
+	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
+	if exec != nil {
+		api.bulkExecute = exec.ExecuteJobAtGenerationIfEligibleContext
+	}
+	return api
+}
+
+func (a *API) configSnapshot() *config.Config {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	if a.executor != nil {
+		return a.executor.RuntimeConfigSnapshot().Config()
+	}
+	return config.Clone(a.config)
+}
+
+func (a *API) publishConfigLocked(next *config.Config) *config.Config {
+	return config.PublishSnapshot(next, a.installPublishedConfig)
+}
+
+func (a *API) publishReloadConfigLocked(snapshot *config.ReloadSnapshot) *config.Config {
+	return config.PublishReloadSnapshot(snapshot, a.installPublishedConfig)
+}
+
+func (a *API) installPublishedConfig(published *config.Config) {
+	if a.executor != nil {
+		a.executor.RefreshConfig(published)
+	}
+	a.config = config.Clone(published)
+	if a.afterRuntimePublishForTest != nil {
+		a.afterRuntimePublishForTest()
+	}
 }
 
 func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {
 	a.scheduleRefresher = refresher
 }
 
-func (a *API) refreshSchedules() string {
+// publishPersistAndRefreshConfigLocked completes one configuration generation
+// while its caller retains configMu for the entire operation.
+func (a *API) publishPersistAndRefreshConfigLocked(next *config.Config, saveFailurePrefix string) (*config.Config, string) {
+	published := a.publishConfigLocked(next)
+	message := ""
+	if err := config.SaveSnapshot(published); err != nil {
+		message = saveFailurePrefix + err.Error()
+	}
+	return published, joinMessages(message, a.refreshSchedules(published))
+}
+
+// publishAndRefreshConfigLocked installs one in-memory generation and updates
+// schedules without writing config.yaml. Reload uses this path because the
+// operator's on-disk bytes are the source of truth for that operation.
+func (a *API) publishAndRefreshConfigLocked(next *config.Config) (*config.Config, string) {
+	published := a.publishConfigLocked(next)
+	message := ""
+	return published, joinMessages(message, a.refreshSchedules(published))
+}
+
+func (a *API) refreshSchedules(cfg *config.Config) string {
 	if a.scheduleRefresher == nil {
 		return ""
 	}
-	if err := a.scheduleRefresher.RefreshSchedules(a.config); err != nil {
+	if err := a.scheduleRefresher.RefreshSchedules(config.Clone(cfg)); err != nil {
 		return "Cron schedules refreshed with errors: " + err.Error()
 	}
 	return ""
@@ -71,6 +137,13 @@ func (a *API) CreateJob(c *gin.Context) {
 
 	jobIDs, err := a.executor.ExecuteJob(req.RepositoryKey)
 	if err != nil {
+		if errors.Is(err, executor.ErrRepositoryActive) {
+			c.JSON(http.StatusConflict, Response{
+				Code:    http.StatusConflict,
+				Message: "Repository is already active",
+			})
+			return
+		}
 		if errors.Is(err, executor.ErrRepositoryNotFound) {
 			c.JSON(http.StatusNotFound, Response{
 				Code:    404,
@@ -89,9 +162,278 @@ func (a *API) CreateJob(c *gin.Context) {
 		Code: 200,
 		Data: CreateJobResponse{
 			JobIDs: jobIDs,
-			Status: string(executor.StatusRunning),
+			Status: string(executor.StatusPending),
 		},
 	})
+}
+
+// BulkCreateJobs retries the current server-side eligible set selected by the
+// request. It never accepts repository IDs, and each confirmed candidate is
+// independently rechecked and submitted through the shared Executor.
+func (a *API) BulkCreateJobs(c *gin.Context) {
+	req, err := decodeBulkCreateJobsRequest(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid request: " + err.Error()})
+		return
+	}
+
+	if a.executor == nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Executor is unavailable"})
+		return
+	}
+	runtime := a.executor.RuntimeConfigSnapshot()
+	confirmed, err := a.bulkEligibleSnapshot(c.Request.Context(), runtime, req.Selector, time.Now())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to query repository stats: " + err.Error()})
+		return
+	}
+	if len(confirmed) != req.ExpectedCount {
+		c.JSON(http.StatusConflict, Response{
+			Code:    http.StatusConflict,
+			Data:    gin.H{"actual_count": len(confirmed)},
+			Message: "Eligible repository count changed",
+		})
+		return
+	}
+
+	result := BulkCreateJobsResponse{Requested: len(confirmed)}
+	ctx := c.Request.Context()
+bulkLoop:
+	for index, candidate := range confirmed {
+		remaining := len(confirmed) - index
+		if ctx.Err() != nil {
+			result.FailedToEnqueue += remaining
+			break
+		}
+		runtime = a.executor.RuntimeConfigSnapshot()
+		eligible, recheckErr := a.bulkRepositoryEligible(ctx, runtime, candidate.Key(), req.Selector, time.Now())
+		if recheckErr != nil {
+			if ctx.Err() != nil || errors.Is(recheckErr, context.Canceled) || errors.Is(recheckErr, context.DeadlineExceeded) {
+				result.FailedToEnqueue += remaining
+				break
+			}
+			result.FailedToEnqueue++
+			continue
+		}
+		if !eligible {
+			result.NoLongerEligible++
+			continue
+		}
+		if ctx.Err() != nil {
+			result.FailedToEnqueue += remaining
+			break
+		}
+
+		_, executeErr := a.bulkExecute(ctx, candidate.Key(), runtime.Generation(),
+			func(checkCtx context.Context, admitted *executor.RuntimeConfigSnapshot, repository typedef.Repository) (bool, error) {
+				return a.bulkRepositoryEligible(checkCtx, admitted, repository.Key(), req.Selector, time.Now())
+			})
+		var noLongerEligible *executor.RepositoryNoLongerEligibleError
+		switch {
+		case executeErr == nil:
+			result.Queued++
+		case ctx.Err() != nil || errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded):
+			result.FailedToEnqueue += remaining
+			break bulkLoop
+		case errors.Is(executeErr, executor.ErrRepositoryActive):
+			result.SkippedActive++
+		case errors.Is(executeErr, executor.ErrRepositoryNotFound):
+			result.NoLongerEligible++
+		case errors.Is(executeErr, executor.ErrConfigGenerationChanged):
+			result.NoLongerEligible++
+		case errors.As(executeErr, &noLongerEligible):
+			result.NoLongerEligible++
+		default:
+			result.FailedToEnqueue++
+		}
+	}
+
+	c.JSON(http.StatusOK, Response{Code: http.StatusOK, Data: result})
+}
+
+func decodeBulkCreateJobsRequest(body io.Reader) (BulkCreateJobsRequest, error) {
+	var envelope struct {
+		Selector      json.RawMessage `json:"selector"`
+		ExpectedCount json.RawMessage `json:"expected_count"`
+	}
+	if err := decodeStrictJSON(body, &envelope); err != nil {
+		return BulkCreateJobsRequest{}, err
+	}
+	if len(envelope.Selector) == 0 || string(envelope.Selector) == "null" {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector is required")
+	}
+	if len(envelope.ExpectedCount) == 0 || string(envelope.ExpectedCount) == "null" {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count is required")
+	}
+
+	var req BulkCreateJobsRequest
+	if err := decodeStrictJSON(strings.NewReader(string(envelope.Selector)), &req.Selector); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector: %w", err)
+	}
+	var selectorFields map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Selector, &selectorFields); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("selector: %w", err)
+	}
+	for _, field := range []string{"search", "health", "overdue"} {
+		if raw, present := selectorFields[field]; present && string(raw) == "null" {
+			return BulkCreateJobsRequest{}, fmt.Errorf("selector.%s must not be null", field)
+		}
+	}
+	if req.Selector.Health != "" && !validRepositoryHealth(req.Selector.Health) {
+		return BulkCreateJobsRequest{}, fmt.Errorf("health %q is not supported", req.Selector.Health)
+	}
+	if err := json.Unmarshal(envelope.ExpectedCount, &req.ExpectedCount); err != nil {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count must be an integer")
+	}
+	if req.ExpectedCount < 0 {
+		return BulkCreateJobsRequest{}, fmt.Errorf("expected_count must not be negative")
+	}
+	return req, nil
+}
+
+func decodeStrictJSON(reader io.Reader, target interface{}) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request must contain one JSON object")
+		}
+		return err
+	}
+	return nil
+}
+
+func (a *API) bulkEligibleSnapshot(ctx context.Context, runtime *executor.RuntimeConfigSnapshot, selector BulkJobSelector, now time.Time) ([]RepositoryOverview, error) {
+	stats, err := a.db.RepositoryRunStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	overdueGrace, stuckThreshold := runtime.SyncHealthThresholds()
+	snapshot := buildRepositorySnapshot(runtime.Repositories(), stats, now, overdueGrace, stuckThreshold)
+	return selectBulkEligible(snapshot, selector), nil
+}
+
+func selectBulkEligible(snapshot []RepositoryOverview, selector BulkJobSelector) []RepositoryOverview {
+	matched := searchRepositorySnapshot(snapshot, selector.Search)
+	matched = filterRepositorySnapshot(matched, RepositoryHealthFilter{
+		Health:  selector.Health,
+		Overdue: selector.Overdue,
+	})
+	eligible := make([]RepositoryOverview, 0, len(matched))
+	for _, repository := range matched {
+		if repository.Stuck {
+			continue
+		}
+		if repository.LastStatus == string(StatusFailed) ||
+			repository.LastStatus == string(StatusCancelled) || repository.Overdue {
+			eligible = append(eligible, repository)
+		}
+	}
+	sortRepositorySnapshot(eligible, "name", "asc")
+	return eligible
+}
+
+func (a *API) currentRepositorySnapshot(ctx context.Context, now time.Time) ([]RepositoryOverview, error) {
+	stats, err := a.db.RepositoryRunStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var repos []typedef.Repository
+	var overdueGrace, stuckThreshold time.Duration
+	if cfg := a.configSnapshot(); cfg != nil {
+		repos = cfg.Repository
+		overdueGrace = cfg.SyncOverdueGrace
+		stuckThreshold = cfg.SyncStuckThreshold
+	}
+	return buildRepositorySnapshot(repos, stats, now, overdueGrace, stuckThreshold), nil
+}
+
+func (a *API) bulkRepositoryEligible(ctx context.Context, runtime *executor.RuntimeConfigSnapshot, repositoryKey string, selector BulkJobSelector, now time.Time) (bool, error) {
+	repository, found := runtime.Repository(repositoryKey)
+	if !found {
+		return false, nil
+	}
+
+	stats, err := a.bulkRepositoryStats(ctx, repository)
+	if err != nil {
+		return false, err
+	}
+	overdueGrace, stuckThreshold := runtime.SyncHealthThresholds()
+	snapshot := buildRepositorySnapshot(
+		[]typedef.Repository{repository}, stats, now,
+		overdueGrace, stuckThreshold,
+	)
+	return len(selectBulkEligible(snapshot, selector)) == 1, nil
+}
+
+// repositoryRunStatsForCandidate reads only the candidate's indexed execution
+// history. This keeps enqueue-time rechecks O(candidates) instead of rebuilding
+// the full ~6,000-repository fleet snapshot for every item.
+func (a *API) repositoryRunStatsForCandidate(ctx context.Context, repository typedef.Repository) (map[string]db.RepositoryRunStats, error) {
+	query, args := repositoryRunStatsQuery(repository)
+
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := make(map[string]db.RepositoryRunStats)
+	for rows.Next() {
+		var (
+			id           string
+			repoKey      string
+			start        time.Time
+			end          sql.NullTime
+			status       string
+			errorMessage sql.NullString
+		)
+		if err := rows.Scan(&id, &repoKey, &start, &end, &status, &errorMessage); err != nil {
+			return nil, err
+		}
+		if _, exists := stats[repoKey]; exists {
+			continue
+		}
+		entry := db.RepositoryRunStats{
+			LatestExecutionID: id,
+			LatestStatus:      status,
+			LatestStart:       start,
+			TotalRuns:         1,
+		}
+		if end.Valid {
+			latestEnd := end.Time
+			entry.LatestEnd = &latestEnd
+		}
+		if errorMessage.Valid {
+			entry.LatestError = errorMessage.String
+		}
+		stats[repoKey] = entry
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
+func repositoryRunStatsQuery(repository typedef.Repository) (string, []interface{}) {
+	key := repository.Key()
+	query := `
+		SELECT id, repo_key, start_time, end_time, status, error_message
+		FROM executions WHERE repo_key = ?
+		ORDER BY repo_key, start_time DESC, id DESC LIMIT 1`
+	args := []interface{}{key}
+	if repository.GetType() == typedef.TypeOrg || repository.GetType() == typedef.TypeUser {
+		prefix := key + "/"
+		query = `
+			SELECT id, repo_key, start_time, end_time, status, error_message
+			FROM executions WHERE repo_key >= ? AND repo_key < ?
+			ORDER BY repo_key, start_time DESC, id DESC`
+		args = []interface{}{prefix, key + "0"}
+	}
+	return query, args
 }
 
 func (a *API) CancelJob(c *gin.Context) {
@@ -108,6 +450,14 @@ func (a *API) CancelJob(c *gin.Context) {
 	// Cancel the job
 	err := a.executor.CancelJob(jobID)
 	if err != nil {
+		exists, lookupErr := a.db.ExecutionExists(c.Request.Context(), jobID)
+		if lookupErr == nil && !exists {
+			c.JSON(http.StatusOK, Response{
+				Code: 200,
+				Data: CancelJobResponse{Status: string(executor.StatusCancelled)},
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
 			Message: "Failed to cancel job: " + err.Error(),
@@ -182,6 +532,7 @@ func (a *API) GetJobs(c *gin.Context) {
 	defer rows.Close()
 
 	jobs := make([]Job, 0)
+	cfg := a.configSnapshot()
 	for rows.Next() {
 		var job Job
 		var startTime time.Time
@@ -206,7 +557,7 @@ func (a *API) GetJobs(c *gin.Context) {
 
 		// Resolve URL from config by identity key; unmatched (renamed/deleted/old
 		// empty-key rows) keeps the job_name snapshot and empty URL.
-		for _, repo := range a.config.Repository {
+		for _, repo := range cfg.Repository {
 			if repo.Matches(repoKey) {
 				job.URL = repo.URL
 				break
@@ -325,150 +676,165 @@ func (a *API) GetJobLogs(c *gin.Context) {
 	})
 }
 
-// runStats 是单仓库/单组织的聚合运行统计。
-type runStats struct {
-	LastRun *time.Time
-	Total   int64
-	Success int64
-	Failed  int64
-}
-
-// lookupStats 返回配置条目的运行统计。type=repo 直接取自身键；type=org/user
-// 对「路径边界前缀」（entry.Key()+"/"）命中的成员求和，last_run 取成员最大值。
-// 前缀以 "/" 结尾，避免 github.com/acme 误吞 github.com/acme2/x。
-func lookupStats(stats map[string]runStats, repo typedef.Repository) runStats {
-	key := repo.Key()
-	if key == "" {
-		return runStats{}
-	}
-	switch repo.GetType() {
-	case typedef.TypeOrg, typedef.TypeUser:
-		prefix := key + "/"
-		var sum runStats
-		for k, s := range stats {
-			if !strings.HasPrefix(k, prefix) {
-				continue
-			}
-			sum.Total += s.Total
-			sum.Success += s.Success
-			sum.Failed += s.Failed
-			if s.LastRun != nil && (sum.LastRun == nil || s.LastRun.After(*sum.LastRun)) {
-				t := *s.LastRun
-				sum.LastRun = &t
-			}
-		}
-		return sum
-	default:
-		return stats[key]
-	}
-}
-
 // GetRepositories returns repositories with per-repo execution stats, last/next
 // run times, search (fuzzy name or URL match) and pagination.
 func (a *API) GetRepositories(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	search := c.Query("search")
-
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 || limit > 100 {
-		limit = 20
+	now := time.Now()
+	filter, page, limit, err := parseRepositoryHealthQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Invalid repository query: " + err.Error()})
+		return
 	}
 
-	// Aggregate per-repository execution stats from the DB.
-	stats := map[string]runStats{}
-
-	// Note: we select the bare start_time column (constrained to the max by
-	// HAVING) rather than MAX(start_time). The modernc.org/sqlite driver only
-	// converts TEXT to time.Time for columns with a declared DATETIME type;
-	// aggregate expressions like MAX(start_time) have no declared type and come
-	// back as a raw string that database/sql cannot scan into *time.Time.
-	rows, err := a.db.Query(`
-		SELECT repo_key,
-		       start_time AS last_run,
-		       COUNT(*)        AS total,
-		       COALESCE(SUM(status = 'completed'), 0) AS success,
-		       COALESCE(SUM(status = 'failed'), 0)    AS failed
-		FROM executions
-		GROUP BY repo_key
-		HAVING start_time = MAX(start_time)`)
+	snapshot, err := a.currentRepositorySnapshot(c.Request.Context(), now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query repository stats: " + err.Error()})
 		return
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var key string
-		var lastRun sql.NullTime
-		var a runStats
-		if err := rows.Scan(&key, &lastRun, &a.Total, &a.Success, &a.Failed); err != nil {
-			c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to scan repository stats: " + err.Error()})
-			return
-		}
-		if lastRun.Valid {
-			a.LastRun = &lastRun.Time
-		}
-		stats[key] = a
-	}
-	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to iterate repository stats: " + err.Error()})
-		return
-	}
-
-	// Fuzzy name or URL filter (in-memory equivalent of LIKE '%search%'). SQL
-	// LIKE is case-insensitive for ASCII, so match that by folding both sides to
-	// lower case before the Contains check.
-	filtered := make([]typedef.Repository, 0, len(a.config.Repository))
-	for _, repo := range a.config.Repository {
-		if search != "" {
-			inName := strings.Contains(strings.ToLower(repo.Name), strings.ToLower(search))
-			inURL := strings.Contains(strings.ToLower(repo.EffectiveURL()), strings.ToLower(search))
-			if !inName && !inURL {
-				continue
-			}
-		}
-		filtered = append(filtered, repo)
-	}
+	matched := searchRepositorySnapshot(snapshot, filter.Search)
+	summary := summarizeRepositorySnapshot(matched)
+	filtered := filterRepositorySnapshot(matched, filter)
+	sortRepositorySnapshot(filtered, filter.Sort, filter.Direction)
 
 	total := len(filtered)
-	start := (page - 1) * limit
-	if start > total {
-		start = total
+	start := total
+	if page <= 1+total/limit {
+		start = (page - 1) * limit
 	}
 	end := start + limit
 	if end > total {
 		end = total
 	}
 
-	now := time.Now()
-	overviews := make([]RepositoryOverview, 0, end-start)
-	for _, repo := range filtered[start:end] {
-		// Serve the effective URL (type=user/org with empty URL and an orgName
-		// synthesizes https://github.com/<orgName>). The frontend keys rows off
-		// r.URL, so a raw config entry without `url` would otherwise come back
-		// with URL=="" and its row buttons would no-op / 404. repo is a loop copy,
-		// so this neither mutates nor persists the config.
-		repo.URL = repo.EffectiveURL()
-		s := lookupStats(stats, repo)
-		overviews = append(overviews, RepositoryOverview{
-			Repository:  repo,
-			LastRunTime: s.LastRun,
-			NextRunTime: nextRunTime(repo.Cron, now),
-			TotalRuns:   s.Total,
-			SuccessRuns: s.Success,
-			FailedRuns:  s.Failed,
-		})
-	}
-
 	c.JSON(http.StatusOK, Response{Code: 200, Data: ListRepositoriesResponse{
-		Repositories: overviews,
+		Repositories: filtered[start:end],
+		Summary:      summary,
 		Total:        total,
 		Page:         page,
 		Limit:        limit,
 	}})
+}
+
+func parseRepositoryHealthQuery(c *gin.Context) (RepositoryHealthFilter, int, int, error) {
+	health, healthSet := c.GetQuery("health")
+	sortKey, sortSet := c.GetQuery("sort")
+	direction, directionSet := c.GetQuery("direction")
+	if !sortSet {
+		sortKey = "attention"
+	}
+	if !directionSet {
+		direction = "asc"
+	}
+	filter := RepositoryHealthFilter{
+		Search:    c.Query("search"),
+		Health:    health,
+		Sort:      sortKey,
+		Direction: direction,
+	}
+	if healthSet && !validRepositoryHealth(filter.Health) {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("health %q is not supported", filter.Health)
+	}
+	if !validRepositorySort(filter.Sort) {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("sort %q is not supported", filter.Sort)
+	}
+	if filter.Direction != "asc" && filter.Direction != "desc" {
+		return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("direction %q is not supported", filter.Direction)
+	}
+
+	var err error
+	if raw, ok := c.GetQuery("overdue"); ok {
+		filter.Overdue, err = strictQueryBool(raw)
+		if err != nil {
+			return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("overdue: %w", err)
+		}
+	}
+	if raw, ok := c.GetQuery("stuck"); ok {
+		filter.Stuck, err = strictQueryBool(raw)
+		if err != nil {
+			return RepositoryHealthFilter{}, 0, 0, fmt.Errorf("stuck: %w", err)
+		}
+	}
+	page, err := strictQueryInt(c, "page", 1, 1, int(^uint(0)>>1))
+	if err != nil {
+		return RepositoryHealthFilter{}, 0, 0, err
+	}
+	limit, err := strictQueryInt(c, "limit", 20, 1, 100)
+	if err != nil {
+		return RepositoryHealthFilter{}, 0, 0, err
+	}
+	return filter, page, limit, nil
+}
+
+func validRepositoryHealth(health string) bool {
+	switch health {
+	case "healthy", "failed", "overdue", "stuck", "never_synced", "cancelled", "pending", "running", "syncing":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRepositorySort(sortKey string) bool {
+	switch sortKey {
+	case "attention", "name", "last_attempt", "last_success":
+		return true
+	default:
+		return false
+	}
+}
+
+func strictQueryBool(raw string) (*bool, error) {
+	switch raw {
+	case "true":
+		value := true
+		return &value, nil
+	case "false":
+		value := false
+		return &value, nil
+	default:
+		return nil, fmt.Errorf("must be true or false")
+	}
+}
+
+func strictQueryInt(c *gin.Context, name string, defaultValue, minimum, maximum int) (int, error) {
+	raw, ok := c.GetQuery(name)
+	if !ok {
+		return defaultValue, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return value, nil
+}
+
+// GetJobComponents returns the persisted component rows for one execution.
+func (a *API) GetJobComponents(c *gin.Context) {
+	jobID := c.Param("id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, Response{Code: 400, Message: "Job ID is required"})
+		return
+	}
+
+	exists, err := a.db.ExecutionExists(c.Request.Context(), jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to check job: " + err.Error()})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusNotFound, Response{Code: 404, Message: "Job not found"})
+		return
+	}
+
+	components, err := a.db.ListComponents(c.Request.Context(), jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, Response{Code: 500, Message: "Failed to query job components: " + err.Error()})
+		return
+	}
+	if components == nil {
+		components = []db.ComponentExecution{}
+	}
+	c.JSON(http.StatusOK, Response{Code: 200, Data: ListComponentsResponse{Components: components}})
 }
 
 // CreateRepository adds a new repository to the configuration.
@@ -499,9 +865,12 @@ func (a *API) CreateRepository(c *gin.Context) {
 		})
 		return
 	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// 判重按身份键（URL），name 允许重复。
-	for _, existing := range a.config.Repository {
+	for _, existing := range next.Repository {
 		if existing.Key() == repo.Key() {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -511,15 +880,9 @@ func (a *API) CreateRepository(c *gin.Context) {
 		}
 	}
 
-	// Append to in-memory config
-	a.config.Repository = append(a.config.Repository, repo)
-
-	// Persist config; tolerate save failures with a warning
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository added in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	// Publish a copy-on-write replacement to the API and Executor together.
+	next.Repository = append(next.Repository, repo)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository added in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -534,10 +897,22 @@ func (a *API) UpdateRepository(c *gin.Context) {
 	// handler; gin prefixes the captured value with "/", which we strip before
 	// matching against repo keys.
 	id := strings.TrimPrefix(c.Param("id"), "/")
+	// Decode request input before entering the configuration generation lock.
+	var patch map[string]interface{}
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Locate the existing repository by identity key (URL).
 	idx := -1
-	for i, existing := range a.config.Repository {
+	for i, existing := range next.Repository {
 		if existing.Matches(id) {
 			idx = i
 			break
@@ -551,20 +926,10 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		return
 	}
 
-	// Decode the patch as a generic map for a partial merge.
-	var patch map[string]interface{}
-	if err := c.ShouldBindJSON(&patch); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Code:    400,
-			Message: "Invalid request: " + err.Error(),
-		})
-		return
-	}
-
 	// Marshal the existing repository into a map, overlay the patch fields,
 	// then unmarshal back into a typed struct. This preserves unspecified
 	// fields while applying only the supplied changes.
-	existingRaw, err := json.Marshal(a.config.Repository[idx])
+	existingRaw, err := json.Marshal(next.Repository[idx])
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
@@ -609,7 +974,7 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		})
 		return
 	}
-	for i, other := range a.config.Repository {
+	for i, other := range next.Repository {
 		if i != idx && other.Key() == updated.Key() {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -619,13 +984,8 @@ func (a *API) UpdateRepository(c *gin.Context) {
 		}
 	}
 
-	a.config.Repository[idx] = updated
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository updated in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	next.Repository[idx] = updated
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository updated in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -638,9 +998,12 @@ func (a *API) UpdateRepository(c *gin.Context) {
 func (a *API) DeleteRepository(c *gin.Context) {
 	// See UpdateRepository: strip the leading "/" gin adds to *id catch-all values.
 	id := strings.TrimPrefix(c.Param("id"), "/")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	idx := -1
-	for i, existing := range a.config.Repository {
+	for i, existing := range next.Repository {
 		if existing.Matches(id) {
 			idx = i
 			break
@@ -655,13 +1018,8 @@ func (a *API) DeleteRepository(c *gin.Context) {
 	}
 
 	// Remove element at idx
-	a.config.Repository = append(a.config.Repository[:idx], a.config.Repository[idx+1:]...)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Repository deleted in memory but failed to persist config: " + err.Error()
-	}
-	msg = joinMessages(msg, a.refreshSchedules())
+	next.Repository = append(next.Repository[:idx], next.Repository[idx+1:]...)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Repository deleted in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -672,9 +1030,10 @@ func (a *API) DeleteRepository(c *gin.Context) {
 
 // GetStorages returns all storage backends from the configuration.
 func (a *API) GetStorages(c *gin.Context) {
+	cfg := a.configSnapshot()
 	c.JSON(http.StatusOK, Response{
 		Code: 200,
-		Data: a.config.Storage,
+		Data: cfg.Storage,
 	})
 }
 
@@ -705,9 +1064,12 @@ func (a *API) CreateStorage(c *gin.Context) {
 		})
 		return
 	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Check for duplicates
-	for _, existing := range a.config.Storage {
+	for _, existing := range next.Storage {
 		if existing.Name == storage.Name {
 			c.JSON(http.StatusConflict, Response{
 				Code:    409,
@@ -717,14 +1079,9 @@ func (a *API) CreateStorage(c *gin.Context) {
 		}
 	}
 
-	// Append to in-memory config
-	a.config.Storage = append(a.config.Storage, storage)
-
-	// Persist config; tolerate save failures with a warning
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage added in memory but failed to persist config: " + err.Error()
-	}
+	// Publish a copy-on-write replacement to the API and Executor together.
+	next.Storage = append(next.Storage, storage)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage added in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -736,10 +1093,22 @@ func (a *API) CreateStorage(c *gin.Context) {
 // UpdateStorage modifies an existing storage backend by name (partial update via JSON merge).
 func (a *API) UpdateStorage(c *gin.Context) {
 	id := c.Param("id")
+	// Decode request input before entering the configuration generation lock.
+	var patch map[string]interface{}
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		c.JSON(http.StatusBadRequest, Response{
+			Code:    400,
+			Message: "Invalid request: " + err.Error(),
+		})
+		return
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	// Locate the existing storage
 	idx := -1
-	for i, existing := range a.config.Storage {
+	for i, existing := range next.Storage {
 		if existing.Name == id {
 			idx = i
 			break
@@ -753,20 +1122,10 @@ func (a *API) UpdateStorage(c *gin.Context) {
 		return
 	}
 
-	// Decode the patch as a generic map for a partial merge.
-	var patch map[string]interface{}
-	if err := c.ShouldBindJSON(&patch); err != nil {
-		c.JSON(http.StatusBadRequest, Response{
-			Code:    400,
-			Message: "Invalid request: " + err.Error(),
-		})
-		return
-	}
-
 	// Marshal the existing storage into a map, overlay the patch fields,
 	// then unmarshal back into a typed struct. This preserves unspecified
 	// fields while applying only the supplied changes.
-	existingRaw, err := json.Marshal(a.config.Storage[idx])
+	existingRaw, err := json.Marshal(next.Storage[idx])
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, Response{
 			Code:    500,
@@ -802,12 +1161,8 @@ func (a *API) UpdateStorage(c *gin.Context) {
 		return
 	}
 
-	a.config.Storage[idx] = updated
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage updated in memory but failed to persist config: " + err.Error()
-	}
+	next.Storage[idx] = updated
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage updated in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,
@@ -819,9 +1174,12 @@ func (a *API) UpdateStorage(c *gin.Context) {
 // DeleteStorage removes a storage backend from the configuration by name.
 func (a *API) DeleteStorage(c *gin.Context) {
 	id := c.Param("id")
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := config.Clone(a.config)
 
 	idx := -1
-	for i, existing := range a.config.Storage {
+	for i, existing := range next.Storage {
 		if existing.Name == id {
 			idx = i
 			break
@@ -836,12 +1194,8 @@ func (a *API) DeleteStorage(c *gin.Context) {
 	}
 
 	// Remove element at idx
-	a.config.Storage = append(a.config.Storage[:idx], a.config.Storage[idx+1:]...)
-
-	msg := ""
-	if err := config.Save(); err != nil {
-		msg = "Storage deleted in memory but failed to persist config: " + err.Error()
-	}
+	next.Storage = append(next.Storage[:idx], next.Storage[idx+1:]...)
+	_, msg := a.publishPersistAndRefreshConfigLocked(next, "Storage deleted in memory but failed to persist config: ")
 
 	c.JSON(http.StatusOK, Response{
 		Code:    200,

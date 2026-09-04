@@ -30,8 +30,9 @@ type Permit interface{ Done(Observation) }
 
 type coordinator struct {
 	cfg            Config
-	sem            chan struct{}
 	mu             sync.Mutex
+	active         uint
+	changed        chan struct{}
 	nextStart      time.Time
 	resourcePause  map[string]time.Time
 	secondaryPause time.Time
@@ -42,32 +43,146 @@ type permit struct {
 	once sync.Once
 }
 
+type scopeContextKey struct{}
+
+// Scope records the immutable API configuration accepted with one runtime
+// generation. Acquisition always delegates to the stable process arbiter so
+// old and new generations share concurrency, pacing, and quota state.
+type Scope struct {
+	cfg Config
+}
+
+func NewScope(cfg Config) *Scope {
+	return &Scope{cfg: cfg}
+}
+
+func WithScope(ctx context.Context, scope *Scope) context.Context {
+	if scope == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, scopeContextKey{}, scope)
+}
+
+func ConfigFromContext(ctx context.Context) (Config, bool) {
+	if ctx == nil {
+		return Config{}, false
+	}
+	scope, ok := ctx.Value(scopeContextKey{}).(*Scope)
+	if !ok || scope == nil {
+		return Config{}, false
+	}
+	return scope.cfg, true
+}
+
 var current atomic.Pointer[coordinator]
+var publicationMu sync.RWMutex
+
+// publicationReadBoundaryTestHook is a package-private synchronization seam
+// for tests that need to observe the exact publication read-lock boundary.
+type publicationReadBoundaryTestHook struct {
+	beforeLock  func()
+	afterLock   func()
+	afterUnlock func()
+}
+
+var publicationReadBoundaryHookForTest atomic.Pointer[publicationReadBoundaryTestHook]
 
 func newCoordinator(cfg Config) *coordinator {
+	return &coordinator{
+		cfg:           normalizedConfig(cfg),
+		changed:       make(chan struct{}),
+		resourcePause: make(map[string]time.Time),
+	}
+}
+
+func normalizedConfig(cfg Config) Config {
 	if cfg.Concurrency == 0 {
 		cfg.Concurrency = 1
 	}
-	return &coordinator{cfg: cfg, sem: make(chan struct{}, cfg.Concurrency), resourcePause: make(map[string]time.Time)}
+	return cfg
 }
 
-func Configure(cfg Config) { current.Store(newCoordinator(cfg)) }
+func (c *coordinator) configure(cfg Config) {
+	c.mu.Lock()
+	c.cfg = normalizedConfig(cfg)
+	c.signalLocked()
+	c.mu.Unlock()
+}
 
-func Acquire(ctx context.Context, resource string) (Permit, error) {
+func (c *coordinator) signalLocked() {
+	close(c.changed)
+	c.changed = make(chan struct{})
+}
+
+// Publish installs an application configuration snapshot and its matching
+// GitHub coordinator under one reader-visible publication boundary. install
+// must only publish immutable state; it runs while publicationMu is held.
+func Publish(cfg Config, install func()) {
+	publicationMu.Lock()
+	defer publicationMu.Unlock()
+	if install != nil {
+		install()
+	}
 	c := current.Load()
 	if c == nil {
-		c = newCoordinator(Config{Concurrency: 1})
-		current.CompareAndSwap(nil, c)
-		c = current.Load()
+		current.Store(newCoordinator(cfg))
+		return
 	}
+	c.configure(cfg)
+}
+
+// ReadPublication runs read while no paired configuration/coordinator
+// publication is in progress.
+func ReadPublication(read func()) {
+	readPublication(read)
+}
+
+func readPublication(read func()) {
+	hook := publicationReadBoundaryHookForTest.Load()
+	if hook != nil && hook.beforeLock != nil {
+		hook.beforeLock()
+	}
+	publicationMu.RLock()
+	defer func() {
+		publicationMu.RUnlock()
+		if hook != nil && hook.afterUnlock != nil {
+			hook.afterUnlock()
+		}
+	}()
+	if hook != nil && hook.afterLock != nil {
+		hook.afterLock()
+	}
+	read()
+}
+
+func Configure(cfg Config) { Publish(cfg, nil) }
+
+func Acquire(ctx context.Context, resource string) (Permit, error) {
+	c := loadCoordinator()
 	return c.acquire(ctx, resource)
 }
 
+func loadCoordinator() *coordinator {
+	var c *coordinator
+	readPublication(func() {
+		c = current.Load()
+	})
+	if c != nil {
+		return c
+	}
+
+	publicationMu.Lock()
+	defer publicationMu.Unlock()
+	if c = current.Load(); c == nil {
+		c = newCoordinator(Config{Concurrency: 1})
+		current.Store(c)
+	}
+	return c
+}
+
 func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, error) {
-	select {
-	case c.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	for {
 		c.mu.Lock()
@@ -88,7 +203,8 @@ func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, err
 		if c.nextStart.After(until) {
 			until = c.nextStart
 		}
-		if !until.After(now) {
+		if c.active < c.cfg.Concurrency && !until.After(now) {
+			c.active++
 			c.nextStart = now.Add(c.cfg.MinRequestInterval)
 			c.mu.Unlock()
 			if resumed {
@@ -96,14 +212,39 @@ func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, err
 			}
 			return &permit{c: c}, nil
 		}
+		changed := c.changed
+		hasDeadline := c.active < c.cfg.Concurrency && until.After(now)
+		wait := time.Duration(0)
+		if hasDeadline {
+			wait = until.Sub(now)
+		}
 		c.mu.Unlock()
-		t := time.NewTimer(time.Until(until))
+		if !hasDeadline {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-changed:
+			}
+			continue
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			t.Stop()
-			<-c.sem
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return nil, ctx.Err()
-		case <-t.C:
+		case <-changed:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
 		}
 	}
 }
@@ -111,7 +252,12 @@ func (c *coordinator) acquire(ctx context.Context, resource string) (Permit, err
 func (p *permit) Done(obs Observation) {
 	p.once.Do(func() {
 		p.c.observe(obs)
-		<-p.c.sem
+		p.c.mu.Lock()
+		if p.c.active > 0 {
+			p.c.active--
+		}
+		p.c.signalLocked()
+		p.c.mu.Unlock()
 	})
 }
 
@@ -135,6 +281,9 @@ func (c *coordinator) observe(obs Observation) {
 	if obs.Resource != "" && !obs.Reset.IsZero() && obs.Remaining <= c.cfg.LowRemainingThreshold && obs.Reset.After(c.resourcePause[obs.Resource]) {
 		c.resourcePause[obs.Resource] = obs.Reset
 		resourceExtended = true
+	}
+	if secondaryExtended || resourceExtended {
+		c.signalLocked()
 	}
 	c.mu.Unlock()
 	if secondaryExtended {

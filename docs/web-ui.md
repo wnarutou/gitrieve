@@ -43,6 +43,39 @@ The default host is `localhost` and the default port is `8080`. Static assets (C
 - **Cancel a job** — stop a running or pending job.
 - **Real-time logs** — every job has a live log stream that updates as the job runs, using Server-Sent Events. The stream closes automatically when the job finishes.
 
+### Repository sync health
+
+The Repositories page is a server-paginated fleet overview. Summary cards show
+total, healthy, failed, syncing, never-synced, and overdue counts across every
+repository matching the current text search, not only the visible page. Health,
+overdue, and stuck filters plus attention/name/last-attempt/last-success sorting
+are kept in the URL hash, so exception views can be bookmarked.
+
+Each row deliberately shows both the last attempt and last successful
+completion. A recent failed attempt must not make an older successful backup
+look recent. Primary health uses this precedence: never synced; stuck; pending
+or running; failed or cancelled; overdue; healthy. Overdue and stuck are also
+shown as independent diagnostics. A repository is stuck when its latest
+execution remains `pending` or `running` beyond `syncStuckThreshold`.
+
+Open a row's execution detail to see the exact latest execution, its component
+outcomes, and its logs. Code is always enabled; release, issues, wiki, and
+discussion appear when configured. Unsupported capabilities are `skipped` and
+do not fail an execution. A real failure in any enabled component makes the
+overall execution `failed`, although later components are still attempted.
+Older executions created before component tracking show that component details
+are unavailable instead of inventing results.
+
+Bulk retry operates on the complete server-side failed/cancelled/overdue
+selection. The confirmation displays the eligible count. If that count changes
+before submission, the server returns the new count and the UI asks again.
+Active or no-longer-eligible repositories are safely accounted for, and one
+enqueue failure does not stop the remaining repositories.
+
+**Refresh is always explicit.** The Repositories page never polls, schedules a
+timer reload, or reloads because a job's SSE stream completes. Click **Refresh**
+or revisit the page to see later server-side changes.
+
 ### Configuration management
 
 - **Repositories** — add, edit, and remove repository entries from your `config.yaml` without editing the file by hand. Changes are persisted back to the config file.
@@ -98,11 +131,24 @@ storage:
     path: ./repo
 
 githubToken: your-github-token
+syncOverdueGrace: 30m
+syncStuckThreshold: 24h
+cocurrencyNum: 6
 ```
 
 The `server` process executes every non-empty repository `cron` schedule. Cron
 registrations are refreshed immediately when repositories are created, updated,
 or deleted through the API, and after config import or reload.
+
+`syncOverdueGrace` defaults to `30m` and prevents a repository from being
+declared overdue immediately after its cron time. `syncStuckThreshold` defaults
+to `24h` and flags work that remains `pending` or `running` past that duration.
+Non-positive values select those defaults. `cocurrencyNum` is intentionally
+spelled as shown and limits actual executor work shared by cron, manual runs,
+and bulk retries; excess work waits as `pending`. Duplicate active work for the
+same repository is rejected.
+At startup the server reconciles executions left `pending` or `running` by the
+previous process to `failed`, including active component rows.
 
 ## Security notes
 

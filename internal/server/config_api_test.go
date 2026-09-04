@@ -112,6 +112,8 @@ func TestPreviewImportDiff(t *testing.T) {
 		ReleaseSizeLimit:            300000000,
 		ReleaseNumLimit:             3,
 		RetryMaxCount:               3,
+		SyncOverdueGrace:            config.DefaultSyncOverdueGrace,
+		SyncStuckThreshold:          config.DefaultSyncStuckThreshold,
 		GitHubAPIConcurrency:        2,
 		GitHubMinRequestInterval:    200 * time.Millisecond,
 		GitHubLowRemainingThreshold: 100,
@@ -206,6 +208,35 @@ server:
 	// Server section changed -> warning present.
 	warnings := data["warnings"].([]interface{})
 	require.Len(t, warnings, 1)
+}
+
+func TestPreviewAndApplyImportSyncHealthGlobals(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	writeFile(t, path, "repository:\n  - name: one\n    url: github.com/one/repo\nsyncOverdueGrace: 20m\nsyncStuckThreshold: 8h\n")
+	config.Path = path
+	config.Init()
+	t.Cleanup(func() { config.Path = "" })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	s := server.NewConfigTestServer(config.GetIns(), testDB)
+
+	importYAML := "repository:\n  - name: one\n    url: github.com/one/repo\nsyncOverdueGrace: 45m\nsyncStuckThreshold: 12h\n"
+	body, err := json.Marshal(map[string]string{"config": importYAML})
+	require.NoError(t, err)
+
+	code, resp := getJSON(t, s, http.MethodPost, "/api/config/import/preview", string(body))
+	require.Equal(t, http.StatusOK, code)
+	summary := resp["data"].(map[string]interface{})["summary"].(map[string]interface{})
+	require.Equal(t, float64(2), summary["globals"].(map[string]interface{})["changed"])
+
+	code, resp = getJSON(t, s, http.MethodPost, "/api/config/import", string(body))
+	require.Equal(t, http.StatusOK, code)
+	result := resp["data"].(map[string]interface{})
+	require.Equal(t, float64(2), result["globals_updated"])
+	require.Equal(t, 45*time.Minute, s.Cfg().SyncOverdueGrace)
+	require.Equal(t, 12*time.Hour, s.Cfg().SyncStuckThreshold)
 }
 
 func TestApplyImportGitHubAPIGlobals(t *testing.T) {
@@ -379,12 +410,44 @@ func TestReloadConfig(t *testing.T) {
 	s := server.NewConfigTestServer(config.GetIns(), testDB, refresher)
 	require.Equal(t, "one", s.Cfg().Repository[0].Name)
 
-	writeFile(t, path, "repository:\n  - name: two\n    url: github.com/two/repo\n    cron: '@every 1m'\n")
+	onDisk := []byte("# this is the generation Reload must publish\nrepository:\n  - name: two\n    url: github.com/two/repo\n    cron: '@every 1m'\n")
+	require.NoError(t, os.WriteFile(path, onDisk, 0o644))
+	afterRead := []byte("# operator edit made after Reload read the file\nrepository:\n  - name: three\n    url: github.com/three/repo\n")
+	s.SetReadReloadSnapshot(func() (*config.ReloadSnapshot, error) {
+		snapshot, err := config.ReadReloadSnapshot()
+		if err != nil {
+			return nil, err
+		}
+		return snapshot, os.WriteFile(path, afterRead, 0o644)
+	})
 	code, _ := getJSON(t, s, http.MethodPost, "/api/config/reload", "")
 	require.Equal(t, 200, code)
 	require.Equal(t, "two", s.Cfg().Repository[0].Name)
 	require.Len(t, refresher.configs, 1)
 	require.Equal(t, "@every 1m", refresher.configs[0].Repository[0].Cron)
+	afterReload, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, afterRead, afterReload, "reload must not overwrite bytes edited after its read")
+}
+
+func TestConfigSnapshotAccessorCannotMutatePublishedAPIConfig(t *testing.T) {
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	defer testDB.Close()
+	cfg := &config.Config{Repository: []typedef.Repository{{
+		Name:    "original",
+		URL:     "github.com/acme/original",
+		Storage: []string{"archive"},
+	}}}
+	s := server.NewConfigTestServer(cfg, testDB)
+
+	snapshot := s.Cfg()
+	snapshot.Repository[0].Name = "caller mutation"
+	snapshot.Repository[0].Storage[0] = "caller mutation"
+
+	actual := s.Cfg()
+	require.Equal(t, "original", actual.Repository[0].Name)
+	require.Equal(t, []string{"archive"}, actual.Repository[0].Storage)
 }
 
 func TestReloadConfigKeepsOldOnError(t *testing.T) {

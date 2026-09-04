@@ -145,14 +145,14 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	// syncs use the same instant in UTC without reinterpreting wall-clock time.
 	opt := newIssueListOptions(lastUpdate)
 
-	cfg := config.GetIns()
+	cfg := config.GetExecutionConfig(ctx)
 	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
 	for {
 		var (
 			issues []*gh.Issue
 			resp   *gh.Response
 		)
-		err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+		err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 			permit, acquireErr := githubapi.Acquire(ctx, "core")
 			if acquireErr != nil {
 				return acquireErr
@@ -184,7 +184,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 					comments []*gh.IssueComment
 					resp     *gh.Response
 				)
-				err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+				err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 					permit, acquireErr := githubapi.Acquire(ctx, "core")
 					if acquireErr != nil {
 						return acquireErr

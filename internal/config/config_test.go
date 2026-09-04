@@ -2,10 +2,14 @@ package config
 
 import (
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -30,6 +34,31 @@ func TestGetRetryDefaults(t *testing.T) {
 	rc := GetRetryConfig()
 	require.Equal(t, 3, rc.MaxRetries)
 	require.Equal(t, 5*time.Second, rc.BaseDelay)
+}
+
+func TestSyncHealthDefaults(t *testing.T) {
+	cfg := &Config{}
+	seedDefaults(cfg)
+	require.Equal(t, 30*time.Minute, cfg.SyncOverdueGrace)
+	require.Equal(t, 24*time.Hour, cfg.SyncStuckThreshold)
+}
+
+func TestSyncHealthNonPositiveValuesUseDefaults(t *testing.T) {
+	cfg := &Config{SyncOverdueGrace: -time.Second, SyncStuckThreshold: -time.Second}
+	seedDefaults(cfg)
+	require.Equal(t, DefaultSyncOverdueGrace, cfg.SyncOverdueGrace)
+	require.Equal(t, DefaultSyncStuckThreshold, cfg.SyncStuckThreshold)
+}
+
+func TestSyncHealthGettersAndSaveRoundTrip(t *testing.T) {
+	writeTmpConfig(t, "githubtoken: test\nsyncOverdueGrace: 45m\nsyncStuckThreshold: 12h\n")
+	require.Equal(t, 45*time.Minute, GetSyncOverdueGrace())
+	require.Equal(t, 12*time.Hour, GetSyncStuckThreshold())
+
+	require.NoError(t, Save())
+	Init()
+	require.Equal(t, 45*time.Minute, GetSyncOverdueGrace())
+	require.Equal(t, 12*time.Hour, GetSyncStuckThreshold())
 }
 
 func TestGetGitHubAPIDefaults(t *testing.T) {
@@ -165,4 +194,307 @@ func TestValidateIdentity(t *testing.T) {
 
 	// 空仓库列表 → 通过。
 	require.NoError(t, validateIdentity(&Config{}))
+}
+
+func TestSetInsPublishesDefensiveImmutableSnapshots(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() {
+		if previous == nil {
+			SetIns(&Config{})
+			return
+		}
+		SetIns(previous)
+	})
+
+	input := &Config{
+		Repository: []typedef.Repository{{
+			Name:    "original",
+			URL:     "github.com/acme/original",
+			Storage: []string{"archive"},
+		}},
+		Storage: []typedef.MultiStorage{{Storage: typedef.Storage{Name: "archive", Type: "file", Path: "old"}}},
+	}
+	SetIns(input)
+	input.Repository[0].Name = "input mutation"
+	input.Repository[0].Storage[0] = "input mutation"
+	input.Storage[0].Path = "input mutation"
+
+	callerSnapshot := GetIns()
+	callerSnapshot.Repository[0].Name = "caller mutation"
+	callerSnapshot.Repository[0].Storage[0] = "caller mutation"
+	callerSnapshot.Storage[0].Path = "caller mutation"
+
+	actual := GetIns()
+	require.Equal(t, "original", actual.Repository[0].Name)
+	require.Equal(t, []string{"archive"}, actual.Repository[0].Storage)
+	require.Equal(t, "old", actual.Storage[0].Path)
+}
+
+func TestGetInsPreservesUninitializedNil(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() { SetIns(previous) })
+	SetIns(nil)
+	require.Nil(t, GetIns())
+}
+
+func TestConcurrentConfigPublicationAndSnapshotReads(t *testing.T) {
+	previous := GetIns()
+	t.Cleanup(func() { SetIns(previous) })
+	configs := []*Config{
+		{Repository: []typedef.Repository{{Name: "one", URL: "github.com/acme/one"}}, SyncOverdueGrace: time.Minute},
+		{Repository: []typedef.Repository{{Name: "two", URL: "github.com/acme/two"}}, SyncOverdueGrace: 2 * time.Minute},
+	}
+	// Seed an allowed generation before either goroutine starts. Under -count,
+	// a prior reload test may leave a coherent but unrelated package snapshot;
+	// observing that snapshot is not evidence of a torn publication.
+	SetIns(configs[0])
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	var incoherent atomic.Bool
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 1000; index++ {
+			SetIns(configs[index%len(configs)])
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for index := 0; index < 1000; index++ {
+			snapshot := GetIns()
+			if snapshot == nil || len(snapshot.Repository) == 0 {
+				continue
+			}
+			switch snapshot.Repository[0].Name {
+			case "one":
+				incoherent.CompareAndSwap(false, snapshot.SyncOverdueGrace != time.Minute)
+			case "two":
+				incoherent.CompareAndSwap(false, snapshot.SyncOverdueGrace != 2*time.Minute)
+			default:
+				incoherent.Store(true)
+			}
+			_ = GetSyncOverdueGrace()
+		}
+	}()
+	close(start)
+	workers.Wait()
+	require.False(t, incoherent.Load(), "observed partial configuration generation")
+}
+
+func TestGetViperReturnsDetachedSnapshot(t *testing.T) {
+	writeTmpConfig(t, "server:\n  port: \"8081\"\n")
+	detached := GetViper()
+	require.NotNil(t, detached)
+	detached.Set("server.port", "9999")
+
+	require.Equal(t, "8081", GetServerSection().Port)
+	require.Equal(t, "8081", GetViper().GetString("server.port"))
+}
+
+func TestGetViperReturnsDeepDetachedCompositeSnapshot(t *testing.T) {
+	writeTmpConfig(t, `repository:
+  - name: original
+    url: github.com/acme/original
+    storage:
+      - archive
+storage:
+  - name: archive
+    type: file
+    path: original-path
+`)
+	// Save installs typed slices in viper, which is the aliasing path a shallow
+	// AllSettings/MergeConfigMap copy fails to detach.
+	require.NoError(t, Save())
+
+	detached := GetViper()
+	repositories, ok := detached.Get("repository").([]typedef.Repository)
+	require.Truef(t, ok, "repository setting has unexpected type %T", detached.Get("repository"))
+	storages, ok := detached.Get("storage").([]typedef.MultiStorage)
+	require.Truef(t, ok, "storage setting has unexpected type %T", detached.Get("storage"))
+	repositories[0].Name = "detached mutation"
+	repositories[0].Storage[0] = "detached mutation"
+	storages[0].Path = "detached mutation"
+
+	fresh := GetViper()
+	freshRepositories, ok := fresh.Get("repository").([]typedef.Repository)
+	require.Truef(t, ok, "fresh repository setting has unexpected type %T", fresh.Get("repository"))
+	freshStorages, ok := fresh.Get("storage").([]typedef.MultiStorage)
+	require.Truef(t, ok, "fresh storage setting has unexpected type %T", fresh.Get("storage"))
+	live := GetIns()
+	assert.Equal(t, "original", freshRepositories[0].Name)
+	assert.Equal(t, []string{"archive"}, freshRepositories[0].Storage)
+	assert.Equal(t, "original-path", freshStorages[0].Path)
+	assert.Equal(t, "original", live.Repository[0].Name)
+	assert.Equal(t, []string{"archive"}, live.Repository[0].Storage)
+	assert.Equal(t, "original-path", live.Storage[0].Path)
+
+	require.NoError(t, Save())
+	saved, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	assert.Contains(t, string(saved), "name: original")
+	assert.Contains(t, string(saved), "- archive")
+	assert.Contains(t, string(saved), "path: original-path")
+	assert.NotContains(t, string(saved), "detached mutation")
+}
+
+func TestConcurrentSetInsKeepsConfigAndGitHubCoordinatorPaired(t *testing.T) {
+	previousConfig := GetIns()
+	previousPublish := publishGitHubAPI
+	t.Cleanup(func() {
+		publishGitHubAPI = previousPublish
+		SetIns(previousConfig)
+	})
+
+	firstConfigureEntered := make(chan struct{})
+	firstConfigureRelease := make(chan struct{})
+	var appliedConcurrency atomic.Uint64
+	publishGitHubAPI = func(cfg githubapi.Config, install func()) {
+		previousPublish(cfg, func() {
+			install()
+			if cfg.Concurrency == 1 {
+				close(firstConfigureEntered)
+				<-firstConfigureRelease
+			}
+		})
+		appliedConcurrency.Store(uint64(cfg.Concurrency))
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		SetIns(&Config{GitHubToken: "one", GitHubAPIConcurrency: 1})
+		close(firstDone)
+	}()
+	<-firstConfigureEntered
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		SetIns(&Config{GitHubToken: "two", GitHubAPIConcurrency: 2})
+		close(secondDone)
+	}()
+	<-secondStarted
+
+	lockedAcrossConfigure := !stateMu.TryLock()
+	if !lockedAcrossConfigure {
+		stateMu.Unlock()
+	}
+	close(firstConfigureRelease)
+	<-firstDone
+	<-secondDone
+
+	require.True(t, lockedAcrossConfigure, "config state lock was released before GitHub coordinator publication")
+	require.Equal(t, "two", GetIns().GitHubToken)
+	require.Equal(t, uint(2), GetIns().GitHubAPIConcurrency)
+	require.Equal(t, uint64(2), appliedConcurrency.Load())
+}
+
+func TestSetInsPublicationExcludesConfigReaders(t *testing.T) {
+	previousConfig := GetIns()
+	previousPublish := publishGitHubAPI
+	SetIns(&Config{GitHubToken: "old", GitHubAPIConcurrency: 1})
+	t.Cleanup(func() {
+		publishGitHubAPI = previousPublish
+		SetIns(previousConfig)
+	})
+
+	publishEntered := make(chan struct{})
+	publishRelease := make(chan struct{})
+	publishGitHubAPI = func(cfg githubapi.Config, install func()) {
+		previousPublish(cfg, func() {
+			install()
+			if cfg.Concurrency == 2 {
+				close(publishEntered)
+				<-publishRelease
+			}
+		})
+	}
+
+	publishDone := make(chan struct{})
+	var publishReleaseOnce sync.Once
+	var publishWorkers sync.WaitGroup
+	publishWorkers.Add(1)
+	go func() {
+		defer publishWorkers.Done()
+		SetIns(&Config{GitHubToken: "new", GitHubAPIConcurrency: 2})
+		close(publishDone)
+	}()
+
+	readerEntered := make(chan struct{}, 2)
+	readerProceed := make(chan struct{})
+	var readerProceedOnce sync.Once
+	var readerWorkers sync.WaitGroup
+	t.Cleanup(func() {
+		publishReleaseOnce.Do(func() { close(publishRelease) })
+		publishWorkers.Wait()
+		readerProceedOnce.Do(func() { close(readerProceed) })
+		readerWorkers.Wait()
+	})
+	select {
+	case <-publishEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for publication writer")
+	}
+
+	readHook := &configPublicationReadTestHook{read: func(read func()) {
+		readerEntered <- struct{}{}
+		<-readerProceed
+		githubapi.ReadPublication(read)
+	}}
+	configPublicationReadHookForTest.Store(readHook)
+	t.Cleanup(func() { configPublicationReadHookForTest.CompareAndSwap(readHook, nil) })
+
+	configReadDone := make(chan *Config, 1)
+	readerWorkers.Add(2)
+	go func() {
+		defer readerWorkers.Done()
+		configReadDone <- GetIns()
+	}()
+	scalarReadDone := make(chan uint, 1)
+	go func() {
+		defer readerWorkers.Done()
+		scalarReadDone <- GetGitHubAPIConcurrency()
+	}()
+	for range 2 {
+		select {
+		case <-readerEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for config reader to reach the pre-read barrier")
+		}
+	}
+	select {
+	case <-configReadDone:
+		t.Fatal("GetIns returned while blocked inside the publication read gate")
+	default:
+	}
+	select {
+	case <-scalarReadDone:
+		t.Fatal("scalar getter returned while blocked inside the publication read gate")
+	default:
+	}
+
+	publishReleaseOnce.Do(func() { close(publishRelease) })
+	select {
+	case <-publishDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for publication writer completion")
+	}
+	readerProceedOnce.Do(func() { close(readerProceed) })
+
+	var publishedConfig *Config
+	select {
+	case publishedConfig = <-configReadDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for GetIns")
+	}
+	var publishedConcurrency uint
+	select {
+	case publishedConcurrency = <-scalarReadDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for scalar config getter")
+	}
+
+	require.Equal(t, "new", publishedConfig.GitHubToken)
+	require.Equal(t, uint(2), publishedConcurrency)
 }

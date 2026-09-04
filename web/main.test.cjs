@@ -9,12 +9,17 @@ test('renders repository actions before the repository name', async () => {
     const control = () => ({
         addEventListener() {},
         value: '',
+        checked: false,
     });
     const controls = {
         '#btn-add-repo': control(),
         '#btn-refresh-repos': control(),
         '#repos-search': control(),
         '#btn-search-repos': control(),
+        '#repos-health': control(),
+        '#repos-overdue': control(),
+        '#repos-sort': control(),
+        '#repos-direction': control(),
     };
     const document = {
         addEventListener() {},
@@ -38,23 +43,28 @@ test('renders repository actions before the repository name', async () => {
                         URL: 'github.com/wnarutou/gitrieve',
                         Type: 'repo',
                         Storage: [],
+                        health_status: 'healthy',
+                        last_status: 'completed',
                         total_runs: 0,
                         success_runs: 0,
                         failed_runs: 0,
                     }],
+                    summary: { total: 1, healthy: 1 },
                     total: 1,
                 },
             }),
         }),
         location: { hash: '#/repositories' },
         setInterval() {},
+        setTimeout() {},
+        clearTimeout() {},
         URLSearchParams,
         window: { addEventListener() {} },
     });
 
     const scriptPath = path.join(__dirname, 'static', 'js', 'main.js');
     vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), context);
-    await vm.runInContext('renderRepositories()', context);
+    await vm.runInContext("state.activeRoute = 'repositories'; state.routeEpoch = 1; renderRepositories(1)", context);
 
     const headerCells = [...app.innerHTML.matchAll(/<th(?:\s[^>]*)?>([\s\S]*?)<\/th>/g)]
         .map((match) => match[1].trim());
@@ -62,8 +72,11 @@ test('renders repository actions before the repository name', async () => {
     assert.ok(firstRow, 'expected a rendered repository row');
     const bodyCells = [...firstRow[1].matchAll(/<td(?:\s+class="([^"]*)")?[^>]*>([\s\S]*?)<\/td>/g)];
 
-    assert.deepEqual(headerCells.slice(0, 2), ['', 'Name']);
+    const actionIndex = headerCells.indexOf('Actions');
+    const nameIndex = headerCells.indexOf('Name / URL');
+    assert.ok(actionIndex >= 0, 'expected an Actions column');
+    assert.ok(nameIndex > actionIndex, 'expected Actions before the repository name');
     assert.equal(bodyCells[0][1], 'actions');
     assert.match(bodyCells[0][2], /btn-run-repo/);
-    assert.match(bodyCells[1][2], /<strong>gitrieve<\/strong>/);
+    assert.match(bodyCells[nameIndex][2], /<strong>gitrieve<\/strong>/);
 });

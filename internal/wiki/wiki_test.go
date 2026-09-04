@@ -2,11 +2,77 @@ package wiki
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
+	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
+
+type wikiRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn wikiRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+type wikiLogSink struct {
+	logs []string
+}
+
+func (s *wikiLogSink) Log(_, _, level, message string) error {
+	s.logs = append(s.logs, level+":"+message)
+	return nil
+}
+
+func TestWikiAvailabilitySkipsRepositoryWithoutWiki(t *testing.T) {
+	err := wikiAvailability("github.com/test/repo", false)
+	reason, ok := syncresult.SkippedReason(err)
+
+	require.True(t, ok)
+	require.Equal(t, "repository github.com/test/repo has no wiki", reason)
+	require.NoError(t, wikiAvailability("github.com/test/repo", true))
+}
+
+func TestSyncSkipsUnavailableWikiWithoutPresentationOrRepositorySync(t *testing.T) {
+	previousConfig := config.GetIns()
+	config.SetIns(&config.Config{})
+	if previousConfig != nil {
+		t.Cleanup(func() { config.SetIns(previousConfig) })
+	}
+
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = wikiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/repos/test/repo", req.URL.Path)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"has_wiki":false}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	sink := &wikiLogSink{}
+	ui.SetSink(sink)
+	t.Cleanup(func() { ui.SetSink(nil) })
+	unbind := ui.Bind("execution-1", "wiki")
+	defer unbind()
+
+	err := Sync(context.Background(), typedef.Repository{Name: "repo", URL: "github.com/test/repo"}, nil)
+	reason, ok := syncresult.SkippedReason(err)
+
+	require.True(t, ok)
+	require.Equal(t, "repository github.com/test/repo has no wiki", reason)
+	require.Empty(t, sink.logs)
+}
 
 func TestSyncCancelledContextReturnsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -14,4 +80,135 @@ func TestSyncCancelledContextReturnsImmediately(t *testing.T) {
 
 	err := Sync(ctx, typedef.Repository{URL: "github.com/test/repo"}, nil)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func wikiExecutionContext(parent context.Context, cfg *config.Config) context.Context {
+	ctx := config.WithExecutionSnapshot(parent, config.NewExecutionSnapshot(cfg))
+	return githubapi.WithScope(ctx, githubapi.NewScope(config.GitHubAPIConfigFrom(cfg)))
+}
+
+func TestWikiPreflightWaitsForScopedPermitAndReleasesItAfterObservation(t *testing.T) {
+	githubapi.Configure(githubapi.Config{Concurrency: 1})
+	held, err := githubapi.Acquire(context.Background(), "core")
+	require.NoError(t, err)
+	var releaseHeld sync.Once
+	t.Cleanup(func() { releaseHeld.Do(func() { held.Done(githubapi.Observation{}) }) })
+
+	requestSeen := make(chan struct{}, 1)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = wikiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestSeen <- struct{}{}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"has_wiki":false}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	cfg := &config.Config{RetryMaxCount: 0}
+	done := make(chan error, 1)
+	go func() {
+		done <- Sync(wikiExecutionContext(context.Background(), cfg), typedef.Repository{Name: "repo", URL: "github.com/test/repo"}, nil)
+	}()
+	select {
+	case <-requestSeen:
+		t.Fatal("wiki preflight reached HTTP while the process-wide permit was held")
+	case err := <-done:
+		t.Fatalf("wiki preflight returned before the held permit was released: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	releaseHeld.Do(func() { held.Done(githubapi.Observation{}) })
+	select {
+	case err := <-done:
+		_, skipped := syncresult.SkippedReason(err)
+		require.True(t, skipped)
+	case <-time.After(time.Second):
+		t.Fatal("wiki preflight did not resume after the permit was released")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	permit, err := githubapi.Acquire(ctx, "core")
+	require.NoError(t, err, "wiki observation did not release its permit")
+	permit.Done(githubapi.Observation{})
+}
+
+func TestWikiPreflightCancellationInterruptsPermitWait(t *testing.T) {
+	githubapi.Configure(githubapi.Config{Concurrency: 1})
+	held, err := githubapi.Acquire(context.Background(), "core")
+	require.NoError(t, err)
+	defer held.Done(githubapi.Observation{})
+
+	requestSeen := make(chan struct{}, 1)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = wikiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestSeen <- struct{}{}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"has_wiki":false}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	ctx, cancel := context.WithCancel(wikiExecutionContext(context.Background(), &config.Config{}))
+	done := make(chan error, 1)
+	go func() {
+		done <- Sync(ctx, typedef.Repository{Name: "repo", URL: "github.com/test/repo"}, nil)
+	}()
+	select {
+	case <-requestSeen:
+		t.Fatal("wiki preflight bypassed the held permit")
+	case err := <-done:
+		t.Fatalf("wiki preflight returned before cancellation: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt wiki preflight permit wait")
+	}
+	select {
+	case <-requestSeen:
+		t.Fatal("cancelled wiki preflight reached HTTP")
+	default:
+	}
+}
+
+func TestWikiPreflightRetriesFromJobSnapshot(t *testing.T) {
+	githubapi.Configure(githubapi.Config{Concurrency: 1})
+	previousConfig := config.GetIns()
+	config.SetIns(&config.Config{RetryMaxCount: 0})
+	t.Cleanup(func() { config.SetIns(previousConfig) })
+
+	var calls int
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = wikiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		status := http.StatusInternalServerError
+		body := `{"message":"temporary"}`
+		if calls == 2 {
+			status = http.StatusOK
+			body = `{"has_wiki":false}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	cfg := &config.Config{RetryMaxCount: 1, RetryBaseDelay: time.Millisecond}
+	err := Sync(wikiExecutionContext(context.Background(), cfg), typedef.Repository{Name: "repo", URL: "github.com/test/repo"}, nil)
+	_, skipped := syncresult.SkippedReason(err)
+	require.True(t, skipped)
+	require.Equal(t, 2, calls, "wiki preflight must use the job snapshot retry count")
 }

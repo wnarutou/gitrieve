@@ -1,10 +1,13 @@
 package db
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestInitializeCreatesTables verifies that Initialize creates the executions
@@ -13,6 +16,10 @@ func TestInitializeCreatesTables(t *testing.T) {
 	testDB, err := Initialize(":memory:")
 	assert.NoError(t, err)
 	defer testDB.Close()
+	assertComponentSchemaObjects(t, testDB)
+	require.NoError(t, Migrate(testDB))
+	require.NoError(t, Migrate(testDB))
+	assertComponentSchemaObjects(t, testDB)
 
 	// executions table should exist and accept inserts
 	_, err = testDB.Exec(`INSERT INTO executions (id, job_name, start_time, status) VALUES (?, ?, ?, ?)`,
@@ -82,7 +89,9 @@ func TestMigrateAddsRepoKeyColumn(t *testing.T) {
 		"old", "repo-a", time.Now(), "completed")
 	assert.NoError(t, err)
 
-	assert.NoError(t, Migrate(testDB))
+	require.NoError(t, Migrate(testDB))
+	require.NoError(t, Migrate(testDB))
+	assertComponentSchemaObjects(t, testDB)
 
 	// Column now exists; legacy row's key stays empty (no backfill).
 	var key string
@@ -96,6 +105,33 @@ func TestMigrateAddsRepoKeyColumn(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestInitializeThenMigrateUpgradesLegacyFileDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacyDB, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = legacyDB.Exec(`
+		CREATE TABLE executions (
+			id TEXT PRIMARY KEY,
+			job_name TEXT NOT NULL,
+			start_time DATETIME NOT NULL,
+			end_time DATETIME,
+			status TEXT NOT NULL,
+			error_message TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`)
+	require.NoError(t, err)
+	require.NoError(t, legacyDB.Close())
+
+	testDB, err := Initialize(path)
+	if testDB != nil {
+		defer testDB.Close()
+	}
+	require.NoError(t, err)
+	require.NoError(t, Migrate(testDB))
+	require.NoError(t, Migrate(testDB))
+	assertComponentSchemaObjects(t, testDB)
+}
+
 // TestMigrateIsIdempotent verifies Migrate on a fresh (already current) DB is a no-op.
 func TestMigrateIsIdempotent(t *testing.T) {
 	testDB, err := Initialize(":memory:")
@@ -104,4 +140,21 @@ func TestMigrateIsIdempotent(t *testing.T) {
 
 	assert.NoError(t, Migrate(testDB))
 	assert.NoError(t, Migrate(testDB))
+}
+
+func assertComponentSchemaObjects(t *testing.T, testDB *DB) {
+	t.Helper()
+	for _, name := range []string{
+		"execution_components",
+		"idx_executions_repo_start",
+		"idx_executions_repo_status_end",
+		"idx_executions_status",
+		"idx_execution_components_execution",
+	} {
+		var got string
+		require.NoError(t, testDB.QueryRow(
+			`SELECT name FROM sqlite_master WHERE name = ?`, name,
+		).Scan(&got))
+		require.Equal(t, name, got)
+	}
 }

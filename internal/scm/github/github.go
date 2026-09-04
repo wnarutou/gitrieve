@@ -18,23 +18,41 @@ type Client struct {
 }
 
 func New() (*Client, error) {
+	return NewWithContext(context.Background())
+}
+
+func NewWithContext(ctx context.Context) (*Client, error) {
 	c := github.NewClient(nil)
-	if token := config.GetIns().GitHubToken; token != "" {
+	if token := config.GetExecutionConfig(ctx).GitHubToken; token != "" {
 		c = c.WithAuthToken(token)
 	}
 	return &Client{c: c}, nil
 }
 
 func (c *Client) GetRepos(name string, accountType string) ([]string, error) {
+	return c.GetReposContext(context.Background(), name, accountType)
+}
+
+func (c *Client) GetReposContext(ctx context.Context, name string, accountType string) ([]string, error) {
 	var (
 		list []*github.Repository
 		err  error
 	)
-	if accountType == typedef.TypeOrg {
-		list, _, err = c.c.Repositories.ListByOrg(context.Background(), name, nil)
-	} else {
-		list, _, err = c.c.Repositories.List(context.Background(), name, nil)
-	}
+	err = retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
+		permit, acquireErr := githubapi.Acquire(ctx, "core")
+		if acquireErr != nil {
+			return acquireErr
+		}
+		var response *github.Response
+		var apiErr error
+		if accountType == typedef.TypeOrg {
+			list, response, apiErr = c.c.Repositories.ListByOrg(ctx, name, nil)
+		} else {
+			list, response, apiErr = c.c.Repositories.List(ctx, name, nil)
+		}
+		permit.Done(githubapi.ObserveREST(response, apiErr))
+		return apiErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +73,7 @@ func (c *Client) GetReleases(ctx context.Context, owner, repo string) ([]*github
 		list []*github.RepositoryRelease
 		err  error
 	)
-	err = retry.Do(ctx, config.GetRetryConfig(), func() error {
+	err = retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 		permit, acquireErr := githubapi.Acquire(ctx, "core")
 		if acquireErr != nil {
 			return acquireErr
@@ -77,7 +95,7 @@ func (c *Client) GetReleaseAssets(ctx context.Context, owner, repo string, id in
 		list []*github.ReleaseAsset
 		err  error
 	)
-	err = retry.Do(ctx, config.GetRetryConfig(), func() error {
+	err = retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 		permit, acquireErr := githubapi.Acquire(ctx, "core")
 		if acquireErr != nil {
 			return acquireErr
@@ -96,7 +114,7 @@ func (c *Client) GetReleaseAssets(ctx context.Context, owner, repo string, id in
 
 func (c *Client) DownloadAsset(ctx context.Context, owner, repo string, id int64) (io.ReadCloser, error) {
 	var rc io.ReadCloser
-	err := retry.Do(ctx, config.GetRetryConfig(), func() error {
+	err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
 		permit, acquireErr := githubapi.Acquire(ctx, "core")
 		if acquireErr != nil {
 			return acquireErr
