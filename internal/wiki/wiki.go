@@ -6,7 +6,9 @@ import (
 
 	gh "github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/repository"
+	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/syncresult"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -38,7 +40,18 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	cfg := config.GetExecutionConfig(ctx)
 	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
 
-	gitrepo, _, err := client.Repositories.Get(ctx, r.Owner, r.Name)
+	var gitrepo *gh.Repository
+	err = retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
+		permit, acquireErr := githubapi.Acquire(ctx, "core")
+		if acquireErr != nil {
+			return acquireErr
+		}
+		var response *gh.Response
+		var apiErr error
+		gitrepo, response, apiErr = client.Repositories.Get(ctx, r.Owner, r.Name)
+		permit.Done(githubapi.ObserveREST(response, apiErr))
+		return apiErr
+	})
 	if err != nil {
 		ui.Errorf("Get repository %s fail", repo.URL)
 		return err

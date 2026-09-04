@@ -62,6 +62,16 @@ type RepositoryNoLongerEligibleError struct {
 	RepositoryKey string
 }
 
+// RepositoryExpansionEmptyError is an enqueue failure: a configured user/org
+// expanded successfully but currently contains no concrete repositories.
+type RepositoryExpansionEmptyError struct {
+	RepositoryKey string
+}
+
+func (e *RepositoryExpansionEmptyError) Error() string {
+	return fmt.Sprintf("repository %q expansion returned no concrete repositories", e.RepositoryKey)
+}
+
 func (e *RepositoryNoLongerEligibleError) Error() string {
 	return fmt.Sprintf("repository %q is no longer eligible", e.RepositoryKey)
 }
@@ -306,9 +316,20 @@ func (e *Executor) executeJobFromSnapshot(admissionCtx context.Context, runtime 
 	}
 
 	if e.expander != nil {
-		return e.submitBatch(admissionCtx, runtime, repo, e.expander(repo), expectedGeneration, eligible)
+		repositories := e.expander(repo)
+		if len(repositories) == 0 {
+			return nil, &RepositoryExpansionEmptyError{RepositoryKey: repo.Key()}
+		}
+		return e.submitBatch(admissionCtx, runtime, repo, repositories, expectedGeneration, eligible)
 	}
-	return e.submitBatch(admissionCtx, runtime, repo, expandRepos(runtime.executionContext(admissionCtx), repo), expectedGeneration, eligible)
+	repositories, err := expandRepos(runtime.executionContext(admissionCtx), repo)
+	if err != nil {
+		return nil, err
+	}
+	if len(repositories) == 0 {
+		return nil, &RepositoryExpansionEmptyError{RepositoryKey: repo.Key()}
+	}
+	return e.submitBatch(admissionCtx, runtime, repo, repositories, expectedGeneration, eligible)
 }
 
 // submitBatch reserves, preflights, and persists every concrete repository

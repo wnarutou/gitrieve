@@ -808,11 +808,11 @@ func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(_ context.Context, repo typedef.Repository) []typedef.Repository {
+	expandRepos = func(_ context.Context, repo typedef.Repository) ([]typedef.Repository, error) {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
-		}
+		}, nil
 	}
 
 	jobIDs, err := exec.ExecuteJob("github.com/acme")
@@ -828,6 +828,43 @@ func TestExecuteJobExpandsOrgIntoMultipleJobs(t *testing.T) {
 	}
 	assert.True(t, keys["github.com/acme/alpha"])
 	assert.True(t, keys["github.com/acme/beta"])
+}
+
+func TestExecuteJobPropagatesProductionExpansionFailure(t *testing.T) {
+	expansionErr := errors.New("GitHub repository listing failed")
+	old := expandRepos
+	t.Cleanup(func() { expandRepos = old })
+	expandRepos = func(context.Context, typedef.Repository) ([]typedef.Repository, error) {
+		return nil, expansionErr
+	}
+	exec, testDB := newTestExecutorForConfig(t, &config.Config{Repository: []typedef.Repository{{
+		Name: "acme", URL: "github.com/acme", Type: typedef.TypeOrg, OrgName: "acme",
+	}}}, noOpRunners())
+
+	jobIDs, err := exec.ExecuteJob("github.com/acme")
+	require.ErrorIs(t, err, expansionErr)
+	require.Empty(t, jobIDs)
+	require.Empty(t, executionStatusCounts(t, testDB))
+}
+
+func TestExecuteJobRejectsEmptyExpansionAsTypedEnqueueFailure(t *testing.T) {
+	cfg := &config.Config{Repository: []typedef.Repository{{
+		Name: "empty", URL: "github.com/empty", Type: typedef.TypeUser, OrgName: "empty",
+	}}}
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testDB.Close()) })
+	exec := NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, noOpRunners(),
+		func(typedef.Repository) []typedef.Repository { return nil },
+	)
+	t.Cleanup(func() { require.NoError(t, exec.Close()) })
+
+	jobIDs, err := exec.ExecuteJob("github.com/empty")
+	var empty *RepositoryExpansionEmptyError
+	require.ErrorAs(t, err, &empty)
+	require.Equal(t, "github.com/empty", empty.RepositoryKey)
+	require.Empty(t, jobIDs)
+	require.Empty(t, executionStatusCounts(t, testDB))
 }
 
 func TestRefreshConfigRepointsExecutor(t *testing.T) {
@@ -1533,11 +1570,11 @@ func TestExecuteJobExpandedBatchIsAtomicWhenSecondRepositoryIsActive(t *testing.
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) ([]typedef.Repository, error) {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
-		}
+		}, nil
 	}
 
 	jobIDs, err := exec.ExecuteJob("github.com/acme")
@@ -1575,11 +1612,11 @@ func TestExecuteJobExpandedBatchRollsBackAllRowsWhenLaterPersistenceFails(t *tes
 
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) ([]typedef.Repository, error) {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "github.com/acme/alpha"},
 			{Name: "beta", URL: "github.com/acme/beta"},
-		}
+		}, nil
 	}
 
 	jobIDs, err := exec.ExecuteJob("github.com/acme")
@@ -1614,11 +1651,11 @@ func TestExecuteJobRejectsDuplicateKeysWithinExpandedBatchBeforePersistence(t *t
 	}}}, noOpRunners())
 	old := expandRepos
 	t.Cleanup(func() { expandRepos = old })
-	expandRepos = func(context.Context, typedef.Repository) []typedef.Repository {
+	expandRepos = func(context.Context, typedef.Repository) ([]typedef.Repository, error) {
 		return []typedef.Repository{
 			{Name: "alpha", URL: "https://github.com/acme/alpha"},
 			{Name: "alpha-copy", URL: "github.com/acme/alpha/"},
-		}
+		}, nil
 	}
 
 	jobIDs, err := exec.ExecuteJob("github.com/acme")

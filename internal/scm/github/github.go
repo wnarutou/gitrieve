@@ -30,15 +30,29 @@ func NewWithContext(ctx context.Context) (*Client, error) {
 }
 
 func (c *Client) GetRepos(name string, accountType string) ([]string, error) {
+	return c.GetReposContext(context.Background(), name, accountType)
+}
+
+func (c *Client) GetReposContext(ctx context.Context, name string, accountType string) ([]string, error) {
 	var (
 		list []*github.Repository
 		err  error
 	)
-	if accountType == typedef.TypeOrg {
-		list, _, err = c.c.Repositories.ListByOrg(context.Background(), name, nil)
-	} else {
-		list, _, err = c.c.Repositories.List(context.Background(), name, nil)
-	}
+	err = retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
+		permit, acquireErr := githubapi.Acquire(ctx, "core")
+		if acquireErr != nil {
+			return acquireErr
+		}
+		var response *github.Response
+		var apiErr error
+		if accountType == typedef.TypeOrg {
+			list, response, apiErr = c.c.Repositories.ListByOrg(ctx, name, nil)
+		} else {
+			list, response, apiErr = c.c.Repositories.List(ctx, name, nil)
+		}
+		permit.Done(githubapi.ObserveREST(response, apiErr))
+		return apiErr
+	})
 	if err != nil {
 		return nil, err
 	}

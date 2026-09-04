@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +16,13 @@ type fakeRepoLister struct {
 }
 
 func (f *fakeRepoLister) GetRepos(name, accountType string) ([]string, error) {
+	return f.repos, f.err
+}
+
+func (f *fakeRepoLister) GetReposContext(ctx context.Context, name, accountType string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return f.repos, f.err
 }
 
@@ -51,4 +60,61 @@ func TestExpand(t *testing.T) {
 		bad := typedef.Repository{Name: "x", URL: "github.com/a/x", Type: "whatever"}
 		assert.Empty(t, Expand(bad))
 	})
+}
+
+func TestExpandContextPropagatesClientAndListFailures(t *testing.T) {
+	old := newGithubClientWithContext
+	t.Cleanup(func() { newGithubClientWithContext = old })
+	org := typedef.Repository{Name: "acme", Type: typedef.TypeOrg, OrgName: "acme"}
+
+	clientErr := errors.New("create client")
+	newGithubClientWithContext = func(context.Context) (contextualRepoLister, error) {
+		return nil, clientErr
+	}
+	got, err := ExpandContext(context.Background(), org)
+	require.ErrorIs(t, err, clientErr)
+	require.Empty(t, got)
+
+	listErr := errors.New("list repositories")
+	newGithubClientWithContext = func(context.Context) (contextualRepoLister, error) {
+		return &fakeRepoLister{err: listErr}, nil
+	}
+	got, err = ExpandContext(context.Background(), org)
+	require.ErrorIs(t, err, listErr)
+	require.Empty(t, got)
+}
+
+func TestExpandContextPassesCancellationToListing(t *testing.T) {
+	old := newGithubClientWithContext
+	t.Cleanup(func() { newGithubClientWithContext = old })
+	newGithubClientWithContext = func(context.Context) (contextualRepoLister, error) {
+		return &fakeRepoLister{repos: []string{"github.com/acme/unreachable"}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := ExpandContext(ctx, typedef.Repository{Name: "acme", Type: typedef.TypeOrg, OrgName: "acme"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, got)
+}
+
+func TestExpandContextReturnsConcreteRepositories(t *testing.T) {
+	old := newGithubClientWithContext
+	t.Cleanup(func() { newGithubClientWithContext = old })
+	newGithubClientWithContext = func(context.Context) (contextualRepoLister, error) {
+		return &fakeRepoLister{repos: []string{"github.com/acme/alpha", "github.com/acme/beta"}}, nil
+	}
+	org := typedef.Repository{
+		Name: "acme", Type: typedef.TypeOrg, OrgName: "acme",
+		Cron: "0 2 * * *", AllBranches: true,
+	}
+
+	got, err := ExpandContext(context.Background(), org)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "alpha", got[0].Name)
+	require.Equal(t, "github.com/acme/alpha", got[0].URL)
+	require.Equal(t, typedef.TypeRepo, got[0].GetType())
+	require.Equal(t, org.Cron, got[0].Cron)
+	require.True(t, got[0].AllBranches)
 }

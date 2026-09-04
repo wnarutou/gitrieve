@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"time"
@@ -25,9 +26,13 @@ type repoLister interface {
 	GetRepos(name, accountType string) ([]string, error)
 }
 
+type contextualRepoLister interface {
+	GetReposContext(context.Context, string, string) ([]string, error)
+}
+
 // newGithubClient 是可替换的包级 seam：生产用真客户端，测试注入 fake。
 var newGithubClient = func() (repoLister, error) { return github.New() }
-var newGithubClientWithContext = func(ctx context.Context) (repoLister, error) { return github.NewWithContext(ctx) }
+var newGithubClientWithContext = func(ctx context.Context) (contextualRepoLister, error) { return github.NewWithContext(ctx) }
 
 func GetRepositories(name string) []typedef.Repository {
 	repositories := make([]typedef.Repository, 0)
@@ -50,12 +55,6 @@ func addRepo(repo typedef.Repository, ret []typedef.Repository) []typedef.Reposi
 	return addRepoWithClient(repo, ret, newGithubClient)
 }
 
-func addRepoWithContext(ctx context.Context, repo typedef.Repository, ret []typedef.Repository) []typedef.Repository {
-	return addRepoWithClient(repo, ret, func() (repoLister, error) {
-		return newGithubClientWithContext(ctx)
-	})
-}
-
 func addRepoWithClient(repo typedef.Repository, ret []typedef.Repository, newClient func() (repoLister, error)) []typedef.Repository {
 	switch repo.GetType() {
 	case typedef.TypeRepo:
@@ -72,24 +71,29 @@ func addRepoWithClient(repo typedef.Repository, ret []typedef.Repository, newCli
 			ui.Errorf("Error getting user repos, %s", err)
 			return ret
 		}
-		for _, r := range repos {
-			ret = append(ret, typedef.Repository{
-				Name:               path.Base(r),
-				URL:                r,
-				Cron:               repo.Cron,
-				Storage:            repo.Storage,
-				UseCache:           repo.UseCache,
-				Type:               typedef.TypeRepo,
-				AllBranches:        repo.AllBranches,
-				Depth:              repo.Depth,
-				DownloadReleases:   repo.DownloadReleases,
-				DownloadIssues:     repo.DownloadIssues,
-				DownloadWiki:       repo.DownloadWiki,
-				DownloadDiscussion: repo.DownloadDiscussion,
-			})
-		}
+		ret = appendConcreteRepositories(ret, repo, repos)
 	default:
 		ui.Errorf("Invalid repository type %s", repo.Type)
+	}
+	return ret
+}
+
+func appendConcreteRepositories(ret []typedef.Repository, configured typedef.Repository, repositories []string) []typedef.Repository {
+	for _, repository := range repositories {
+		ret = append(ret, typedef.Repository{
+			Name:               path.Base(repository),
+			URL:                repository,
+			Cron:               configured.Cron,
+			Storage:            configured.Storage,
+			UseCache:           configured.UseCache,
+			Type:               typedef.TypeRepo,
+			AllBranches:        configured.AllBranches,
+			Depth:              configured.Depth,
+			DownloadReleases:   configured.DownloadReleases,
+			DownloadIssues:     configured.DownloadIssues,
+			DownloadWiki:       configured.DownloadWiki,
+			DownloadDiscussion: configured.DownloadDiscussion,
+		})
 	}
 	return ret
 }
@@ -439,6 +443,21 @@ func Expand(repo typedef.Repository) []typedef.Repository {
 
 // ExpandContext expands a user/org entry using the caller's frozen execution
 // configuration (token, retry, and API coordination scope when present).
-func ExpandContext(ctx context.Context, repo typedef.Repository) []typedef.Repository {
-	return addRepoWithContext(ctx, repo, nil)
+func ExpandContext(ctx context.Context, repo typedef.Repository) ([]typedef.Repository, error) {
+	switch repo.GetType() {
+	case typedef.TypeRepo:
+		return []typedef.Repository{repo}, nil
+	case typedef.TypeUser, typedef.TypeOrg:
+		client, err := newGithubClientWithContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		repositories, err := client.GetReposContext(ctx, repo.OrgName, repo.Type)
+		if err != nil {
+			return nil, err
+		}
+		return appendConcreteRepositories(nil, repo, repositories), nil
+	default:
+		return nil, fmt.Errorf("invalid repository type %q", repo.Type)
+	}
 }

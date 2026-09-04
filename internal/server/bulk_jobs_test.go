@@ -498,6 +498,32 @@ func TestBulkUserRetryUsesUnicodePrefixIndexAndCountsOneCandidateForMultipleExec
 	require.NotContains(t, resp.Body.String(), "job_ids")
 }
 
+func TestBulkEmptyUserExpansionCountsFailedToEnqueue(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	user := typedef.Repository{Name: "empty user", URL: "github.com/empty", Type: typedef.TypeUser, OrgName: "empty"}
+	cfg := &config.Config{Repository: []typedef.Repository{user}}
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, cfg, executor.Runners{},
+		func(typedef.Repository) []typedef.Repository { return nil },
+	)
+	t.Cleanup(func() {
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	handler := server.NewTestServerWithExecutor(testDB, exec, cfg)
+	insertBulkExecution(t, testDB, "fixture-empty-user", "github.com/empty/history", "failed", now)
+
+	resp, result := postBulk(t, handler, `{"selector":{"search":"empty user"},"expected_count":1}`)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	require.Equal(t, 1, result.Data.Requested)
+	require.Zero(t, result.Data.Queued)
+	require.Zero(t, result.Data.SkippedActive)
+	require.Zero(t, result.Data.NoLongerEligible)
+	require.Equal(t, 1, result.Data.FailedToEnqueue)
+	require.Equal(t, 1, executionCount(t, testDB), "empty expansion must not persist a pending execution")
+}
+
 func TestBulkCancellationAfterRecheckStopsBeforeEnqueueAndAccountsRemainder(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	cfg := &config.Config{Repository: []typedef.Repository{

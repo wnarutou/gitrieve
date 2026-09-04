@@ -27,6 +27,157 @@ func TestCoordinatorLimitsConcurrentRequests(t *testing.T) {
 	p2.Done(Observation{})
 }
 
+func installCoordinatorForTest(t *testing.T, cfg Config) {
+	t.Helper()
+	previous := current.Load()
+	publicationMu.Lock()
+	current.Store(newCoordinator(cfg))
+	publicationMu.Unlock()
+	t.Cleanup(func() {
+		publicationMu.Lock()
+		current.Store(previous)
+		publicationMu.Unlock()
+	})
+}
+
+func TestScopesShareOneProcessArbiterAcrossGenerations(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	oldPermit, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	var releaseOld sync.Once
+	t.Cleanup(func() { releaseOld.Do(func() { oldPermit.Done(Observation{}) }) })
+
+	Configure(Config{Concurrency: 1})
+	newScope := NewScope(Config{Concurrency: 1})
+	waitCtx, cancel := context.WithTimeout(WithScope(context.Background(), newScope), 40*time.Millisecond)
+	defer cancel()
+	newPermit, err := Acquire(waitCtx, "core")
+	if newPermit != nil {
+		newPermit.Done(Observation{})
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "new-generation traffic bypassed the held old-generation permit")
+
+	releaseOld.Do(func() { oldPermit.Done(Observation{}) })
+	acquireCtx, acquireCancel := context.WithTimeout(WithScope(context.Background(), newScope), time.Second)
+	defer acquireCancel()
+	newPermit, err = Acquire(acquireCtx, "core")
+	require.NoError(t, err)
+	newPermit.Done(Observation{})
+}
+
+func TestScopePublicationPreservesObservedSecondaryPause(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	permit, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	permit.Done(Observation{Secondary: true, RetryAfter: time.Second})
+
+	Configure(Config{Concurrency: 1})
+	newScope := NewScope(Config{Concurrency: 1})
+	waitCtx, cancel := context.WithTimeout(WithScope(context.Background(), newScope), 40*time.Millisecond)
+	defer cancel()
+	permit, err = Acquire(waitCtx, "graphql")
+	if permit != nil {
+		permit.Done(Observation{})
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "new-generation traffic bypassed an old-generation secondary pause")
+}
+
+func TestProcessArbiterCancellationAndResizeWakeSafely(t *testing.T) {
+	installCoordinatorForTest(t, Config{Concurrency: 1})
+	oldScope := NewScope(Config{Concurrency: 1})
+	first, err := Acquire(WithScope(context.Background(), oldScope), "core")
+	require.NoError(t, err)
+	var releaseFirst sync.Once
+	t.Cleanup(func() { releaseFirst.Do(func() { first.Done(Observation{}) }) })
+
+	newScope := NewScope(Config{Concurrency: 1})
+	type acquireResult struct {
+		permit Permit
+		err    error
+	}
+	cancelCtx, cancelWaiter := context.WithCancel(WithScope(context.Background(), newScope))
+	cancelStarted := make(chan struct{})
+	cancelled := make(chan acquireResult, 1)
+	go func() {
+		close(cancelStarted)
+		permit, acquireErr := Acquire(cancelCtx, "core")
+		cancelled <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	<-cancelStarted
+	select {
+	case result := <-cancelled:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("waiter bypassed the process-wide concurrency limit")
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancelWaiter()
+	result := <-cancelled
+	require.Nil(t, result.permit)
+	require.ErrorIs(t, result.err, context.Canceled)
+
+	secondDone := make(chan acquireResult, 1)
+	go func() {
+		permit, acquireErr := Acquire(WithScope(context.Background(), newScope), "core")
+		secondDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	select {
+	case result = <-secondDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("waiter returned before the concurrency limit was raised")
+	case <-time.After(30 * time.Millisecond):
+	}
+	Configure(Config{Concurrency: 2})
+	select {
+	case result = <-secondDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.permit)
+	case <-time.After(time.Second):
+		t.Fatal("raising concurrency did not wake a waiter")
+	}
+	second := result.permit
+	var releaseSecond sync.Once
+	t.Cleanup(func() { releaseSecond.Do(func() { second.Done(Observation{}) }) })
+
+	Configure(Config{Concurrency: 1})
+	thirdDone := make(chan acquireResult, 1)
+	go func() {
+		permit, acquireErr := Acquire(WithScope(context.Background(), NewScope(Config{Concurrency: 1})), "core")
+		thirdDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+	select {
+	case result = <-thirdDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("lowered concurrency admitted work before active calls drained")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseFirst.Do(func() { first.Done(Observation{}) })
+	select {
+	case result = <-thirdDone:
+		if result.permit != nil {
+			result.permit.Done(Observation{})
+		}
+		t.Fatal("lowered concurrency admitted work while active calls still equaled the limit")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseSecond.Do(func() { second.Done(Observation{}) })
+	select {
+	case result = <-thirdDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.permit)
+		result.permit.Done(Observation{})
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not resume after active calls drained below the lowered limit")
+	}
+}
+
 func TestReadPublicationUsesReadBoundary(t *testing.T) {
 	gateHeld := make(chan bool, 1)
 	gateReleased := make(chan bool, 1)
@@ -187,7 +338,7 @@ func TestAcquireWaitsForPublicationBeforeSelectingCoordinator(t *testing.T) {
 		require.NotNil(t, result.permit)
 		selectedPermit, ok := result.permit.(*permit)
 		require.True(t, ok)
-		require.NotSame(t, old, selectedPermit.c)
+		require.Same(t, old, selectedPermit.c, "publication must reconfigure the stable arbiter in place")
 		require.Same(t, current.Load(), selectedPermit.c)
 		result.permit.Done(Observation{})
 	case <-ctx.Done():
@@ -276,7 +427,7 @@ func TestAcquireReleasesPublicationLockBeforeWaitingForPermit(t *testing.T) {
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		Publish(Config{Concurrency: 2}, nil)
+		Publish(Config{Concurrency: 1}, nil)
 		close(publishDone)
 	}()
 	select {
