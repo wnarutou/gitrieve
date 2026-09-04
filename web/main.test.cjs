@@ -4,6 +4,8 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+const pagination = require('./static/js/pagination.js');
+
 test('renders repository actions before the repository name', async () => {
     const app = { innerHTML: '' };
     const control = () => ({
@@ -59,7 +61,7 @@ test('renders repository actions before the repository name', async () => {
         setTimeout() {},
         clearTimeout() {},
         URLSearchParams,
-        window: { addEventListener() {} },
+        window: { addEventListener() {}, GitrievePagination: pagination },
     });
 
     const scriptPath = path.join(__dirname, 'static', 'js', 'main.js');

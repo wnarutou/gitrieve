@@ -1,5 +1,6 @@
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const { normalizePage, paginationHTML } = window.GitrievePagination;
 
 function esc(value) {
     return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, c => ({
@@ -47,15 +48,6 @@ async function api(path, opts) {
         throw err;
     }
     return body ? body.data : null;
-}
-
-function paginationHTML(page, pages, total, idPrefix) {
-    return `
-        <div class="pagination">
-            <button class="btn btn-sm" id="pg-prev-${idPrefix}" ${page > 1 ? '' : 'disabled'}>Prev</button>
-            <span class="pg-info">Page ${page} of ${pages} (${total} total)</span>
-            <button class="btn btn-sm" id="pg-next-${idPrefix}" ${page < pages ? '' : 'disabled'}>Next</button>
-        </div>`;
 }
 
 function optionsCell(r) {
@@ -683,6 +675,11 @@ async function renderRepositories(expectedRouteEpoch) {
     const repos = (data && data.repositories) || [];
     const total = (data && data.total) || 0;
     const pages = Math.max(1, Math.ceil(total / 20));
+    const validPage = normalizePage(state.reposPage, pages);
+    if (state.reposPage !== validPage) {
+        setRepositoryRoute({ reposPage: validPage });
+        return;
+    }
     const summary = (data && data.summary) || {};
     const rows = repos.map(r => {
         const nextRun = r.schedule_error ? 'Schedule error: ' + r.schedule_error : fmtTime(r.next_run_time);
@@ -728,7 +725,7 @@ async function renderRepositories(expectedRouteEpoch) {
         <div class="panel repository-table">
             ${repos.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Actions</th><th>Status</th><th>Name / URL</th><th>Last attempt</th><th>Last success</th><th>Duration</th><th>Next run</th><th>Error summary</th></tr></thead><tbody>' + rows + '</tbody></table></div>' :
                 '<div class="empty">No repositories match this view.</div>'}
-            ${repos.length ? paginationHTML(state.reposPage, pages, total, 'repos') : ''}
+            ${repos.length ? paginationHTML(state.reposPage, pages, total, 'repos', true) : ''}
         </div>`;
 
     $('#repos-health').value = state.reposHealth;
@@ -759,7 +756,13 @@ async function renderRepositories(expectedRouteEpoch) {
     const prev = $('#pg-prev-repos');
     const next = $('#pg-next-repos');
     if (prev) prev.addEventListener('click', () => { if (state.reposPage > 1) setRepositoryRoute({ reposPage: state.reposPage - 1 }); });
-    if (next) next.addEventListener('click', () => setRepositoryRoute({ reposPage: state.reposPage + 1 }));
+    if (next) next.addEventListener('click', () => { if (state.reposPage < pages) setRepositoryRoute({ reposPage: state.reposPage + 1 }); });
+    $$('.pg-page').forEach(button => button.addEventListener('click', () => {
+        const page = Number(button.dataset.page);
+        if (Number.isInteger(page) && page >= 1 && page <= pages && page !== state.reposPage) {
+            setRepositoryRoute({ reposPage: page });
+        }
+    }));
     $$('.btn-run-repo').forEach(b => b.addEventListener('click', () => {
         const r = repos.find(x => repoKey(x) === b.dataset.key);
         runRepo(b.dataset.key, r ? r.Name : '', b);

@@ -171,6 +171,7 @@ body {
 
 .pagination {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
     gap: 12px;
@@ -179,6 +180,32 @@ body {
 }
 
 .pg-info { color: var(--muted); font-size: 13px; }
+
+.pg-pages {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.pg-page {
+    min-width: 30px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.btn.pg-page.active:disabled,
+.btn.pg-page.active:disabled:hover {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #fff;
+    opacity: 1;
+}
+
+.pg-ellipsis {
+    min-width: 20px;
+    color: var(--muted);
+    text-align: center;
+}
 
 .btn {
     display: inline-flex;

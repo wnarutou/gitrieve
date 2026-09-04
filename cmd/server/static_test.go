@@ -18,7 +18,7 @@ func TestStaticAssetServed(t *testing.T) {
 	// NewServer initializes a real DB at server.dbPath default (gitrieve.db).
 	// Cleaned up implicitly by test cwd.
 
-	for _, path := range []string{"/static/css/main.css", "/static/js/main.js"} {
+	for _, path := range []string{"/static/css/main.css", "/static/js/pagination.js", "/static/js/main.js"} {
 		req, _ := http.NewRequest("GET", path, nil)
 		resp := httptest.NewRecorder()
 		server.ServeHTTP(resp, req)
