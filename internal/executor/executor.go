@@ -263,7 +263,11 @@ func (e *Executor) RefreshConfig(cfg *config.Config) {
 }
 
 func (e *Executor) RuntimeConfigSnapshot() *RuntimeConfigSnapshot {
-	return e.runtime.Load()
+	var runtime *RuntimeConfigSnapshot
+	githubapi.ReadPublication(func() {
+		runtime = e.runtime.Load()
+	})
+	return runtime
 }
 
 // ErrRepositoryNotFound 表示配置中找不到匹配该身份键的仓库条目。
@@ -280,7 +284,7 @@ var expandRepos = repository.ExpandContext
 // 一条 execution 并返回单元素 jobID；type=user/org 先在任务内展开为具体仓库，
 // 每个具体仓库独立执行（各自 jobID / execution / 日志流 / 可取消）。
 func (e *Executor) ExecuteJob(repoKey string) ([]string, error) {
-	return e.executeJobFromSnapshot(context.Background(), e.runtime.Load(), repoKey, nil, nil)
+	return e.executeJobFromSnapshot(context.Background(), e.RuntimeConfigSnapshot(), repoKey, nil, nil)
 }
 
 func (e *Executor) ExecuteJobAtGeneration(repoKey string, generation uint64) ([]string, error) {
@@ -291,7 +295,7 @@ func (e *Executor) ExecuteJobAtGeneration(repoKey string, generation uint64) ([]
 // preflight and persistence. Once published, the job owns an independent
 // cancellation context and is not tied to the HTTP request lifetime.
 func (e *Executor) ExecuteJobAtGenerationContext(ctx context.Context, repoKey string, generation uint64) ([]string, error) {
-	runtime := e.runtime.Load()
+	runtime := e.RuntimeConfigSnapshot()
 	if runtime == nil || runtime.generation != generation {
 		return nil, ErrConfigGenerationChanged
 	}
@@ -302,7 +306,7 @@ func (e *Executor) ExecuteJobAtGenerationContext(ctx context.Context, repoKey st
 // reserves first, evaluates eligible while ownership is held, then persists
 // and publishes only when the callback still accepts the repository.
 func (e *Executor) ExecuteJobAtGenerationIfEligibleContext(ctx context.Context, repoKey string, generation uint64, eligible EligibilityCheck) ([]string, error) {
-	runtime := e.runtime.Load()
+	runtime := e.RuntimeConfigSnapshot()
 	if runtime == nil || runtime.generation != generation {
 		return nil, ErrConfigGenerationChanged
 	}
@@ -437,6 +441,18 @@ func (s *RuntimeConfigSnapshot) resolveStorages(names []string) []typedef.MultiS
 }
 
 func (e *Executor) reserveBatch(ctx context.Context, prepared []*preparedJob, expectedGeneration *uint64) error {
+	var result error
+	githubapi.ReadPublication(func() {
+		result = e.reserveBatchWithinPublication(ctx, prepared, expectedGeneration)
+	})
+	return result
+}
+
+// reserveBatchWithinPublication takes queueMu only after the publication read
+// gate. The unified writer uses the same order (publication write gate, then
+// queueMu), preventing the queue/publication inversion while keeping the gate
+// away from database and network work.
+func (e *Executor) reserveBatchWithinPublication(ctx context.Context, prepared []*preparedJob, expectedGeneration *uint64) error {
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
 	if err := ctx.Err(); err != nil {

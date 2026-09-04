@@ -2,18 +2,21 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
+	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/logger"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
@@ -136,4 +139,139 @@ func TestConfigMutationSerializesPublishPersistenceAndScheduleRefresh(t *testing
 	assertGenerationB("Executor", exec.RuntimeConfigSnapshot().Config())
 	assertGenerationB("global", config.GetIns())
 	assertGenerationB("scheduler", refresher.lastConfig())
+}
+
+func TestConfigPublicationAtomicallyExposesExecutorRuntimeAndTightenedArbiterPolicy(t *testing.T) {
+	previous := config.GetIns()
+	oldConfig := &config.Config{
+		GitHubToken:              "old-token",
+		GitHubAPIConcurrency:     2,
+		GitHubMinRequestInterval: 0,
+		ConcurrencyNum:           1,
+		Repository: []typedef.Repository{{
+			Name: "old", URL: "github.com/acme/repo",
+		}},
+	}
+	config.SetIns(oldConfig)
+	t.Cleanup(func() { config.SetIns(previous) })
+
+	testDB, err := db.Initialize(":memory:")
+	require.NoError(t, err)
+	exec := executor.NewExecutorWithRunners(logger.NewLogger(testDB), testDB, oldConfig, executor.Runners{})
+	t.Cleanup(func() {
+		require.NoError(t, exec.Close())
+		require.NoError(t, testDB.Close())
+	})
+	api := NewAPI(oldConfig, testDB, exec)
+
+	held, err := githubapi.Acquire(context.Background(), "core")
+	require.NoError(t, err)
+	var releaseHeld sync.Once
+	t.Cleanup(func() { releaseHeld.Do(func() { held.Done(githubapi.Observation{}) }) })
+	oldPermit, err := githubapi.Acquire(context.Background(), "core")
+	require.NoError(t, err, "old concurrency policy should admit a second request")
+	oldPermit.Done(githubapi.Observation{})
+	oldRuntime := exec.RuntimeConfigSnapshot()
+
+	newConfig := &config.Config{
+		GitHubToken:              "new-token",
+		GitHubAPIConcurrency:     1,
+		GitHubMinRequestInterval: 120 * time.Millisecond,
+		ConcurrencyNum:           2,
+		Repository: []typedef.Repository{{
+			Name: "new", URL: "github.com/acme/repo",
+		}},
+	}
+	publicationEntered := make(chan struct{})
+	publicationRelease := make(chan struct{})
+	api.afterRuntimePublishForTest = func() {
+		close(publicationEntered)
+		<-publicationRelease
+	}
+	publishDone := make(chan struct{})
+	go func() {
+		api.configMu.Lock()
+		api.publishConfigLocked(newConfig)
+		api.configMu.Unlock()
+		close(publishDone)
+	}()
+	<-publicationEntered
+
+	runtimeRead := make(chan *executor.RuntimeConfigSnapshot, 1)
+	go func() { runtimeRead <- exec.RuntimeConfigSnapshot() }()
+	globalRead := make(chan *config.Config, 1)
+	go func() { globalRead <- config.GetIns() }()
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer acquireCancel()
+	type acquireResult struct {
+		permit githubapi.Permit
+		err    error
+	}
+	acquireDone := make(chan acquireResult, 1)
+	go func() {
+		permit, acquireErr := githubapi.Acquire(acquireCtx, "core")
+		acquireDone <- acquireResult{permit: permit, err: acquireErr}
+	}()
+
+	select {
+	case runtime := <-runtimeRead:
+		t.Fatalf("runtime escaped the publication boundary with generation %d", runtime.Generation())
+	case <-time.After(30 * time.Millisecond):
+	}
+	select {
+	case cfg := <-globalRead:
+		t.Fatalf("package config escaped the publication boundary with token %q", cfg.GitHubToken)
+	case <-time.After(30 * time.Millisecond):
+	}
+	select {
+	case result := <-acquireDone:
+		if result.permit != nil {
+			result.permit.Done(githubapi.Observation{})
+		}
+		t.Fatalf("GitHub acquisition escaped the publication boundary: %v", result.err)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(publicationRelease)
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("unified publication did not finish")
+	}
+	var newRuntime *executor.RuntimeConfigSnapshot
+	select {
+	case newRuntime = <-runtimeRead:
+	case <-time.After(time.Second):
+		t.Fatal("runtime reader did not resume after publication")
+	}
+	require.Greater(t, newRuntime.Generation(), oldRuntime.Generation())
+	require.Equal(t, "new-token", newRuntime.Config().GitHubToken)
+	require.Equal(t, "new-token", (<-globalRead).GitHubToken)
+
+	select {
+	case result := <-acquireDone:
+		if result.permit != nil {
+			result.permit.Done(githubapi.Observation{})
+		}
+		t.Fatalf("tightened concurrency policy admitted while the old permit was active: %v", result.err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseHeld.Do(func() { held.Done(githubapi.Observation{}) })
+	var firstNew githubapi.Permit
+	select {
+	case result := <-acquireDone:
+		require.NoError(t, result.err)
+		firstNew = result.permit
+	case <-time.After(time.Second):
+		t.Fatal("tightened concurrency waiter did not resume after permit release")
+	}
+	firstNew.Done(githubapi.Observation{})
+
+	intervalCtx, intervalCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer intervalCancel()
+	permit, err := githubapi.Acquire(intervalCtx, "core")
+	if permit != nil {
+		permit.Done(githubapi.Observation{})
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "new minimum interval policy was not published with the runtime")
 }

@@ -90,6 +90,31 @@ func TestReload(t *testing.T) {
 	Path = ""
 }
 
+func TestReadReloadSnapshotDoesNotPublishUntilExplicitBoundary(t *testing.T) {
+	writeTmpConfig(t, "githubToken: old\nrepository:\n  - name: old\n    url: github.com/acme/old\n")
+	reloadFile, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	readBytes := []byte("githubToken: read\nrepository:\n  - name: read\n    url: github.com/acme/read\n")
+	_, err = reloadFile.Write(readBytes)
+	require.NoError(t, err)
+	require.NoError(t, reloadFile.Close())
+	Path = reloadFile.Name()
+	t.Cleanup(func() { Path = "" })
+
+	loaded, err := ReadReloadSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, "old", GetIns().GitHubToken, "validated disk read must remain unpublished")
+	require.Equal(t, "read", loaded.Config().GitHubToken)
+
+	afterRead := []byte("# external edit after read\ngithubToken: edited\n")
+	require.NoError(t, os.WriteFile(Path, afterRead, 0o644))
+	PublishReloadSnapshot(loaded, nil)
+	require.Equal(t, "read", GetIns().GitHubToken)
+	actual, err := os.ReadFile(Path)
+	require.NoError(t, err)
+	require.Equal(t, afterRead, actual, "publishing a read snapshot must never rewrite later disk edits")
+}
+
 func TestReloadRejectsIdentitylessRepo(t *testing.T) {
 	writeTmpConfig(t, "repository:\n  - name: one\n    url: github.com/one/repo\n")
 	tmp, err := os.CreateTemp(t.TempDir(), "config-*.yaml")

@@ -136,18 +136,33 @@ func Export() (string, error) {
 	return ExportFrom(GetIns())
 }
 
-// Reload re-reads the config file into the package global. Unlike Init it never
-// exits the process: on any error the previous in-memory config is kept and the
-// error returned (the running server must survive a bad config file).
-func Reload() error {
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	return reloadLocked()
+// ReloadSnapshot is a validated, unpublished config-file generation. Its
+// internals remain private so callers cannot mutate the config or viper state
+// between the read and the unified publication boundary.
+type ReloadSnapshot struct {
+	config *Config
+	viper  *viper.Viper
 }
 
-func reloadLocked() error {
+// Config returns a defensive copy of the unpublished disk generation.
+func (s *ReloadSnapshot) Config() *Config {
+	if s == nil {
+		return nil
+	}
+	return Clone(s.config)
+}
+
+// ReadReloadSnapshot reads, unmarshals, defaults, and validates config.yaml
+// without changing any package-global or runtime state.
+func ReadReloadSnapshot() (*ReloadSnapshot, error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return readReloadSnapshotLocked()
+}
+
+func readReloadSnapshotLocked() (*ReloadSnapshot, error) {
 	if vp == nil {
-		return fmt.Errorf("config not initialized")
+		return nil, fmt.Errorf("config not initialized")
 	}
 	// A fresh viper avoids inheriting override keys: Save()/SetServerField leave
 	// vp.Set() overrides that ReadInConfig never clears, so Unmarshal would merge
@@ -155,22 +170,44 @@ func reloadLocked() error {
 	nv := viper.New()
 	nv.SetConfigFile(Path)
 	if err := readConfigFile(nv); err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 	var next Config
 	if err := nv.Unmarshal(&next); err != nil {
-		return fmt.Errorf("failed to unmarshal config file: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
 	}
 	seedDefaults(&next)
 	if !nv.IsSet("githubScheduleJitter") {
 		next.GitHubScheduleJitter = 30 * time.Second
 	}
 	if err := validateIdentity(&next); err != nil {
+		return nil, err
+	}
+	return &ReloadSnapshot{config: Clone(&next), viper: nv}, nil
+}
+
+// PublishReloadSnapshot installs a previously validated disk generation
+// without re-reading or writing config.yaml. Package config, GitHub policy, and
+// install's immutable runtime state share the normal publication boundary.
+func PublishReloadSnapshot(snapshot *ReloadSnapshot, install func(*Config)) *Config {
+	if snapshot == nil {
+		return nil
+	}
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return publishSnapshotLocked(snapshot.config, snapshot.viper, install)
+}
+
+// Reload preserves the package-level behavior for non-server callers while
+// holding stateMu across the complete disk-read-to-publication operation.
+func Reload() error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	snapshot, err := readReloadSnapshotLocked()
+	if err != nil {
 		return err
 	}
-	snapshot := Clone(&next)
-	vp = nv
-	setInsLocked(snapshot)
+	publishSnapshotLocked(snapshot.config, snapshot.viper, nil)
 	return nil
 }
 

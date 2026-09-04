@@ -173,16 +173,34 @@ func GetIns() *Config {
 // publish a fully-built replacement so concurrent readers (job goroutines)
 // observe a complete old or complete new instance, never a torn one.
 func SetIns(cfg *Config) {
-	snapshot := Clone(cfg)
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	setInsLocked(snapshot)
+	PublishSnapshot(cfg, nil)
 }
 
 func setInsLocked(snapshot *Config) {
-	publishGitHubAPI(gitHubAPIConfig(snapshot), func() {
-		ins.Store(snapshot)
+	publishSnapshotLocked(snapshot, nil, nil)
+}
+
+// PublishSnapshot installs package config, the stable GitHub arbiter policy,
+// and any caller-owned immutable runtime state through one reader-observed
+// boundary. install must not perform network or persistence work.
+func PublishSnapshot(cfg *Config, install func(*Config)) *Config {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return publishSnapshotLocked(cfg, nil, install)
+}
+
+func publishSnapshotLocked(cfg *Config, nextViper *viper.Viper, install func(*Config)) *Config {
+	published := Clone(cfg)
+	publishGitHubAPI(gitHubAPIConfig(published), func() {
+		if nextViper != nil {
+			vp = nextViper
+		}
+		ins.Store(published)
+		if install != nil {
+			install(Clone(published))
+		}
 	})
+	return Clone(published)
 }
 
 func currentConfig() *Config {

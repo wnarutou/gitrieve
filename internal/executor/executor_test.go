@@ -1716,6 +1716,77 @@ func TestRefreshConfigDownsizeWaitsUntilRunningFallsBelowNewLimit(t *testing.T) 
 	}
 }
 
+func TestUnifiedPublicationDoesNotDeadlockQueueResizeAdmissionReservationAndAcquire(t *testing.T) {
+	previous := config.GetIns()
+	oldConfig := &config.Config{
+		GitHubAPIConcurrency: 2,
+		ConcurrencyNum:       1,
+		Repository: []typedef.Repository{{
+			Name: "old", URL: "github.com/acme/repo",
+		}},
+	}
+	config.SetIns(oldConfig)
+	t.Cleanup(func() { config.SetIns(previous) })
+	exec, _ := newTestExecutorForConfig(t, oldConfig, Runners{})
+	newConfig := config.Clone(oldConfig)
+	newConfig.GitHubAPIConcurrency = 1
+	newConfig.ConcurrencyNum = 2
+	newConfig.Repository[0].Name = "new"
+
+	publicationEntered := make(chan struct{})
+	exec.queueMu.Lock()
+	publishDone := make(chan struct{})
+	go func() {
+		config.PublishSnapshot(newConfig, func(published *config.Config) {
+			close(publicationEntered)
+			exec.RefreshConfig(published)
+		})
+		close(publishDone)
+	}()
+	<-publicationEntered
+
+	runtimeDone := make(chan *RuntimeConfigSnapshot, 1)
+	go func() { runtimeDone <- exec.RuntimeConfigSnapshot() }()
+	executeDone := make(chan error, 1)
+	go func() {
+		_, executeErr := exec.ExecuteJob("github.com/acme/repo")
+		executeDone <- executeErr
+	}()
+	acquireDone := make(chan error, 1)
+	go func() {
+		permit, acquireErr := githubapi.Acquire(context.Background(), "core")
+		if permit != nil {
+			permit.Done(githubapi.Observation{})
+		}
+		acquireDone <- acquireErr
+	}()
+
+	exec.queueMu.Unlock()
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("publication deadlocked waiting for queue resize")
+	}
+	select {
+	case runtime := <-runtimeDone:
+		require.Equal(t, "new", runtime.Repositories()[0].Name)
+	case <-time.After(time.Second):
+		t.Fatal("runtime read deadlocked with publication and queue resize")
+	}
+	select {
+	case err := <-executeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("reservation deadlocked with publication and queue resize")
+	}
+	select {
+	case err := <-acquireDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("GitHub Acquire deadlocked with publication")
+	}
+}
+
 func TestConcurrentCloseCallersWaitForSameCompletion(t *testing.T) {
 	runnerEntered := make(chan struct{})
 	runnerCancelled := make(chan struct{})

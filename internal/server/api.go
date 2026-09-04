@@ -25,10 +25,14 @@ type API struct {
 	config              *config.Config
 	db                  *db.DB
 	executor            *executor.Executor
-	reloadConfig        func() error
+	readReloadSnapshot  func() (*config.ReloadSnapshot, error)
 	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
 	bulkExecute         func(context.Context, string, uint64, executor.EligibilityCheck) ([]string, error)
 	scheduleRefresher   ScheduleRefresher
+
+	// Test-only synchronization seam used to pause inside the unified
+	// publication callback after the Executor runtime store.
+	afterRuntimePublishForTest func()
 }
 
 // ScheduleRefresher updates the live server scheduler after repository or
@@ -42,7 +46,7 @@ func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
 	if exec != nil {
 		initial = exec.RuntimeConfigSnapshot().Config()
 	}
-	api := &API{config: initial, db: db, executor: exec, reloadConfig: config.Reload}
+	api := &API{config: initial, db: db, executor: exec, readReloadSnapshot: config.ReadReloadSnapshot}
 	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
 	if exec != nil {
 		api.bulkExecute = exec.ExecuteJobAtGenerationIfEligibleContext
@@ -60,13 +64,21 @@ func (a *API) configSnapshot() *config.Config {
 }
 
 func (a *API) publishConfigLocked(next *config.Config) *config.Config {
-	published := config.Clone(next)
+	return config.PublishSnapshot(next, a.installPublishedConfig)
+}
+
+func (a *API) publishReloadConfigLocked(snapshot *config.ReloadSnapshot) *config.Config {
+	return config.PublishReloadSnapshot(snapshot, a.installPublishedConfig)
+}
+
+func (a *API) installPublishedConfig(published *config.Config) {
 	if a.executor != nil {
 		a.executor.RefreshConfig(published)
 	}
-	a.config = published
-	config.SetIns(published)
-	return config.Clone(published)
+	a.config = config.Clone(published)
+	if a.afterRuntimePublishForTest != nil {
+		a.afterRuntimePublishForTest()
+	}
 }
 
 func (a *API) SetScheduleRefresher(refresher ScheduleRefresher) {

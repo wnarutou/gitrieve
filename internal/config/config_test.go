@@ -244,6 +244,10 @@ func TestConcurrentConfigPublicationAndSnapshotReads(t *testing.T) {
 		{Repository: []typedef.Repository{{Name: "one", URL: "github.com/acme/one"}}, SyncOverdueGrace: time.Minute},
 		{Repository: []typedef.Repository{{Name: "two", URL: "github.com/acme/two"}}, SyncOverdueGrace: 2 * time.Minute},
 	}
+	// Seed an allowed generation before either goroutine starts. Under -count,
+	// a prior reload test may leave a coherent but unrelated package snapshot;
+	// observing that snapshot is not evidence of a torn publication.
+	SetIns(configs[0])
 	start := make(chan struct{})
 	var workers sync.WaitGroup
 	var incoherent atomic.Bool

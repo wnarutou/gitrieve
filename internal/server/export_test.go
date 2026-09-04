@@ -44,10 +44,10 @@ func (s *TestServer) SetBulkRepositoryStats(load func(context.Context, typedef.R
 	s.api.bulkRepositoryStats = load
 }
 
-// SetReloadConfig replaces the disk-read operation so tests can make a
-// deterministic edit after the read but before API publication completes.
-func (s *TestServer) SetReloadConfig(reload func() error) {
-	s.api.reloadConfig = reload
+// SetReadReloadSnapshot replaces the unpublished disk-read operation so tests
+// can make a deterministic edit after the read but before API publication.
+func (s *TestServer) SetReadReloadSnapshot(read func() (*config.ReloadSnapshot, error)) {
+	s.api.readReloadSnapshot = read
 }
 
 // SetBulkExecute replaces bulk's final Executor call for deterministic error
