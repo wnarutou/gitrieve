@@ -288,7 +288,7 @@ func TestRepositoryRunStatsParsesSQLiteAggregateTimeWithMonotonicSuffix(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, stats["github.com/acme/monotonic"].LastSuccess)
 	got := *stats["github.com/acme/monotonic"].LastSuccess
-	require.Equal(t, end.Round(0), got.Round(0))
+	require.Equal(t, end.Round(0).UTC(), got.Round(0).UTC())
 }
 
 func TestNullableAggregateTimeAcceptsOnlyCompleteMonotonicSuffixes(t *testing.T) {
