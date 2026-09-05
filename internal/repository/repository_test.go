@@ -2,11 +2,13 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/lock"
@@ -66,4 +68,12 @@ func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
 	defer cancel()
 	err = Sync(ctx, repo, true, nil)
 	require.Equal(t, context.DeadlineExceeded, err, "wiki Sync must block on the held wiki lock")
+}
+
+func TestWikiCloneRepositoryNotFoundIsReportedByWikiLayer(t *testing.T) {
+	err := fmt.Errorf("%w: Repository not found", transport.ErrAuthenticationRequired)
+
+	require.False(t, shouldLogCloneError(true, err))
+	require.True(t, shouldLogCloneError(false, err))
+	require.True(t, shouldLogCloneError(true, context.DeadlineExceeded))
 }
