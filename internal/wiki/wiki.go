@@ -2,8 +2,10 @@ package wiki
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	gh "github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/githubapi"
@@ -15,11 +17,17 @@ import (
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
+var syncRepository = repository.Sync
+
 func wikiAvailability(repoURL string, hasWiki bool) error {
 	if hasWiki {
 		return nil
 	}
 	return syncresult.Skip(fmt.Sprintf("repository %s has no wiki", repoURL))
+}
+
+func uninitializedPublicWiki(hasWiki, private bool, err error) bool {
+	return hasWiki && !private && errors.Is(err, transport.ErrAuthenticationRequired)
 }
 
 func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
@@ -62,7 +70,11 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	}
 
 	ui.Printf("Running %s's wiki", repo.Name)
-	if err := repository.Sync(ctx, repo, true, storages); err != nil {
+	if err := syncRepository(ctx, repo, true, storages); err != nil {
+		if uninitializedPublicWiki(gitrepo.GetHasWiki(), gitrepo.GetPrivate(), err) {
+			ui.Printf("Wiki for %s is enabled but has no pages", repo.URL)
+			return nil
+		}
 		if ctx.Err() == nil {
 			ui.Errorf("Error running %s's wiki, %s", repo.Name, err)
 		}

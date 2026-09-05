@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
 	internalconfig "github.com/wnarutou/gitrieve/internal/config"
@@ -33,6 +35,10 @@ type contextualRepoLister interface {
 // newGithubClient 是可替换的包级 seam：生产用真客户端，测试注入 fake。
 var newGithubClient = func() (repoLister, error) { return github.New() }
 var newGithubClientWithContext = func(ctx context.Context) (contextualRepoLister, error) { return github.NewWithContext(ctx) }
+
+func shouldLogCloneError(isWiki bool, err error) bool {
+	return !isWiki || !errors.Is(err, transport.ErrAuthenticationRequired)
+}
 
 func GetRepositories(name string) []typedef.Repository {
 	repositories := make([]typedef.Repository, 0)
@@ -199,7 +205,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			// deletion-safe guarantee only covers existing local history, which
 			// is handled by the fetch/pull path below.
 			os.RemoveAll(gitDir)
-			ui.Errorf("Error cloning repository, %s", err)
+			if shouldLogCloneError(iswiki, err) {
+				ui.Errorf("Error cloning repository, %s", err)
+			}
 			return err
 		}
 	}

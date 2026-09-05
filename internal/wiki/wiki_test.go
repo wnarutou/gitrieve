@@ -2,6 +2,8 @@ package wiki
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/stretchr/testify/require"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/githubapi"
@@ -72,6 +75,52 @@ func TestSyncSkipsUnavailableWikiWithoutPresentationOrRepositorySync(t *testing.
 	require.True(t, ok)
 	require.Equal(t, "repository github.com/test/repo has no wiki", reason)
 	require.Empty(t, sink.logs)
+}
+
+func TestSyncCompletesWhenPublicWikiIsEnabledButHasNoPages(t *testing.T) {
+	previousConfig := config.GetIns()
+	config.SetIns(&config.Config{})
+	if previousConfig != nil {
+		t.Cleanup(func() { config.SetIns(previousConfig) })
+	}
+
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = wikiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/repos/test/repo", req.URL.Path)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"has_wiki":true,"private":false}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	previousSyncRepository := syncRepository
+	syncRepository = func(context.Context, typedef.Repository, bool, []typedef.MultiStorage) error {
+		return fmt.Errorf("clone wiki: %w: Repository not found", transport.ErrAuthenticationRequired)
+	}
+	t.Cleanup(func() { syncRepository = previousSyncRepository })
+
+	sink := &wikiLogSink{}
+	ui.SetSink(sink)
+	t.Cleanup(func() { ui.SetSink(nil) })
+	unbind := ui.Bind("execution-1", "wiki")
+	defer unbind()
+
+	err := Sync(context.Background(), typedef.Repository{Name: "repo", URL: "github.com/test/repo"}, nil)
+
+	require.NoError(t, err)
+	require.Contains(t, sink.logs, "info:Wiki for github.com/test/repo is enabled but has no pages")
+}
+
+func TestUninitializedWikiDoesNotHidePrivateRepositoryAuthenticationFailure(t *testing.T) {
+	err := fmt.Errorf("clone wiki: %w: Repository not found", transport.ErrAuthenticationRequired)
+
+	require.False(t, uninitializedPublicWiki(true, true, err))
+	require.True(t, uninitializedPublicWiki(true, false, err))
+	require.False(t, uninitializedPublicWiki(false, false, err))
+	require.False(t, uninitializedPublicWiki(true, false, errors.New("network down")))
 }
 
 func TestSyncCancelledContextReturnsImmediately(t *testing.T) {
