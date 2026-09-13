@@ -235,7 +235,7 @@ function jobsTable(jobs, page, limit, total) {
                 <tbody>${rows}</tbody>
             </table>
         </div>
-        ${paginationHTML(page, pages, total, 'jobs')}`;
+        ${paginationHTML(page, pages, total, 'jobs', true)}`;
 }
 
 async function renderJobs() {
@@ -253,6 +253,13 @@ async function renderJobs() {
     } catch (e) {
         $('#app').innerHTML = '<div class="empty error-text">Failed to load jobs: ' + esc(e.message) + '</div>';
         return;
+    }
+
+    const pages = Math.max(1, Math.ceil(total / 20));
+    const validPage = normalizePage(state.jobsPage, pages);
+    if (state.jobsPage !== validPage) {
+        state.jobsPage = validPage;
+        return renderJobs();
     }
 
     $('#app').innerHTML = jobsToolbar(total) + jobsTable(jobs, state.jobsPage, 20, total);
@@ -283,7 +290,14 @@ async function renderJobs() {
     const prev = $('#pg-prev-jobs');
     const next = $('#pg-next-jobs');
     if (prev) prev.addEventListener('click', () => { if (state.jobsPage > 1) { state.jobsPage--; renderJobs(); } });
-    if (next) next.addEventListener('click', () => { state.jobsPage++; renderJobs(); });
+    if (next) next.addEventListener('click', () => { if (state.jobsPage < pages) { state.jobsPage++; renderJobs(); } });
+    $$('.pg-page').forEach(button => button.addEventListener('click', () => {
+        const page = Number(button.dataset.page);
+        if (Number.isInteger(page) && page >= 1 && page <= pages && page !== state.jobsPage) {
+            state.jobsPage = page;
+            renderJobs();
+        }
+    }));
 
     $$('.btn-log').forEach(b => b.addEventListener('click', () => openLogModal(b.dataset.jobid, b.dataset.jobname)));
     $$('.btn-cancel').forEach(b => b.addEventListener('click', () => cancelJob(b.dataset.jobid)));
