@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +13,20 @@ import (
 	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
+
+func captureSyncLogs(t *testing.T) *recSink {
+	t.Helper()
+	sink := &recSink{}
+	ui.SetSink(sink)
+	unbind := ui.Bind("exec-sync", "test-repo")
+	t.Cleanup(func() {
+		unbind()
+		ui.SetSink(nil)
+	})
+	return sink
+}
 
 func TestSyncCancelledContextFailsPromptlyAndCleansUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -37,6 +51,7 @@ func TestSyncCancelledContextFailsPromptlyAndCleansUp(t *testing.T) {
 }
 
 func TestSyncBlocksWhileCodeLockHeld(t *testing.T) {
+	sink := captureSyncLogs(t)
 	repo := typedef.Repository{Name: "test-repo", URL: "github.com/test/repo", UseCache: true}
 	r, err := scm.NewRepository(repo.URL)
 	require.NoError(t, err)
@@ -51,6 +66,71 @@ func TestSyncBlocksWhileCodeLockHeld(t *testing.T) {
 	defer cancel()
 	err = Sync(ctx, repo, false, nil)
 	require.Equal(t, context.DeadlineExceeded, err, "Sync must block on the held code lock")
+	require.Contains(t, sink.snapshot(), "Sync phase: waiting for code lock")
+	for _, message := range sink.snapshot() {
+		require.NotContains(t, message, "code lock acquired", "the acquired message must only follow successful acquisition")
+	}
+}
+
+func TestSyncLogsLockDeadlineAndClonePhase(t *testing.T) {
+	sink := captureSyncLogs(t)
+	t.Cleanup(func() { os.RemoveAll(".gitrieve") })
+
+	// Loopback port 443 has no test server, so clone fails locally without
+	// depending on DNS or an external Git host.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	expectedDeadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	err := Sync(ctx, typedef.Repository{
+		Name:     "test-repo",
+		URL:      "127.0.0.1/test/repo",
+		UseCache: true,
+	}, false, nil)
+	require.Error(t, err)
+
+	messages := sink.snapshot()
+	require.Contains(t, messages, "Sync phase: waiting for code lock")
+	require.Contains(t, messages, "Sync phase: code lock acquired")
+	require.Contains(t, messages, "Sync phase: Git clone started")
+	deadlineLog, found := findLogWithPrefix(messages, "Sync deadline: ")
+	require.True(t, found, "the effective deadline must be visible in logs")
+	loggedDeadline, err := time.Parse(time.RFC3339, strings.TrimPrefix(deadlineLog, "Sync deadline: "))
+	require.NoError(t, err, "the logged deadline must be RFC3339")
+	require.Equal(t, expectedDeadline.UTC().Truncate(time.Second), loggedDeadline,
+		"the log must show the effective caller deadline when it is shorter than 30 minutes")
+}
+
+func TestSyncStageLogsDoNotExposeInlineCredentials(t *testing.T) {
+	sink := captureSyncLogs(t)
+	t.Cleanup(func() { os.RemoveAll(".gitrieve") })
+
+	const secret = "sentinel-inline-token"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = Sync(ctx, typedef.Repository{
+		Name:     "test-repo",
+		URL:      "user:" + secret + "@127.0.0.1/test/repo",
+		UseCache: true,
+	}, false, nil)
+
+	stageLogs := 0
+	for _, message := range sink.snapshot() {
+		if strings.HasPrefix(message, "Sync phase: ") || strings.HasPrefix(message, "Sync deadline: ") {
+			stageLogs++
+			require.NotContains(t, message, secret, "diagnostic stage logs must not persist inline credentials")
+		}
+	}
+	require.NotZero(t, stageLogs, "the credential check must exercise diagnostic stage logging")
+}
+
+func findLogWithPrefix(messages []string, prefix string) (string, bool) {
+	for _, message := range messages {
+		if strings.HasPrefix(message, prefix) {
+			return message, true
+		}
+	}
+	return "", false
 }
 
 func TestSyncBlocksWhileWikiLockHeld(t *testing.T) {
