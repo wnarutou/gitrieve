@@ -153,11 +153,13 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	if iswiki {
 		component = "wiki"
 	}
+	ui.Printf("Sync phase: waiting for %s lock", component)
 	unlock, err := lock.Acquire(ctx, r, component, currentDir)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	ui.Printf("Sync phase: %s lock acquired", component)
 	var gitDir string
 	var gitSuffix string
 	var gitUrl string
@@ -182,6 +184,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	// on legitimate large clones).
 	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+	if deadline, ok := syncCtx.Deadline(); ok {
+		ui.Printf("Sync deadline: %s", deadline.UTC().Format(time.RFC3339))
+	}
 
 	// Route git's own progress (server-side "Enumerating/Counting/Compressing
 	// objects" lines) into the log sink so a long clone/fetch streams live
@@ -193,6 +198,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
 		isUpdated = true
+		ui.Printf("Sync phase: Git clone started")
 		_, err = git.PlainCloneContext(syncCtx, gitDir, false, &git.CloneOptions{
 			URL:      "https://" + gitUrl,
 			Progress: progress,
@@ -220,6 +226,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// fetch all remote branches
+	ui.Printf("Sync phase: Git fetch started")
 	err = gitRepo.FetchContext(syncCtx, &git.FetchOptions{
 		RemoteName: "origin",
 		RefSpecs: []config.RefSpec{
@@ -256,6 +263,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		ui.Errorf("Error get remote, %s", err)
 		return err
 	}
+	ui.Printf("Sync phase: remote reference discovery started")
 	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
 	if err != nil {
 		// The default branch cannot be determined without this listing, and a
@@ -341,6 +349,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			}
 
 			// pull from upstream branch
+			ui.Printf("Sync phase: Git pull started (branch=%s)", localBranchName)
 			err = w.PullContext(syncCtx, &git.PullOptions{
 				RemoteName:    "origin",
 				ReferenceName: branchRef,
@@ -397,6 +406,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		// Archive the working tree directly from gitDir. Create takes an
 		// absolute path and never changes the process cwd, so it is safe to
 		// run from concurrent job goroutines.
+		ui.Printf("Sync phase: archive creation started")
 		buf, err := archive.Create(syncCtx, gitDir, targetDir)
 		if err != nil {
 			ui.Errorf("Error creating archive, %s", err)
@@ -415,6 +425,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Errorf("Error getting backend, %s", err)
 				return err
 			}
+			ui.Printf("Sync phase: storage upload started (storage=%s type=%s)", s.Name, s.Type)
 			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
