@@ -347,20 +347,46 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
 				return err
 			}
+			if err = restoreManagedWorktree(gitRepo, w); err != nil {
+				ui.Errorf("Error restoring managed worktree for local branch %s, %s", localBranchName, err)
+				return err
+			}
 
 			// pull from upstream branch
 			ui.Printf("Sync phase: Git pull started (branch=%s)", localBranchName)
-			err = w.PullContext(syncCtx, &git.PullOptions{
-				RemoteName:    "origin",
-				ReferenceName: branchRef,
-				// pull all commits, not only the latest
-				Depth:    depth,
-				Progress: progress,
+			beforePull, err := gitRepo.Reference(branchRef, true)
+			if err != nil {
+				ui.Errorf("Error reading local branch %s before pull, %s", localBranchName, err)
+				return err
+			}
+			pull := func() error {
+				return w.PullContext(syncCtx, &git.PullOptions{
+					RemoteName:    "origin",
+					ReferenceName: branchRef,
+					// pull all commits, not only the latest
+					Depth:    depth,
+					Progress: progress,
+				})
+			}
+			err = pullWithManagedWorktreeRecovery(pull, func() error {
+				ui.Printf("local branch %s worktree changed during pull; restoring and retrying once.\n", localBranchName)
+				return restoreManagedWorktree(gitRepo, w)
 			})
+			afterPull, refErr := gitRepo.Reference(branchRef, true)
+			if refErr != nil {
+				ui.Errorf("Error reading local branch %s after pull, %s", localBranchName, refErr)
+				return refErr
+			}
+			if beforePull.Hash() != afterPull.Hash() {
+				isUpdated = true
+			}
 			if err == git.NoErrAlreadyUpToDate {
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
+				if errors.Is(err, git.ErrUnstagedChanges) {
+					return err
+				}
 				if syncCtx.Err() != nil {
 					// Cancelled — stop the whole sync instead of continuing to
 					// the remaining branches. The fetched objects stay in the
@@ -387,6 +413,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	})
 	if err != nil {
 		ui.Errorf("Error checkout default branch %s, %s", remoteDefaultBranchRef, err)
+		return err
+	}
+	if err = restoreManagedWorktree(gitRepo, w); err != nil {
+		ui.Errorf("Error restoring managed worktree for default branch %s, %s", remoteDefaultBranchRef, err)
 		return err
 	}
 
