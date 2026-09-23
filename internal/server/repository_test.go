@@ -282,6 +282,22 @@ func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.
 		require.Equal(t, data.Summary.Healthy, healthy.Total, "Healthy card count must match the same search/filter endpoint")
 	})
 
+	t.Run("running includes stuck executions in totals and pagination", func(t *testing.T) {
+		status, data := get("?search=match&health=running&sort=name&direction=asc")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, []string{"match-running", "match-stuck"}, names(data.Repositories))
+		require.Equal(t, 2, data.Total)
+		require.Equal(t, data.Summary.Running, data.Total)
+
+		status, page := get("?search=match&health=running&sort=name&direction=asc&page=2&limit=1")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, 2, page.Total)
+		require.Equal(t, []string{"match-stuck"}, names(page.Repositories))
+		require.Equal(t, "running", page.Repositories[0].LastStatus)
+		require.Equal(t, "stuck", page.Repositories[0].HealthStatus)
+		require.True(t, page.Repositories[0].Stuck)
+	})
+
 	t.Run("sorts each supported key and direction", func(t *testing.T) {
 		for _, tc := range []struct {
 			query string

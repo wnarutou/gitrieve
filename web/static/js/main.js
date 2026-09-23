@@ -579,7 +579,11 @@ async function deleteRepo(key) {
 function repositoryHealthBadge(repo) {
     const value = String(repo.health_status || 'never_synced');
     const cls = repositoryHealthValues.includes(value) ? value : 'never_synced';
-    return '<span class="badge health-' + cls + '">' + esc(value) + '</span>';
+    const healthBadge = '<span class="badge health-' + cls + '">' + esc(value) + '</span>';
+    if (value === 'stuck' && ['running', 'pending'].includes(repo.last_status)) {
+        return '<span class="badge health-' + repo.last_status + '">' + esc(repo.last_status) + '</span> ' + healthBadge;
+    }
+    return healthBadge;
 }
 
 function repositorySummaryCards(summary) {

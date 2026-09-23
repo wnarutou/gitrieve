@@ -213,12 +213,20 @@ func filterRepositorySnapshot(in []RepositoryOverview, filter RepositoryHealthFi
 	out := make([]RepositoryOverview, 0, len(in))
 	for _, overview := range in {
 		if filter.Health != "" {
-			if filter.Health == "syncing" {
+			switch filter.Health {
+			case "pending", "running":
+				// Stuck is a health warning; it does not replace the execution state.
+				if overview.LastStatus != filter.Health {
+					continue
+				}
+			case "syncing":
 				if overview.LastStatus != string(StatusPending) && overview.LastStatus != string(StatusRunning) {
 					continue
 				}
-			} else if overview.HealthStatus != filter.Health {
-				continue
+			default:
+				if overview.HealthStatus != filter.Health {
+					continue
+				}
 			}
 		}
 		if filter.Overdue != nil && overview.Overdue != *filter.Overdue {
