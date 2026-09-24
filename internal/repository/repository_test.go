@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,6 +32,59 @@ func captureSyncLogs(t *testing.T) *recSink {
 		ui.SetSink(nil)
 	})
 	return sink
+}
+
+func TestSyncReusesCachedRepository(t *testing.T) {
+	for _, component := range []string{"code", "wiki"} {
+		t.Run(component, func(t *testing.T) {
+			// Keep both the cache and remote local so this exercises real git
+			// operations without relying on GitHub or modifying a user's cache.
+			root := t.TempDir()
+			previousDir, err := os.Getwd()
+			require.NoError(t, err)
+			require.NoError(t, os.Chdir(root))
+			t.Cleanup(func() { require.NoError(t, os.Chdir(previousDir)) })
+
+			remoteDir := filepath.Join(root, "remote")
+			remote, err := git.PlainInit(remoteDir, false)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(remoteDir, "Home.md"), []byte("wiki contents\n"), 0600))
+			worktree, err := remote.Worktree()
+			require.NoError(t, err)
+			_, err = worktree.Add("Home.md")
+			require.NoError(t, err)
+			commit, err := worktree.Commit("initial contents", &git.CommitOptions{
+				Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+			})
+			require.NoError(t, err)
+
+			gitDir := filepath.Join(root, ".gitrieve", "github.com", "test", "repo", component)
+			cached, err := git.PlainClone(gitDir, false, &git.CloneOptions{URL: remoteDir})
+			require.NoError(t, err)
+			repo := typedef.Repository{URL: "github.com/test/repo", UseCache: true, AllBranches: true}
+			for attempt := 0; attempt < 2; attempt++ {
+				require.NoError(t, Sync(context.Background(), repo, component == "wiki", nil))
+				head, err := cached.Head()
+				require.NoError(t, err)
+				require.Equal(t, commit, head.Hash())
+				contents, err := os.ReadFile(filepath.Join(gitDir, "Home.md"))
+				require.NoError(t, err)
+				require.Equal(t, "wiki contents\n", string(contents))
+			}
+
+			// An unavailable remote must not destroy previously cached history.
+			require.NoError(t, cached.DeleteRemote("origin"))
+			_, err = cached.CreateRemote(&gitconfig.RemoteConfig{
+				Name: "origin", URLs: []string{filepath.Join(root, "missing-remote")},
+			})
+			require.NoError(t, err)
+			require.Error(t, Sync(context.Background(), repo, component == "wiki", nil))
+			preserved, err := git.PlainOpen(gitDir)
+			require.NoError(t, err)
+			_, err = preserved.CommitObject(commit)
+			require.NoError(t, err, "cached history must survive a failed sync")
+		})
+	}
 }
 
 func TestSyncCancelledContextFailsPromptlyAndCleansUp(t *testing.T) {
