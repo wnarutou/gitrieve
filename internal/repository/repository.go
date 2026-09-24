@@ -161,20 +161,18 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	defer unlock()
 	ui.Printf("Sync phase: %s lock acquired", component)
 	var gitDir string
-	var gitSuffix string
 	var gitUrl string
 	if iswiki {
 		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "wiki")
-		gitSuffix = ".wiki.git"
 		gitUrl = repo.URL + ".wiki"
 	} else {
 		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "code")
-		gitSuffix = ".git"
 		gitUrl = repo.URL
 	}
 	var exist bool
-	// check if the repo already exists
-	if _, err := os.Stat(path.Join(gitDir, gitSuffix)); err == nil {
+	// Both code and wiki clones store their local metadata in .git;
+	// the .wiki suffix only belongs to the remote URL.
+	if _, err := os.Stat(path.Join(gitDir, ".git")); err == nil {
 		exist = true
 	}
 	var gitRepo *git.Repository
