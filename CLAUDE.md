@@ -137,4 +137,4 @@ syncStuckThreshold: <duration, default 24h>
 
 ## Testing
 
-Go tests live alongside the code they test as `_test.go` files (e.g. `internal/retry/retry_test.go`, `internal/lock/lock_test.go`), following Go conventions. Run the full Go and web suite with `make test`; the underlying commands are `go test ./...` and `node --test web/main.test.cjs`.
+Go tests live alongside the code they test as `_test.go` files (e.g. `internal/retry/retry_test.go`, `internal/lock/lock_test.go`), following Go conventions. Run the full Go and web suite with `make test`; the underlying commands are `go test ./...` and `node --test web/main.test.cjs web/tests/*.test.js`.
