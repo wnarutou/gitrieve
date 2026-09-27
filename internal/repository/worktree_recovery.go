@@ -29,7 +29,7 @@ func restoreManagedWorktree(repo *git.Repository, worktree *git.Worktree) error 
 // existing behavior, and a persistent dirty state gets at most one retry.
 func pullWithManagedWorktreeRecovery(pull func() error, recoverWorktree func() error) error {
 	err := pull()
-	if !errors.Is(err, git.ErrUnstagedChanges) {
+	if !errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
 		return err
 	}
 	if recoveryErr := recoverWorktree(); recoveryErr != nil {
@@ -43,10 +43,17 @@ func restoreManagedWorktreeWithChmod(repo *git.Repository, worktree *git.Worktre
 	if err != nil {
 		return fmt.Errorf("resolve local HEAD before worktree recovery: %w", err)
 	}
+	if _, err := unmappedManagedGitlinks(repo, worktree); err != nil {
+		return err
+	}
 	if err := worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: headBefore.Hash()}); err != nil {
 		return fmt.Errorf("reset managed worktree to local %s: %w", headBefore.Name().Short(), err)
 	}
-	if err := worktree.Clean(&git.CleanOptions{Dir: true}); err != nil {
+	gitlinks, err := managedGitlinks(repo)
+	if err != nil {
+		return err
+	}
+	if err := cleanManagedWorktree(worktree, gitlinks); err != nil {
 		return fmt.Errorf("clean untracked files from managed worktree: %w", err)
 	}
 	if err := repairWorktreeModes(repo, worktree, chmod); err != nil {
@@ -74,7 +81,20 @@ func restoreManagedWorktreeWithChmod(repo *git.Repository, worktree *git.Worktre
 		if fileStatus.Staging == git.Unmodified && fileStatus.Worktree == git.Unmodified {
 			continue
 		}
+		// Without a .gitmodules mapping, go-git sees an empty gitlink
+		// directory as deleted. The parent repository owns only its index
+		// entry, not the submodule's files. Never exempt ordinary files or
+		// populated submodules from verification.
+		if gitlinks[name] && fileStatus.Staging == git.Unmodified && fileStatus.Worktree == git.Deleted {
+			children, readErr := worktree.Filesystem.ReadDir(name)
+			if readErr == nil && len(children) == 0 {
+				continue
+			}
+		}
 		paths = append(paths, fmt.Sprintf("%s[%c%c]", name, fileStatus.Staging, fileStatus.Worktree))
+	}
+	if len(paths) == 0 {
+		return nil
 	}
 	sort.Strings(paths)
 	return fmt.Errorf("managed worktree remains dirty after recovery: %s", strings.Join(paths, ", "))
