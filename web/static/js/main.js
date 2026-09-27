@@ -119,7 +119,7 @@ function renderApp() {
 window.addEventListener('hashchange', renderApp);
 
 const repositoryHealthValues = ['healthy', 'failed', 'overdue', 'stuck', 'never_synced', 'cancelled', 'pending', 'running', 'syncing'];
-const repositorySortValues = ['attention', 'name', 'last_attempt', 'last_success'];
+const repositorySortValues = ['attention', 'name', 'last_attempt', 'last_success', 'next_run'];
 
 function isActiveRepositoryRoute(routeEpoch) {
     if (routeEpoch !== state.routeEpoch) return false;
@@ -717,7 +717,7 @@ async function renderRepositories(expectedRouteEpoch) {
                 <option value="running">Running</option><option value="syncing">Syncing</option></select></label>
                 <label class="checkbox"><input type="checkbox" id="repos-overdue"> Overdue only</label></div>
             <div class="toolbar-group"><label>Sort <select id="repos-sort"><option value="attention">Attention</option>
-                <option value="name">Name</option><option value="last_attempt">Last attempt</option><option value="last_success">Last success</option></select></label>
+                <option value="name">Name</option><option value="last_attempt">Last attempt</option><option value="last_success">Last success</option><option value="next_run">Next run</option></select></label>
                 <label>Direction <select id="repos-direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label>
                 ${canRetryFilteredRepositories() ? '<button id="btn-retry-filtered" class="btn btn-danger" ' + (total ? '' : 'disabled') + '>Retry filtered (' + esc(total) + ')</button>' : ''}
             </div>

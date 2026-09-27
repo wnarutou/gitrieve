@@ -222,6 +222,30 @@ func TestRepositoryHealthSearchFilterSummaryAndSortAreDeterministic(t *testing.T
 	require.Equal(t, "beta", input[0].Name, "helpers must not mutate shared snapshot inputs except the explicit sort target")
 }
 
+func TestRepositoryNextRunSort(t *testing.T) {
+	when := time.Date(2026, time.September, 27, 8, 0, 0, 0, time.UTC)
+	input := []RepositoryOverview{
+		{Repository: typedef.Repository{Name: "unscheduled", URL: "github.com/acme/a"}},
+		{Repository: typedef.Repository{Name: "later", URL: "github.com/acme/b"}, NextRunTime: timePointer(when.Add(time.Hour))},
+		{Repository: typedef.Repository{Name: "early-z", URL: "github.com/acme/z"}, NextRunTime: timePointer(when)},
+		{Repository: typedef.Repository{Name: "early-c", URL: "github.com/acme/c"}, NextRunTime: timePointer(when)},
+		{Repository: typedef.Repository{Name: "invalid", URL: "github.com/acme/d"}, ScheduleError: "invalid cron"},
+	}
+	for _, tc := range []struct {
+		direction string
+		want      []string
+	}{
+		{"asc", []string{"early-c", "early-z", "later", "invalid", "unscheduled"}},
+		{"desc", []string{"later", "early-c", "early-z", "invalid", "unscheduled"}},
+	} {
+		t.Run(tc.direction, func(t *testing.T) {
+			candidate := append([]RepositoryOverview(nil), input...)
+			sortRepositorySnapshot(candidate, "next_run", tc.direction)
+			require.Equal(t, tc.want, overviewNames(candidate))
+		})
+	}
+}
+
 func runStatsAt(status string, start time.Time, end *time.Time) *db.RepositoryRunStats {
 	return &db.RepositoryRunStats{
 		LatestExecutionID: "execution-" + status,

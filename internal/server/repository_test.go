@@ -287,6 +287,9 @@ func TestGetRepositoriesHealthFiltersSortsAndSummarizesSearchMatches(t *testing.
 			query string
 			want  []string
 		}{
+			{query: "?search=match&sort=next_run&direction=asc", want: []string{"match-overdue", "match-failed", "match-pending", "match-running", "match-stuck"}},
+			{query: "?search=match&sort=next_run&direction=desc", want: []string{"match-overdue", "match-failed", "match-pending", "match-running", "match-stuck"}},
+			{query: "?search=match&sort=next_run&direction=asc&page=2&limit=1", want: []string{"match-failed"}},
 			{query: "?search=match&sort=attention&direction=asc", want: []string{"match-stuck", "match-failed", "match-overdue", "match-pending", "match-running"}},
 			{query: "?search=match&sort=attention&direction=desc", want: []string{"match-running", "match-pending", "match-overdue", "match-failed", "match-stuck"}},
 			{query: "?search=match&sort=name&direction=asc", want: []string{"match-failed", "match-overdue", "match-pending", "match-running", "match-stuck"}},
