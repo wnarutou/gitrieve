@@ -300,7 +300,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			if err == plumbing.ErrReferenceNotFound {
 				isUpdated = true
 				// create local branch and switch to the new local branch
-				err = w.Checkout(&git.CheckoutOptions{
+				err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 					Branch: branchRef,
 					Create: true,
 					Force:  true,
@@ -336,7 +336,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			}
 
 			// switch to local branch, only after that we can do pull
-			err = w.Checkout(&git.CheckoutOptions{
+			err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 				Branch: branchRef,
 				// abandon the modify of local
 				Force: true,
@@ -358,7 +358,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				return err
 			}
 			pull := func() error {
-				return w.PullContext(syncCtx, &git.PullOptions{
+				return pullManagedWorktree(syncCtx, gitRepo, w, &git.PullOptions{
 					RemoteName:    "origin",
 					ReferenceName: branchRef,
 					// pull all commits, not only the latest
@@ -382,7 +382,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
-				if errors.Is(err, git.ErrUnstagedChanges) {
+				if errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
 					return err
 				}
 				if syncCtx.Err() != nil {
@@ -404,7 +404,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// switch to default branch
-	err = w.Checkout(&git.CheckoutOptions{
+	err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName(remoteDefaultBranchName),
 		// abandon the modify of local
 		Force: true,
