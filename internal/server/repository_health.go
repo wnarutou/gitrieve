@@ -250,6 +250,9 @@ func sortRepositorySnapshot(in []RepositoryOverview, sortKey, direction string) 
 		if sortKey == "last_success" && (left.LastSuccessTime == nil) != (right.LastSuccessTime == nil) {
 			return left.LastSuccessTime != nil
 		}
+		if sortKey == "next_run" && (left.NextRunTime == nil) != (right.NextRunTime == nil) {
+			return left.NextRunTime != nil
+		}
 		comparison := compareOverviewPrimary(left, right, sortKey)
 		if comparison != 0 {
 			if descending {
@@ -275,6 +278,8 @@ func compareOverviewPrimary(left, right RepositoryOverview, sortKey string) int 
 		return compareOptionalTime(left.LastAttemptTime, right.LastAttemptTime)
 	case "last_success":
 		return compareOptionalTime(left.LastSuccessTime, right.LastSuccessTime)
+	case "next_run":
+		return compareOptionalTime(left.NextRunTime, right.NextRunTime)
 	default:
 		return 0
 	}

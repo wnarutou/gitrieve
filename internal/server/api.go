@@ -776,7 +776,7 @@ func validRepositoryHealth(health string) bool {
 
 func validRepositorySort(sortKey string) bool {
 	switch sortKey {
-	case "attention", "name", "last_attempt", "last_success":
+	case "attention", "name", "last_attempt", "last_success", "next_run":
 		return true
 	default:
 		return false
