@@ -79,7 +79,7 @@ or revisit the page to see later server-side changes.
 ### Configuration management
 
 - **Repositories** — add, edit, and remove repository entries from your `config.yaml` without editing the file by hand. Changes are persisted back to the config file.
-- **Storage backends** — add, edit, and remove `file` and `s3` storage backends. Changes are persisted back to the config file.
+- **Storage backends** — add, edit, and remove local `file` storage backends. Changes are persisted back to the config file.
 
 All write operations update the in-memory config immediately and then attempt to save it to disk. If the save fails (for example, the config file is read-only), the change still takes effect for the running server, and the API response will carry a warning message.
 
@@ -156,7 +156,7 @@ previous process to `failed`, including active component rows.
 - **Use a strong `authToken`.** When `authEnabled: true`, set a long, random token. Clients send it as `Authorization: Bearer <token>` on every API request. See the [API reference](api.md#authentication) for details.
 - **Bind carefully.** The default `host: localhost` only accepts connections from the same machine. To expose the server to other machines, set `host: 0.0.0.0` (or a specific interface) and put it behind a reverse proxy with TLS.
 - **No TLS built in.** The server listens over plain HTTP. For remote access, terminate TLS at a reverse proxy (nginx, Caddy, etc.) in front of gitrieve.
-- **Config file writes.** The server writes back to `config.yaml` when you edit repositories or storage through the UI/API. Ensure the file is writable by the user running gitrieve, and protect the file because it may contain storage credentials and tokens.
+- **Config file writes.** The server writes back to `config.yaml` when you edit repositories or storage through the UI/API. Ensure the file is writable by the user running gitrieve, and protect the file because it may contain authentication tokens.
 
 ## Next steps
 

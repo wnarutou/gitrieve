@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**gitrieve** is a Go-based tool for archiving repositories from any Git server (GitHub, etc.) to multiple storage backends. It supports scheduling via cron, downloading repository metadata (releases, issues, wiki, discussions), and storing to local filesystem or S3-compatible storage.
+**gitrieve** is a Go-based tool for archiving repositories from any Git server (GitHub, etc.) to local file storage. It supports scheduling via cron, downloading repository metadata (releases, issues, wiki, discussions), and storing to the local filesystem.
 
 ## Build & Development
 
@@ -35,7 +35,7 @@ go build -o gitrieve main.go
   - `config/` - Viper-based configuration loading
   - `repository/` - Git cloning/fetching logic
   - `scm/` - SCM abstraction (currently GitHub via `githubv4`/`go-github`)
-  - `storage/` - Storage backends (file, S3)
+  - `storage/` - Local file storage
   - `typedef/` - Shared types (Repository, Storage, MultiStorage)
   - `ui/` - Terminal output helpers
 
@@ -44,14 +44,14 @@ go build -o gitrieve main.go
 - Config parsed into `Config` struct with `Repository[]`, `Storage[]`, and global settings
 - Storage backends selected by name reference in repository config
 - Daemon and server modes use `gocron/v2` for scheduled jobs
-- Archives created with `archiver/v4`, uploaded via `minio-go` (S3) or direct file write
+- Archives created with `archiver/v4`, stored by direct file write
 
 ### Concurrency: cross-process per-repo locks
 Same repo + same component syncs are serialized across goroutines AND processes
 by `internal/lock` — a per-key in-process semaphore plus a `gofrs/flock` advisory
 file lock on `.gitrieve/locks/<host>/<owner>/<repo>/<component>.lock`. Covers
 code/wiki/issue/discussion/release. The lock is per-host and per-working-directory:
-multi-host writes to shared storage (e.g. two machines writing one S3 bucket) are
+multi-host writes to shared storage (e.g. two machines writing one network filesystem) are
 not guarded. Lock files are never deleted.
 
 ### Server repository sync health
@@ -101,7 +101,7 @@ A core design goal: **once code and history are pulled locally, a sync must neve
 
 Recommended-for-recoverability config: `allBranches: true` (pull every branch's commits) and `useCache: true` (keep the local `.git` cache across syncs; otherwise the working dir is removed at the end of each sync).
 
-Known limitation (not yet a regression to fix unless asked): archiving writes a fixed filename (e.g. `repo.tar.gz`) and overwrites any prior archive at the same path. If the upstream is still reachable but its default branch was rewritten to a single README, the new snapshot replaces the previous normal one at that path. Local cached code/history is still safe, but distinct historical snapshots need object-storage versioning or versioned archive paths.
+Known limitation (not yet a regression to fix unless asked): archiving writes a fixed filename (e.g. `repo.tar.gz`) and overwrites any prior archive at the same path. If the upstream is still reachable but its default branch was rewritten to a single README, the new snapshot replaces the previous normal one at that path. Local cached code/history is still safe, but distinct historical snapshots need separate copies under versioned archive paths.
 
 ### Configuration Schema
 ```yaml
@@ -117,9 +117,8 @@ repository:
 
 storage:
   - name: <id>
-    type: file | s3
-    path: <local path>            # for file
-    endpoint/bucket/region/keys   # for s3
+    type: file
+    path: <local path>
 
 githubToken: <token>
 cocurrencyNum: <int>
