@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o gitrieve main.go
 # Stage 2: runtime
 FROM alpine:latest
 
-# ca-certificates for HTTPS (git servers, S3), git for cloning repos,
+# ca-certificates for HTTPS (git servers), git for cloning repos,
 # tzdata for cron schedules configured through the TZ environment variable
 RUN apk add --no-cache ca-certificates git tzdata
 

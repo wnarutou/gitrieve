@@ -801,21 +801,8 @@ function openStorageForm(storage) {
     $('#storage-original-name').value = storage ? storage.Name : '';
     $('#storage-name').value = storage ? storage.Name : '';
     $('#storage-name').disabled = !!storage;
-    $('#storage-type').value = storage ? (storage.Type || 'file') : 'file';
     $('#storage-path').value = storage ? (storage.Path || '') : '';
-    $('#storage-endpoint').value = storage ? (storage.Endpoint || '') : '';
-    $('#storage-bucket').value = storage ? (storage.Bucket || '') : '';
-    $('#storage-region').value = storage ? (storage.Region || '') : '';
-    $('#storage-akid').value = storage ? (storage.AccessKeyID || '') : '';
-    $('#storage-sk').value = storage ? (storage.SecretAccessKey || '') : '';
-    toggleStorageType();
     $('#storage-modal').classList.remove('hidden');
-}
-
-function toggleStorageType() {
-    const isS3 = $('#storage-type').value === 's3';
-    $('#storage-path-field').style.display = isS3 ? 'none' : '';
-    $$('#storage-form .s3-fields .field').forEach(f => { f.style.display = isS3 ? '' : 'none'; });
 }
 
 async function saveStorage(ev) {
@@ -823,17 +810,11 @@ async function saveStorage(ev) {
     const original = $('#storage-original-name').value;
     const name = $('#storage-name').value.trim();
     if (!name) { toast('Name is required', true); return; }
-    const type = $('#storage-type').value;
 
     const storage = {
         Name: name,
-        Type: type,
-        Path: type === 'file' ? $('#storage-path').value.trim() : '',
-        Endpoint: type === 's3' ? $('#storage-endpoint').value.trim() : '',
-        Bucket: type === 's3' ? $('#storage-bucket').value.trim() : '',
-        Region: type === 's3' ? $('#storage-region').value.trim() : '',
-        AccessKeyID: type === 's3' ? $('#storage-akid').value.trim() : '',
-        SecretAccessKey: type === 's3' ? $('#storage-sk').value : ''
+        Type: 'file',
+        Path: $('#storage-path').value.trim()
     };
 
     try {
@@ -877,9 +858,6 @@ async function renderStorage() {
             <td><strong>${esc(s.Name)}</strong></td>
             <td>${esc(s.Type)}</td>
             <td class="muted">${esc(s.Path || '-')}</td>
-            <td class="muted">
-                ${s.Type === 's3' ? esc([s.Endpoint, s.Bucket, s.Region].filter(Boolean).join(' / ') || '-') : '-'}
-            </td>
             <td class="actions">
                 <button class="btn btn-sm btn-edit-storage" data-name="${esc(s.Name)}">Edit</button>
                 <button class="btn btn-sm btn-danger btn-del-storage" data-name="${esc(s.Name)}">Delete</button>
@@ -893,7 +871,7 @@ async function renderStorage() {
         </div>
         <div class="panel">
             ${storages.length
-                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Path</th><th>S3 Target</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Path</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
                 : '<div class="empty">No storage backends configured. Click <strong>Add Storage</strong>.</div>'}
         </div>`;
 
@@ -1203,7 +1181,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ev.target === ev.currentTarget) $('#repo-modal').classList.add('hidden');
     });
     $('#storage-form').addEventListener('submit', saveStorage);
-    $('#storage-type').addEventListener('change', toggleStorageType);
     $('#storage-form-cancel').addEventListener('click', () => $('#storage-modal').classList.add('hidden'));
     $('#storage-modal-close').addEventListener('click', () => $('#storage-modal').classList.add('hidden'));
     $('#storage-modal').addEventListener('click', (ev) => {
