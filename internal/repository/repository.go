@@ -106,7 +106,7 @@ func appendConcreteRepositories(ret []typedef.Repository, configured typedef.Rep
 
 // Sync archives a repository's code (or wiki when iswiki is set). ctx bounds
 // every go-git network operation: a caller cancellation (e.g. a user cancelling
-// a job) or the internal 30-minute timeout fails the sync instead of hanging.
+// a job) or the internal one-hour timeout fails the sync instead of hanging.
 func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
 	depth := repo.Depth
@@ -178,9 +178,8 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	var gitRepo *git.Repository
 	// Bound every go-git network operation (clone, fetch, remote list, pull).
 	// Derive from the caller's ctx so a job cancellation also interrupts them,
-	// and apply a 30-minute stall-detection timeout on top (generous; not a cap
-	// on legitimate large clones).
-	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	// and apply a one-hour total timeout shared by all sync operations.
+	syncCtx, cancel := context.WithTimeout(ctx, time.Hour)
 	defer cancel()
 	if deadline, ok := syncCtx.Deadline(); ok {
 		ui.Printf("Sync deadline: %s", deadline.UTC().Format(time.RFC3339))
