@@ -34,6 +34,12 @@ http://localhost:8080
 
 The default host is `localhost` and the default port is `8080`. Static assets (CSS/JS) are served from `/static/*`.
 
+The badge next to **Gitrieve** in the top navigation shows the running server's
+version. Release binaries and release Docker images include their release version;
+local builds default to `dev`. To label a custom build, use
+`go build -ldflags="-X github.com/wnarutou/gitrieve/internal/buildinfo.Version=1.2.3" -o gitrieve main.go`
+or `docker build --build-arg VERSION=1.2.3 -t gitrieve .`.
+
 ## Features
 
 ### Job management

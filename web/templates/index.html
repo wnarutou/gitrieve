@@ -8,7 +8,10 @@
 </head>
 <body>
     <nav class="topbar">
-        <div class="brand">Gitrieve</div>
+        <div class="brand">
+            Gitrieve
+            <span class="app-version" title="Server version: {{ .version }}" aria-label="Server version: {{ .version }}">{{ .version }}</span>
+        </div>
         <div class="nav-links">
             <a href="#/jobs" data-route="jobs" class="active">Jobs</a>
             <a href="#/repositories" data-route="repositories">Repositories</a>
