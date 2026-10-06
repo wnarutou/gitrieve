@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
@@ -269,20 +272,50 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			remoteDefaultBranchName = remoteDefaultBranchRef.Short()
 		}
 	}
+	// A failed checkout in an earlier sync may already have created a branch
+	// ref without producing an archive. Recover the default worktree below and
+	// publish an archive even when all fetched branch tips are unchanged.
+	head, err := gitRepo.Head()
+	if err != nil {
+		return err
+	}
+	if head.Name() != remoteDefaultBranchRef {
+		isUpdated = true
+	}
 
 	// find all remote branches
 	if err := refs.ForEach(func(ref *plumbing.Reference) error {
-		if ref.Name().IsRemote() {
+		if ref.Name().IsRemote() && ref.Type() == plumbing.HashReference {
 			// get remote branch name
 			remoteBranchName := ref.Name().Short()
-
-			// if not pull all branches and this branch is not default then skip
-			if !allBranches && (remoteDefaultBranchName != remoteBranchName) {
+			localBranchName, isOrigin := strings.CutPrefix(remoteBranchName, "origin/")
+			if !isOrigin {
 				return nil
 			}
 
-			// set local branch name
-			localBranchName := remoteBranchName[len("origin/"):]
+			// if not pull all branches and this branch is not default then skip
+			if !allBranches && (remoteDefaultBranchName != localBranchName) {
+				return nil
+			}
+
+			// Non-default branches only need refs and objects in the archive.
+			// Checking them out can fail for names that Git stores successfully
+			// but the host filesystem cannot represent (e.g. >255-byte names).
+			if localBranchName != remoteDefaultBranchName {
+				if err := syncCtx.Err(); err != nil {
+					return err
+				}
+				updated, err := updateArchivedBranch(gitRepo, localBranchName, ref.Hash())
+				if errors.Is(err, git.ErrNonFastForwardUpdate) {
+					ui.Printf("Preserving local branch %s: upstream is not a fast-forward.\n", localBranchName)
+					return nil
+				}
+				if err != nil {
+					return fmt.Errorf("update archived branch %s: %w", localBranchName, err)
+				}
+				isUpdated = isUpdated || updated
+				return nil
+			}
 
 			// create local branch reference
 			branchRef := plumbing.NewBranchReferenceName(localBranchName)
@@ -440,6 +473,65 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		}
 	}
 	return nil
+}
+
+// updateArchivedBranch retains local history without materializing a worktree.
+// Only a new branch or a proven fast-forward may change a local reference.
+func updateArchivedBranch(repo *git.Repository, name string, hash plumbing.Hash) (bool, error) {
+	branch := plumbing.NewBranchReferenceName(name)
+	local, err := repo.Reference(branch, false)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		if err := repo.CreateBranch(&config.Branch{Name: name, Remote: "origin", Merge: branch}); err != nil && !errors.Is(err, git.ErrBranchExists) {
+			return false, err
+		}
+	} else if err != nil {
+		return false, err
+	} else {
+		if local.Hash() == hash {
+			return false, nil
+		}
+		old, err := repo.CommitObject(local.Hash())
+		if err != nil {
+			return false, err
+		}
+		next, err := repo.CommitObject(hash)
+		if err != nil {
+			return false, err
+		}
+		// Stop at shallow boundaries instead of reading deliberately absent
+		// parents. Lack of proof of ancestry must never discard local history.
+		shallow, err := repo.Storer.Shallow()
+		if err != nil {
+			return false, err
+		}
+		var ignore []plumbing.Hash
+		for _, hash := range shallow {
+			boundary, err := repo.CommitObject(hash)
+			if err != nil {
+				return false, err
+			}
+			ignore = append(ignore, boundary.ParentHashes...)
+		}
+		fastForward := false
+		iter := object.NewCommitPreorderIter(next, nil, ignore)
+		defer iter.Close()
+		if err := iter.ForEach(func(commit *object.Commit) error {
+			if commit.Hash == old.Hash {
+				fastForward = true
+				return storer.ErrStop
+			}
+			return nil
+		}); err != nil {
+			return false, err
+		}
+		if !fastForward {
+			return false, git.ErrNonFastForwardUpdate
+		}
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(branch, hash)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Expand 返回一个配置条目实际对应的具体仓库列表。type=repo 原样返回自身；

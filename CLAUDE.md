@@ -96,7 +96,8 @@ A core design goal: **once code and history are pulled locally, a sync must neve
 
 - **Remote unreachable → early exit.** `gitRepo.Fetch` failure returns early (`repository.go` ~line 159-162); no archiving and no `os.RemoveAll` cleanup runs, so the local cache and prior archived snapshots are untouched. Do NOT move cleanup before fetch or swallow fetch errors to continue.
 - **Branches are added, never deleted.** The `refs.ForEach` loop (`repository.go` ~line 199-286) only creates/updates local branches; it never deletes a local branch. Upstream-deleted branches must remain locally.
-- **Pull, not reset.** Updates use `w.Pull` (merge), never `git reset --hard origin`. A force-push rewriting the upstream default branch only moves the `origin/*` tracking refs; local branches and their old commit objects must not be overwritten or discarded.
+- **Fast-forward only, never reset.** The default branch uses `w.Pull`; non-default branches update local refs only after proving ancestry, respecting shallow-history boundaries. Never use `git reset --hard origin` or overwrite local branch history after an upstream force-push.
+- **Only materialize the default branch.** Non-default branches are archived as Git refs and objects without checkout, so filenames that exceed host filesystem limits do not break the backup. A cache left on another branch by a failed checkout must return to the default branch and produce an archive on retry.
 - **Old commits retained.** Commits are immutable objects and the sync never force-moves local refs, so already-pulled history stays in the local `.git` object store and is recoverable via `git checkout <old-hash>`.
 
 Recommended-for-recoverability config: `allBranches: true` (pull every branch's commits) and `useCache: true` (keep the local `.git` cache across syncs; otherwise the working dir is removed at the end of each sync).
