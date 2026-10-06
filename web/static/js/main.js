@@ -119,7 +119,7 @@ function renderApp() {
 window.addEventListener('hashchange', renderApp);
 
 const repositoryHealthValues = ['healthy', 'failed', 'overdue', 'stuck', 'never_synced', 'cancelled', 'pending', 'running', 'syncing'];
-const repositorySortValues = ['attention', 'name', 'last_attempt', 'last_success'];
+const repositorySortValues = ['attention', 'name', 'last_attempt', 'last_success', 'next_run'];
 
 function isActiveRepositoryRoute(routeEpoch) {
     if (routeEpoch !== state.routeEpoch) return false;
@@ -235,7 +235,7 @@ function jobsTable(jobs, page, limit, total) {
                 <tbody>${rows}</tbody>
             </table>
         </div>
-        ${paginationHTML(page, pages, total, 'jobs')}`;
+        ${paginationHTML(page, pages, total, 'jobs', true)}`;
 }
 
 async function renderJobs() {
@@ -253,6 +253,13 @@ async function renderJobs() {
     } catch (e) {
         $('#app').innerHTML = '<div class="empty error-text">Failed to load jobs: ' + esc(e.message) + '</div>';
         return;
+    }
+
+    const pages = Math.max(1, Math.ceil(total / 20));
+    const validPage = normalizePage(state.jobsPage, pages);
+    if (state.jobsPage !== validPage) {
+        state.jobsPage = validPage;
+        return renderJobs();
     }
 
     $('#app').innerHTML = jobsToolbar(total) + jobsTable(jobs, state.jobsPage, 20, total);
@@ -283,7 +290,14 @@ async function renderJobs() {
     const prev = $('#pg-prev-jobs');
     const next = $('#pg-next-jobs');
     if (prev) prev.addEventListener('click', () => { if (state.jobsPage > 1) { state.jobsPage--; renderJobs(); } });
-    if (next) next.addEventListener('click', () => { state.jobsPage++; renderJobs(); });
+    if (next) next.addEventListener('click', () => { if (state.jobsPage < pages) { state.jobsPage++; renderJobs(); } });
+    $$('.pg-page').forEach(button => button.addEventListener('click', () => {
+        const page = Number(button.dataset.page);
+        if (Number.isInteger(page) && page >= 1 && page <= pages && page !== state.jobsPage) {
+            state.jobsPage = page;
+            renderJobs();
+        }
+    }));
 
     $$('.btn-log').forEach(b => b.addEventListener('click', () => openLogModal(b.dataset.jobid, b.dataset.jobname)));
     $$('.btn-cancel').forEach(b => b.addEventListener('click', () => cancelJob(b.dataset.jobid)));
@@ -565,7 +579,11 @@ async function deleteRepo(key) {
 function repositoryHealthBadge(repo) {
     const value = String(repo.health_status || 'never_synced');
     const cls = repositoryHealthValues.includes(value) ? value : 'never_synced';
-    return '<span class="badge health-' + cls + '">' + esc(value) + '</span>';
+    const healthBadge = '<span class="badge health-' + cls + '">' + esc(value) + '</span>';
+    if (value === 'stuck' && ['running', 'pending'].includes(repo.last_status)) {
+        return '<span class="badge health-' + repo.last_status + '">' + esc(repo.last_status) + '</span> ' + healthBadge;
+    }
+    return healthBadge;
 }
 
 function repositorySummaryCards(summary) {
@@ -717,7 +735,7 @@ async function renderRepositories(expectedRouteEpoch) {
                 <option value="running">Running</option><option value="syncing">Syncing</option></select></label>
                 <label class="checkbox"><input type="checkbox" id="repos-overdue"> Overdue only</label></div>
             <div class="toolbar-group"><label>Sort <select id="repos-sort"><option value="attention">Attention</option>
-                <option value="name">Name</option><option value="last_attempt">Last attempt</option><option value="last_success">Last success</option></select></label>
+                <option value="name">Name</option><option value="last_attempt">Last attempt</option><option value="last_success">Last success</option><option value="next_run">Next run</option></select></label>
                 <label>Direction <select id="repos-direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label>
                 ${canRetryFilteredRepositories() ? '<button id="btn-retry-filtered" class="btn btn-danger" ' + (total ? '' : 'disabled') + '>Retry filtered (' + esc(total) + ')</button>' : ''}
             </div>
@@ -783,21 +801,8 @@ function openStorageForm(storage) {
     $('#storage-original-name').value = storage ? storage.Name : '';
     $('#storage-name').value = storage ? storage.Name : '';
     $('#storage-name').disabled = !!storage;
-    $('#storage-type').value = storage ? (storage.Type || 'file') : 'file';
     $('#storage-path').value = storage ? (storage.Path || '') : '';
-    $('#storage-endpoint').value = storage ? (storage.Endpoint || '') : '';
-    $('#storage-bucket').value = storage ? (storage.Bucket || '') : '';
-    $('#storage-region').value = storage ? (storage.Region || '') : '';
-    $('#storage-akid').value = storage ? (storage.AccessKeyID || '') : '';
-    $('#storage-sk').value = storage ? (storage.SecretAccessKey || '') : '';
-    toggleStorageType();
     $('#storage-modal').classList.remove('hidden');
-}
-
-function toggleStorageType() {
-    const isS3 = $('#storage-type').value === 's3';
-    $('#storage-path-field').style.display = isS3 ? 'none' : '';
-    $$('#storage-form .s3-fields .field').forEach(f => { f.style.display = isS3 ? '' : 'none'; });
 }
 
 async function saveStorage(ev) {
@@ -805,17 +810,11 @@ async function saveStorage(ev) {
     const original = $('#storage-original-name').value;
     const name = $('#storage-name').value.trim();
     if (!name) { toast('Name is required', true); return; }
-    const type = $('#storage-type').value;
 
     const storage = {
         Name: name,
-        Type: type,
-        Path: type === 'file' ? $('#storage-path').value.trim() : '',
-        Endpoint: type === 's3' ? $('#storage-endpoint').value.trim() : '',
-        Bucket: type === 's3' ? $('#storage-bucket').value.trim() : '',
-        Region: type === 's3' ? $('#storage-region').value.trim() : '',
-        AccessKeyID: type === 's3' ? $('#storage-akid').value.trim() : '',
-        SecretAccessKey: type === 's3' ? $('#storage-sk').value : ''
+        Type: 'file',
+        Path: $('#storage-path').value.trim()
     };
 
     try {
@@ -859,9 +858,6 @@ async function renderStorage() {
             <td><strong>${esc(s.Name)}</strong></td>
             <td>${esc(s.Type)}</td>
             <td class="muted">${esc(s.Path || '-')}</td>
-            <td class="muted">
-                ${s.Type === 's3' ? esc([s.Endpoint, s.Bucket, s.Region].filter(Boolean).join(' / ') || '-') : '-'}
-            </td>
             <td class="actions">
                 <button class="btn btn-sm btn-edit-storage" data-name="${esc(s.Name)}">Edit</button>
                 <button class="btn btn-sm btn-danger btn-del-storage" data-name="${esc(s.Name)}">Delete</button>
@@ -875,7 +871,7 @@ async function renderStorage() {
         </div>
         <div class="panel">
             ${storages.length
-                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Path</th><th>S3 Target</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                ? '<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Type</th><th>Path</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
                 : '<div class="empty">No storage backends configured. Click <strong>Add Storage</strong>.</div>'}
         </div>`;
 
@@ -1185,7 +1181,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ev.target === ev.currentTarget) $('#repo-modal').classList.add('hidden');
     });
     $('#storage-form').addEventListener('submit', saveStorage);
-    $('#storage-type').addEventListener('change', toggleStorageType);
     $('#storage-form-cancel').addEventListener('click', () => $('#storage-modal').classList.add('hidden'));
     $('#storage-modal-close').addEventListener('click', () => $('#storage-modal').classList.add('hidden'));
     $('#storage-modal').addEventListener('click', (ev) => {

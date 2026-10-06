@@ -109,7 +109,7 @@ func appendConcreteRepositories(ret []typedef.Repository, configured typedef.Rep
 
 // Sync archives a repository's code (or wiki when iswiki is set). ctx bounds
 // every go-git network operation: a caller cancellation (e.g. a user cancelling
-// a job) or the internal 30-minute timeout fails the sync instead of hanging.
+// a job) or the internal one-hour timeout fails the sync instead of hanging.
 func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []typedef.MultiStorage) error {
 	useCache := repo.UseCache
 	depth := repo.Depth
@@ -156,35 +156,37 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	if iswiki {
 		component = "wiki"
 	}
+	ui.Printf("Sync phase: waiting for %s lock", component)
 	unlock, err := lock.Acquire(ctx, r, component, currentDir)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	ui.Printf("Sync phase: %s lock acquired", component)
 	var gitDir string
-	var gitSuffix string
 	var gitUrl string
 	if iswiki {
 		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "wiki")
-		gitSuffix = ".wiki.git"
 		gitUrl = repo.URL + ".wiki"
 	} else {
 		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "code")
-		gitSuffix = ".git"
 		gitUrl = repo.URL
 	}
 	var exist bool
-	// check if the repo already exists
-	if _, err := os.Stat(path.Join(gitDir, gitSuffix)); err == nil {
+	// Both code and wiki clones store their local metadata in .git;
+	// the .wiki suffix only belongs to the remote URL.
+	if _, err := os.Stat(path.Join(gitDir, ".git")); err == nil {
 		exist = true
 	}
 	var gitRepo *git.Repository
 	// Bound every go-git network operation (clone, fetch, remote list, pull).
 	// Derive from the caller's ctx so a job cancellation also interrupts them,
-	// and apply a 30-minute stall-detection timeout on top (generous; not a cap
-	// on legitimate large clones).
-	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	// and apply a one-hour total timeout shared by all sync operations.
+	syncCtx, cancel := context.WithTimeout(ctx, time.Hour)
 	defer cancel()
+	if deadline, ok := syncCtx.Deadline(); ok {
+		ui.Printf("Sync deadline: %s", deadline.UTC().Format(time.RFC3339))
+	}
 
 	// Route git's own progress (server-side "Enumerating/Counting/Compressing
 	// objects" lines) into the log sink so a long clone/fetch streams live
@@ -196,6 +198,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	// clone the repo if it does not exist, otherwise pull
 	if !exist {
 		isUpdated = true
+		ui.Printf("Sync phase: Git clone started")
 		_, err = git.PlainCloneContext(syncCtx, gitDir, false, &git.CloneOptions{
 			URL:      "https://" + gitUrl,
 			Progress: progress,
@@ -223,6 +226,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// fetch all remote branches
+	ui.Printf("Sync phase: Git fetch started")
 	err = gitRepo.FetchContext(syncCtx, &git.FetchOptions{
 		RemoteName: "origin",
 		RefSpecs: []config.RefSpec{
@@ -259,6 +263,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		ui.Errorf("Error get remote, %s", err)
 		return err
 	}
+	ui.Printf("Sync phase: remote reference discovery started")
 	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
 	if err != nil {
 		// The default branch cannot be determined without this listing, and a
@@ -327,7 +332,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			if err == plumbing.ErrReferenceNotFound {
 				isUpdated = true
 				// create local branch and switch to the new local branch
-				err = w.Checkout(&git.CheckoutOptions{
+				err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 					Branch: branchRef,
 					Create: true,
 					Force:  true,
@@ -363,7 +368,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 			}
 
 			// switch to local branch, only after that we can do pull
-			err = w.Checkout(&git.CheckoutOptions{
+			err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 				Branch: branchRef,
 				// abandon the modify of local
 				Force: true,
@@ -372,19 +377,46 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
 				return err
 			}
+			if err = restoreManagedWorktree(gitRepo, w); err != nil {
+				ui.Errorf("Error restoring managed worktree for local branch %s, %s", localBranchName, err)
+				return err
+			}
 
 			// pull from upstream branch
-			err = w.PullContext(syncCtx, &git.PullOptions{
-				RemoteName:    "origin",
-				ReferenceName: branchRef,
-				// pull all commits, not only the latest
-				Depth:    depth,
-				Progress: progress,
+			ui.Printf("Sync phase: Git pull started (branch=%s)", localBranchName)
+			beforePull, err := gitRepo.Reference(branchRef, true)
+			if err != nil {
+				ui.Errorf("Error reading local branch %s before pull, %s", localBranchName, err)
+				return err
+			}
+			pull := func() error {
+				return pullManagedWorktree(syncCtx, gitRepo, w, &git.PullOptions{
+					RemoteName:    "origin",
+					ReferenceName: branchRef,
+					// pull all commits, not only the latest
+					Depth:    depth,
+					Progress: progress,
+				})
+			}
+			err = pullWithManagedWorktreeRecovery(pull, func() error {
+				ui.Printf("local branch %s worktree changed during pull; restoring and retrying once.\n", localBranchName)
+				return restoreManagedWorktree(gitRepo, w)
 			})
+			afterPull, refErr := gitRepo.Reference(branchRef, true)
+			if refErr != nil {
+				ui.Errorf("Error reading local branch %s after pull, %s", localBranchName, refErr)
+				return refErr
+			}
+			if beforePull.Hash() != afterPull.Hash() {
+				isUpdated = true
+			}
 			if err == git.NoErrAlreadyUpToDate {
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
+				if errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
+					return err
+				}
 				if syncCtx.Err() != nil {
 					// Cancelled — stop the whole sync instead of continuing to
 					// the remaining branches. The fetched objects stay in the
@@ -404,13 +436,17 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// switch to default branch
-	err = w.Checkout(&git.CheckoutOptions{
+	err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName(remoteDefaultBranchName),
 		// abandon the modify of local
 		Force: true,
 	})
 	if err != nil {
 		ui.Errorf("Error checkout default branch %s, %s", remoteDefaultBranchRef, err)
+		return err
+	}
+	if err = restoreManagedWorktree(gitRepo, w); err != nil {
+		ui.Errorf("Error restoring managed worktree for default branch %s, %s", remoteDefaultBranchRef, err)
 		return err
 	}
 
@@ -430,6 +466,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		// Archive the working tree directly from gitDir. Create takes an
 		// absolute path and never changes the process cwd, so it is safe to
 		// run from concurrent job goroutines.
+		ui.Printf("Sync phase: archive creation started")
 		buf, err := archive.Create(syncCtx, gitDir, targetDir)
 		if err != nil {
 			ui.Errorf("Error creating archive, %s", err)
@@ -448,6 +485,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Errorf("Error getting backend, %s", err)
 				return err
 			}
+			ui.Printf("Sync phase: storage upload started (storage=%s type=%s)", s.Name, s.Type)
 			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)

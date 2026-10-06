@@ -332,7 +332,6 @@ select:focus, input:focus {
     cursor: pointer;
 }
 
-.s3-fields { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
 .form-actions {
     display: flex;
