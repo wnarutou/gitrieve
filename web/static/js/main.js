@@ -18,6 +18,20 @@ function fmtTime(value) {
     return d.toLocaleString();
 }
 
+function fmtDurationSeconds(value) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+    let seconds = Math.max(0, Math.floor(value));
+    // Match uptime: fixed 30-day months and 12-month (360-day) years.
+    const units = [[31104000, 'y'], [2592000, 'mo'], [86400, 'd'], [3600, 'h'], [60, 'm'], [1, 's']];
+    const parts = [];
+    for (const [size, suffix] of units) {
+        const count = Math.floor(seconds / size);
+        if (count > 0 || parts.length > 0 || size === 1) parts.push(count + suffix);
+        seconds %= size;
+    }
+    return parts.join('');
+}
+
 function fmtDuration(start, end) {
     if (!start) return '-';
     const s = new Date(start);
@@ -407,8 +421,7 @@ function renderExecutionDetails(repository, detailSerial, routeEpoch) {
     $('#execution-details').classList.remove('hidden');
     $('#execution-status').textContent = repository.last_status || repository.health_status || 'unknown';
     $('#execution-attempt').textContent = fmtTime(repository.last_attempt_time);
-    $('#execution-duration').textContent = repository.last_duration_seconds === null ||
-        repository.last_duration_seconds === undefined ? '-' : repository.last_duration_seconds + 's';
+    $('#execution-duration').textContent = fmtDurationSeconds(repository.last_duration_seconds);
     $('#execution-error').textContent = repository.last_error_message || '-';
     const retry = $('#btn-retry-execution');
     retry.onclick = null;
@@ -713,7 +726,7 @@ async function renderRepositories(expectedRouteEpoch) {
             <td><strong>${esc(r.Name)}</strong><br><span class="muted">${esc(r.URL || '-')}</span></td>
             <td>${fmtTime(r.last_attempt_time)}</td>
             <td>${fmtTime(r.last_success_time)}</td>
-            <td>${esc(r.last_duration_seconds === null || r.last_duration_seconds === undefined ? '-' : r.last_duration_seconds + 's')}</td>
+            <td>${esc(fmtDurationSeconds(r.last_duration_seconds))}</td>
             <td class="muted" title="${esc(r.schedule_error || '')}">${esc(nextRun)}</td>
             <td class="err-cell" title="${esc(r.last_error_message || '')}">${esc(r.last_error_message || '-')}</td>
         </tr>`;
