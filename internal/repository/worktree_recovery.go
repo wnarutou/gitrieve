@@ -14,6 +14,8 @@ import (
 
 type chmodWorktreeFile func(name string, mode os.FileMode) error
 
+var errManagedWorktreeRecovery = errors.New("recover managed worktree after pull reported unstaged changes")
+
 // restoreManagedWorktree rebuilds only the derived index/worktree state from
 // the current local HEAD. It never resets to an origin ref or removes .git, so
 // previously fetched branches, tags, and objects remain deletion-safe.
@@ -33,7 +35,7 @@ func pullWithManagedWorktreeRecovery(pull func() error, recoverWorktree func() e
 		return err
 	}
 	if recoveryErr := recoverWorktree(); recoveryErr != nil {
-		return fmt.Errorf("recover managed worktree after pull reported unstaged changes: %w", recoveryErr)
+		return fmt.Errorf("%w: %w", errManagedWorktreeRecovery, recoveryErr)
 	}
 	return pull()
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -199,18 +200,25 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	if !exist {
 		isUpdated = true
 		ui.Printf("Sync phase: Git clone started")
-		_, err = git.PlainCloneContext(syncCtx, gitDir, false, &git.CloneOptions{
-			URL:      "https://" + gitUrl,
-			Progress: progress,
-			Depth:    depth,
+		err = retryGitEOF(syncCtx, component+" clone", func() error {
+			store := newGitStorage(gitDir)
+			_, cloneErr := git.CloneContext(syncCtx, store, osfs.New(gitDir), &git.CloneOptions{
+				URL:      "https://" + gitUrl,
+				Progress: progress,
+				Depth:    depth,
+			})
+			cloneErr = store.operationError(cloneErr)
+			if cloneErr != nil {
+				// This path has no previously cached repository. Clean up each
+				// failed attempt before retrying, while still holding the lock.
+				if cleanupErr := os.RemoveAll(gitDir); cleanupErr != nil {
+					return errors.Join(cloneErr, fmt.Errorf("%w: %w", errCloneCleanup, cleanupErr))
+				}
+			}
+			return cloneErr
 		})
 
 		if err != nil {
-			// Remove the partial clone so the next sync retries cleanly. This
-			// branch holds no previously-pulled data, so it is safe — the
-			// deletion-safe guarantee only covers existing local history, which
-			// is handled by the fetch/pull path below.
-			os.RemoveAll(gitDir)
 			if shouldLogCloneError(iswiki, err) {
 				ui.Errorf("Error cloning repository, %s", err)
 			}
@@ -219,7 +227,8 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 
 	// open local repo
-	gitRepo, err = git.PlainOpen(gitDir)
+	store := newGitStorage(gitDir)
+	gitRepo, err = git.Open(store, osfs.New(gitDir))
 	if err != nil {
 		ui.Errorf("Error opening repository, %s", err)
 		return err
@@ -227,13 +236,15 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 
 	// fetch all remote branches
 	ui.Printf("Sync phase: Git fetch started")
-	err = gitRepo.FetchContext(syncCtx, &git.FetchOptions{
-		RemoteName: "origin",
-		RefSpecs: []config.RefSpec{
-			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
-		},
-		Force:    true,
-		Progress: progress,
+	err = retryGitEOF(syncCtx, component+" fetch", func() error {
+		return store.operationError(gitRepo.FetchContext(syncCtx, &git.FetchOptions{
+			RemoteName: "origin",
+			RefSpecs: []config.RefSpec{
+				config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
+			},
+			Force:    true,
+			Progress: progress,
+		}))
 	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		ui.Errorf("Error fetching remote branches, %s", err)
@@ -264,7 +275,12 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		return err
 	}
 	ui.Printf("Sync phase: remote reference discovery started")
-	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
+	var remoteRefs []*plumbing.Reference
+	err = retryGitEOF(syncCtx, component+" reference discovery", func() error {
+		var listErr error
+		remoteRefs, listErr = remote.ListContext(syncCtx, &git.ListOptions{})
+		return listErr
+	})
 	if err != nil {
 		// The default branch cannot be determined without this listing, and a
 		// cancellation must stop the sync here rather than falling through.
@@ -390,17 +406,19 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				return err
 			}
 			pull := func() error {
-				return pullManagedWorktree(syncCtx, gitRepo, w, &git.PullOptions{
+				return store.operationError(pullManagedWorktree(syncCtx, gitRepo, w, &git.PullOptions{
 					RemoteName:    "origin",
 					ReferenceName: branchRef,
 					// pull all commits, not only the latest
 					Depth:    depth,
 					Progress: progress,
-				})
+				}))
 			}
-			err = pullWithManagedWorktreeRecovery(pull, func() error {
-				ui.Printf("local branch %s worktree changed during pull; restoring and retrying once.\n", localBranchName)
-				return restoreManagedWorktree(gitRepo, w)
+			err = retryGitEOF(syncCtx, component+" pull", func() error {
+				return pullWithManagedWorktreeRecovery(pull, func() error {
+					ui.Printf("local branch %s worktree changed during pull; restoring and retrying once.\n", localBranchName)
+					return restoreManagedWorktree(gitRepo, w)
+				})
 			})
 			afterPull, refErr := gitRepo.Reference(branchRef, true)
 			if refErr != nil {
@@ -414,7 +432,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				ui.Printf("local branch %s already up to date. \n", localBranchName)
 			} else if err != nil {
 				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
-				if errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
+				if isGitEOF(err) || errors.Is(err, errPackCleanup) || errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
 					return err
 				}
 				if syncCtx.Err() != nil {
