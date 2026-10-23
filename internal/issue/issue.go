@@ -237,18 +237,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			}
 			var allComments []*gh.IssueComment
 			for {
-				var (
-					comments []*gh.IssueComment
-					resp     *gh.Response
-				)
-				err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
-					return githubapi.Do(ctx, "core", accounts, func(token string) (githubapi.Observation, error) {
-						client := githubapi.NewREST(baseClient, token)
-						var apiErr error
-						comments, resp, apiErr = client.Issues.ListComments(ctx, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
-						return githubapi.ObserveREST(resp, apiErr), apiErr
-					})
-				})
+				comments, resp, err := listIssueComments(ctx, baseClient, accounts, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
 				if err != nil {
 					ui.Errorf("Error fetching comments of issue %d, %s", issue.GetNumber(), err)
 					return err
