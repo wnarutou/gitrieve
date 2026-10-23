@@ -99,6 +99,7 @@ A core design goal: **once code and history are pulled locally, a sync must neve
 - **Fast-forward only, never reset.** The default branch uses `w.Pull`; non-default branches update local refs only after proving ancestry, respecting shallow-history boundaries. Never use `git reset --hard origin` or overwrite local branch history after an upstream force-push.
 - **Only materialize the default branch.** Non-default branches are archived as Git refs and objects without checkout, so filenames that exceed host filesystem limits do not break the backup. A cache left on another branch by a failed checkout must return to the default branch and produce an archive on retry.
 - **Old commits retained.** Commits are immutable objects and the sync never force-moves local refs, so already-pulled history stays in the local `.git` object store and is recoverable via `git checkout <old-hash>`.
+- **Preserve symlink targets.** Fresh clones and cached worktrees use `newManagedWorktreeFS`, including child filesystems. Do not restore the default ChrootOS: it rewrites absolute targets and makes go-git report false modifications. Recovery must unlink a symlink itself, never the file it points at; this also lets existing caches recover without deleting `.git`.
 
 Recommended-for-recoverability config: `allBranches: true` (pull every branch's commits) and `useCache: true` (keep the local `.git` cache across syncs; otherwise the working dir is removed at the end of each sync).
 

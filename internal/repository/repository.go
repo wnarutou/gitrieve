@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -224,7 +223,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		err = accounts.do(syncCtx, func(auth transport.AuthMethod) error {
 			return retryGitEOF(syncCtx, component+" clone", func() error {
 				store := newGitStorage(gitDir)
-				_, cloneErr := git.CloneContext(syncCtx, store, osfs.New(gitDir), &git.CloneOptions{
+				_, cloneErr := git.CloneContext(syncCtx, store, newManagedWorktreeFS(gitDir), &git.CloneOptions{
 					URL:      "https://" + gitUrl,
 					Auth:     auth,
 					Progress: progress,
@@ -252,7 +251,7 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 
 	// open local repo
 	store := newGitStorage(gitDir)
-	gitRepo, err = git.Open(store, osfs.New(gitDir))
+	gitRepo, err = git.Open(store, newManagedWorktreeFS(gitDir))
 	if err != nil {
 		ui.Errorf("Error opening repository, %s", err)
 		return err
