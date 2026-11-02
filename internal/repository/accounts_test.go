@@ -163,6 +163,7 @@ func accountGitRepo(t *testing.T) (typedef.Repository, string) {
 func TestGitAccountCloneFallbackKeepsSuccessfulCredential(t *testing.T) {
 	for _, code := range []int{401, 403, 404} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			sink := captureSyncLogs(t)
 			ctx, tokens := githubapitest.Context(t)
 			_, seen := serveAccountGit(t, func(token string, _ *http.Request) int {
 				if token != tokens[1] {
@@ -180,6 +181,13 @@ func TestGitAccountCloneFallbackKeepsSuccessfulCredential(t *testing.T) {
 			require.Equal(t, tokens[0], captured[0])
 			for _, token := range captured[1:] {
 				require.Equal(t, tokens[1], token, "successful credential must persist through fetch/list/pull")
+			}
+			logs := strings.Join(sink.snapshot(), "\n")
+			require.Contains(t, logs, "Git authentication: credential 1/2 could not access repository")
+			require.Contains(t, logs, "Git authentication: trying credential 2/2")
+			require.Contains(t, logs, "Git authentication: credential 2/2 succeeded")
+			for _, token := range tokens {
+				require.NotContains(t, logs, token)
 			}
 		})
 	}
@@ -227,6 +235,7 @@ func TestGitAccountNonPermissionFailureDoesNotRotate(t *testing.T) {
 }
 
 func TestGitAccountAllDeniedAttemptsEachTokenOnce(t *testing.T) {
+	sink := captureSyncLogs(t)
 	cfg := &config.Config{GitHubAccounts: []githubapi.Account{{Name: "a", Token: "first"}, {Name: "alias", Token: "first"}, {Name: "b", Token: "second"}}}
 	ctx := config.WithExecutionSnapshot(context.Background(), config.NewExecutionSnapshot(cfg))
 	_, seen := serveAccountGit(t, func(string, *http.Request) int { return 404 })
@@ -234,8 +243,42 @@ func TestGitAccountAllDeniedAttemptsEachTokenOnce(t *testing.T) {
 	err := Sync(ctx, repo, false, nil)
 	require.ErrorIs(t, err, transport.ErrRepositoryNotFound)
 	require.Equal(t, []string{"first", "second"}, seen.snapshot())
+	logs := strings.Join(sink.snapshot(), "\n")
+	require.Contains(t, logs, "Git authentication: trying credential 2/2")
+	require.Contains(t, logs, "Git authentication: all 2 distinct credentials failed")
+	require.NotContains(t, logs, "credential 2/2 succeeded")
 	_, err = os.Stat(directory)
 	require.True(t, os.IsNotExist(err), "failed fresh clone must be cleaned up")
+}
+
+func TestGitAccountDiagnosticsReflectEffectiveCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{"legacy", &config.Config{GitHubToken: "secret-token"}, "Git authentication: all 1 distinct credentials failed"},
+		{"duplicates", &config.Config{GitHubAccounts: []githubapi.Account{{Name: "one", Token: "secret-token"}, {Name: "alias", Token: "secret-token"}}}, "Git authentication: all 1 distinct credentials failed"},
+		{"anonymous", &config.Config{}, "no credential available for this remote"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := captureSyncLogs(t)
+			ctx := config.WithExecutionSnapshot(context.Background(), config.NewExecutionSnapshot(test.cfg))
+			accounts := newGitAccounts(ctx, "github.com")
+			failure := fmt.Errorf("%w: remote message with secret-token", transport.ErrRepositoryNotFound)
+			calls := 0
+			err := accounts.do(ctx, func(transport.AuthMethod) error {
+				calls++
+				return failure
+			})
+			require.Same(t, failure, err)
+			require.Equal(t, 1, calls)
+			logs := strings.Join(sink.snapshot(), "\n")
+			require.Contains(t, logs, test.want)
+			require.NotContains(t, logs, "trying credential")
+			require.NotContains(t, logs, "secret-token", "diagnostics must not print the raw remote error")
+		})
+	}
 }
 
 func TestGitAccountFetchListAndPullEachFallback(t *testing.T) {

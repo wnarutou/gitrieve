@@ -10,6 +10,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/wnarutou/gitrieve/internal/config"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 // gitAccounts belongs to one sync. Each network operation fixes its credential
@@ -66,9 +67,15 @@ func (a *gitAccounts) do(ctx context.Context, operation func(transport.AuthMetho
 		if token := a.tokens[index]; token != "" {
 			auth = &githubGitAuth{BasicAuth: &githttp.BasicAuth{Username: "x-access-token", Password: token}}
 		}
+		if offset > 0 {
+			ui.Printf("Git authentication: trying credential %d/%d", index+1, len(a.tokens))
+		}
 		err := operation(auth)
 		if err == nil || errors.Is(err, git.NoErrAlreadyUpToDate) {
 			a.preferred = index
+			if offset > 0 {
+				ui.Printf("Git authentication: credential %d/%d succeeded", index+1, len(a.tokens))
+			}
 			return err
 		}
 		if ctx.Err() != nil {
@@ -84,6 +91,16 @@ func (a *gitAccounts) do(ctx context.Context, operation func(transport.AuthMetho
 		if firstErr == nil {
 			firstErr = err
 		}
+		// Ordinals refer to the deduplicated configuration order. Do not log
+		// tokens, account names, or raw remote errors in fallback diagnostics.
+		if auth == nil {
+			ui.Printf("Git authentication: anonymous access could not access repository; no credential available for this remote")
+		} else {
+			ui.Printf("Git authentication: credential %d/%d could not access repository", index+1, len(a.tokens))
+		}
+	}
+	if len(a.tokens) > 0 && a.tokens[0] != "" {
+		ui.Printf("Git authentication: all %d distinct credentials failed", len(a.tokens))
 	}
 	return firstErr
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/go-github/v56/github"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
 // Account is an immutable execution-snapshot credential. An unnamed account
@@ -57,11 +58,18 @@ func Do(ctx context.Context, resource string, accounts []Account, fn func(string
 		ctx = context.Background()
 	}
 	c := loadCoordinator()
+	anonymous := len(accounts) == 0 || (len(accounts) == 1 && accounts[0].Token == "")
 	accounts = uniqueAccounts(accounts)
 	excluded := make(map[string]bool, len(accounts))
 	var firstErr error
 	var earliestReset time.Time
+	attempted := 0
 	exhausted := func() error {
+		if anonymous {
+			ui.Printf("GitHub API (%s): anonymous request failed; no credentials configured", resource)
+		} else {
+			ui.Printf("GitHub API (%s): request failed after trying %d/%d distinct credentials", resource, attempted, len(accounts))
+		}
 		if !earliestReset.IsZero() {
 			return &poolRetryError{original: firstErr, at: earliestReset}
 		}
@@ -78,10 +86,27 @@ func Do(ctx context.Context, resource string, accounts []Account, fn func(string
 			if errors.Is(err, ErrNoAccountsAvailable) && firstErr != nil {
 				return exhausted()
 			}
+			if errors.Is(err, ErrNoAccountsAvailable) {
+				ui.Printf("GitHub API (%s): no eligible credentials in pool of %d; no request attempted", resource, len(accounts))
+			}
 			return err
 		}
+		position := 0
+		for i, account := range accounts {
+			if account.Token == p.Token() {
+				position = i + 1
+				break
+			}
+		}
+		if attempted > 0 {
+			ui.Printf("GitHub API (%s): trying credential %d/%d", resource, position, len(accounts))
+		}
+		attempted++
 		failure, obs, err := attemptAccount(ctx, p.(*permit), fn)
 		if err == nil {
+			if attempted > 1 {
+				ui.Printf("GitHub API (%s): credential %d/%d succeeded", resource, position, len(accounts))
+			}
 			return nil
 		}
 		if firstErr == nil {
@@ -92,6 +117,10 @@ func Do(ctx context.Context, resource string, accounts []Account, fn func(string
 		}
 		if failure == noFallback {
 			return err
+		}
+		// Keep fallback visible without exposing credentials or response bodies.
+		if !anonymous {
+			ui.Printf("GitHub API (%s): credential %d/%d unavailable for this request", resource, position, len(accounts))
 		}
 		excluded[p.Token()] = true
 	}

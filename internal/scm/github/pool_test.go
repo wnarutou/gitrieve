@@ -16,7 +16,90 @@ import (
 	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/githubapi/githubapitest"
 	"github.com/wnarutou/gitrieve/internal/typedef"
+	"github.com/wnarutou/gitrieve/internal/ui"
 )
+
+type accountLogSink struct{ messages []string }
+
+func (s *accountLogSink) Log(_, _, _, message string) error {
+	s.messages = append(s.messages, message)
+	return nil
+}
+
+// Exercise real REST 404 responses and the execution log sink together: the
+// final error alone cannot distinguish one attempt from an exhausted pool.
+func TestReleaseAccountFallbackLogsActualAttempts(t *testing.T) {
+	for _, allDenied := range []bool{false, true} {
+		t.Run(fmt.Sprint(allDenied), func(t *testing.T) {
+			ctx, tokens := githubapitest.Context(t)
+			sink := &accountLogSink{}
+			ui.SetSink(sink)
+			defer ui.SetSink(nil)
+			defer ui.Bind("release-fallback", t.Name())()
+			var seen []string
+			githubapitest.Local(t, func(w http.ResponseWriter, r *http.Request) {
+				credential := r.Header.Get("Authorization")
+				seen = append(seen, credential)
+				w.Header().Set("Content-Type", "application/json")
+				if allDenied || credential == "Bearer "+tokens[0] {
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprint(w, `{"message":"Not Found"}`)
+					return
+				}
+				fmt.Fprint(w, `[{"id":42,"tag_name":"v1"}]`)
+			})
+			client, err := NewWithContext(ctx)
+			require.NoError(t, err)
+			releases, err := client.GetReleases(ctx, "wnarutou", "lottery")
+			if allDenied {
+				require.ErrorContains(t, err, "404 Not Found")
+			} else {
+				require.NoError(t, err)
+				require.Len(t, releases, 1)
+				require.Equal(t, "v1", releases[0].GetTagName())
+			}
+			require.Equal(t, []string{"Bearer " + tokens[0], "Bearer " + tokens[1]}, seen)
+			logs := strings.Join(sink.messages, "\n")
+			require.Contains(t, logs, "GitHub API (core): credential 1/2 unavailable for this request")
+			require.Contains(t, logs, "GitHub API (core): trying credential 2/2")
+			if allDenied {
+				require.Contains(t, logs, "GitHub API (core): request failed after trying 2/2 distinct credentials")
+				require.NotContains(t, logs, "credential 2/2 succeeded")
+			} else {
+				require.Contains(t, logs, "GitHub API (core): credential 2/2 succeeded")
+			}
+			for _, token := range tokens {
+				require.NotContains(t, logs, token)
+			}
+		})
+	}
+}
+
+func TestReleaseAnonymousFailureDoesNotClaimCredentialWasTried(t *testing.T) {
+	ctx := config.WithExecutionSnapshot(context.Background(), config.NewExecutionSnapshot(&config.Config{}))
+	githubapi.Configure(githubapi.Config{Concurrency: 1})
+	sink := &accountLogSink{}
+	ui.SetSink(sink)
+	defer ui.SetSink(nil)
+	defer ui.Bind("release-anonymous", t.Name())()
+	requests := 0
+	githubapitest.Local(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		require.Empty(t, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
+	})
+	client, err := NewWithContext(ctx)
+	require.NoError(t, err)
+	_, err = client.GetReleases(ctx, "wnarutou", "lottery")
+	require.ErrorContains(t, err, "404 Not Found")
+	require.Equal(t, 1, requests)
+	logs := strings.Join(sink.messages, "\n")
+	require.Contains(t, logs, "GitHub API (core): anonymous request failed; no credentials configured")
+	require.NotContains(t, logs, "credential 1/1")
+	require.NotContains(t, logs, "1/1 distinct credentials")
+}
 
 func TestPoolSCMAllRequestsUseSelectedCredential(t *testing.T) {
 	for _, operation := range []string{"repos", "releases", "assets", "download"} {
