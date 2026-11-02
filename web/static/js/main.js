@@ -805,7 +805,7 @@ async function renderRepositories(expectedRouteEpoch) {
             <div class="toolbar-group"><input type="text" id="repos-search" placeholder="Filter by name or URL\u2026" value="${esc(state.reposSearch)}">
                 <button id="btn-search-repos" class="btn">Search</button></div>
             <div class="toolbar-group"><label>Health <select id="repos-health">
-                <option value="">All health</option><option value="healthy">Healthy</option><option value="failed">Failed</option>
+                <option value="">All</option><option value="healthy">Healthy</option><option value="failed">Failed</option>
                 <option value="cancelled">Cancelled</option><option value="overdue">Overdue</option><option value="stuck">Stuck</option>
                 <option value="never_synced">Never synced</option><option value="pending">Pending</option>
                 <option value="running">Running</option><option value="syncing">Syncing</option></select></label>
