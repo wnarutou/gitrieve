@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gitrieve</title>
+    <script src="/static/js/theme.js"></script>
     <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body>
@@ -15,6 +16,13 @@
             <a href="#/storage" data-route="storage">Storage</a>
             <a href="#/config" data-route="config">Config</a>
         </div>
+        <label class="theme-control">Theme
+            <select id="theme-select">
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+            </select>
+        </label>
         <div class="nav-status">
             <span id="server-status" class="status-dot" title="Server status"></span>
             <span id="metrics" class="metrics"></span>

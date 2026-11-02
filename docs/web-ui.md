@@ -36,6 +36,14 @@ The default host is `localhost` and the default port is `8080`. Static assets (C
 
 ## Features
 
+### Appearance
+
+Use **Theme** in the top bar to choose **System**, **Light**, or **Dark**.
+The default follows your operating system's color preference, including changes
+while the page is open. An explicit choice overrides the system setting and is
+remembered in this browser. If browser storage is unavailable, theme switching
+still works for the current page session.
+
 ### Job management
 
 - **Trigger an archive** — start a job for any repository defined in your config.
