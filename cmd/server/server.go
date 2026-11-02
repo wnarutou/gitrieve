@@ -5,14 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/spf13/cobra"
 	"github.com/wnarutou/gitrieve/internal/auth"
+	"github.com/wnarutou/gitrieve/internal/buildinfo"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
@@ -24,11 +29,13 @@ import (
 )
 
 type Server struct {
-	router      *gin.Engine
-	scheduler   gocron.Scheduler
-	database    *db.DB
-	executor    *executor.Executor
-	schedulerMu sync.Mutex
+	router           *gin.Engine
+	scheduler        gocron.Scheduler
+	database         *db.DB
+	executor         *executor.Executor
+	schedulerMu      sync.Mutex
+	logCleanupCancel context.CancelFunc
+	logCleanupDone   chan struct{}
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -92,7 +99,8 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	// Main page (public)
 	s.router.GET("/", func(c *gin.Context) {
 		c.HTML(200, "index.html", gin.H{
-			"title": "Gitrieve",
+			"title":   "Gitrieve",
+			"version": buildinfo.Version,
 		})
 	})
 
@@ -109,6 +117,9 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 		apiGroup = s.router.Group("/")
 	}
 
+	apiGroup.GET("/api/maintenance", api.GetMaintenance)
+	apiGroup.POST("/api/maintenance", api.EnterMaintenance)
+	apiGroup.DELETE("/api/maintenance", api.ExitMaintenance)
 	apiGroup.POST("/api/jobs", api.CreateJob)
 	apiGroup.POST("/api/jobs/bulk", api.BulkCreateJobs)
 	apiGroup.DELETE("/api/jobs/:id", api.CancelJob)
@@ -131,6 +142,7 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	apiGroup.POST("/api/config/import", api.ApplyImport)
 	apiGroup.POST("/api/config/reload", api.ReloadConfig)
 	apiGroup.GET("/api/metrics", monitor.GetMetrics)
+	s.startLogCleanup(24 * time.Hour)
 }
 
 func (s *Server) setupTestRoutes(db *db.DB) {
@@ -181,7 +193,7 @@ func (s *Server) RefreshSchedules(cfg *config.Config) error {
 			_, scheduleErr := next.NewJob(
 				gocron.CronJob(repo.Cron, false),
 				gocron.NewTask(func() {
-					if _, executeErr := s.executor.ExecuteJob(repoKey); executeErr != nil {
+					if _, executeErr := s.executor.ExecuteJob(repoKey); executeErr != nil && !errors.Is(executeErr, executor.ErrMaintenance) {
 						ui.Errorf("Failed to execute scheduled repository %s: %s", repoKey, executeErr)
 					}
 				}),
@@ -207,6 +219,10 @@ func (s *Server) Close() error {
 	defer s.schedulerMu.Unlock()
 
 	var schedulerErr, executorErr, databaseErr error
+	if s.logCleanupCancel != nil {
+		s.logCleanupCancel()
+		<-s.logCleanupDone
+	}
 	if s.scheduler != nil {
 		schedulerErr = s.scheduler.Shutdown()
 	}
@@ -222,7 +238,7 @@ func (s *Server) Close() error {
 var Cmd = &cobra.Command{
 	Use:   "server",
 	Short: "start web server",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := config.GetIns()
 		s := NewServer(cfg)
 		defer func() {
@@ -233,8 +249,12 @@ var Cmd = &cobra.Command{
 		serverCfg := internalserver.GetServerConfig()
 		addr := fmt.Sprintf("%s:%s", serverCfg.Host, serverCfg.Port)
 		ui.Printf("Starting server on %s", addr)
-		if err := http.ListenAndServe(addr, s); err != nil {
-			ui.ErrorfExit("Server failed: %s", err)
+		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
 		}
+		return s.serve(ctx, listener)
 	},
 }

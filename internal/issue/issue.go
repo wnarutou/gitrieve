@@ -3,6 +3,7 @@ package issue
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/lock"
+	"github.com/wnarutou/gitrieve/internal/maintenance"
 	"github.com/wnarutou/gitrieve/internal/retry"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/storage"
@@ -33,9 +35,38 @@ func newIssueListOptions(lastUpdate time.Time) *gh.IssueListByRepoOptions {
 	}
 }
 
+// nextIssuePageURL preserves the complete next link, including opaque cursors.
+// NextPage alone loses after/before parameters and cannot identify cursor-only pages.
+func nextIssuePageURL(resp *gh.Response) string {
+	for _, header := range resp.Header.Values("Link") {
+		for _, link := range strings.Split(header, ",") {
+			segments := strings.Split(link, ";")
+			target := strings.TrimSpace(segments[0])
+			if !strings.HasPrefix(target, "<") || !strings.HasSuffix(target, ">") {
+				continue
+			}
+			for _, parameter := range segments[1:] {
+				name, value, ok := strings.Cut(parameter, "=")
+				if !ok || strings.TrimSpace(name) != "rel" {
+					continue
+				}
+				for _, relation := range strings.Fields(strings.Trim(strings.TrimSpace(value), `"`)) {
+					if relation == "next" {
+						return target[1 : len(target)-1]
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
 	}
 	isUpdated := false
 	useCache := repo.UseCache
@@ -77,6 +108,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		return err
 	}
 	defer unlock()
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
+	}
 	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "issues")
 	err = storage.CreateDirIfNotExist(gitDir)
 	if err != nil {
@@ -97,6 +131,14 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	if err != nil {
 		ui.Errorf("Error reading issue directory: %s", err)
 		return err
+	}
+	// Republish cached records even without remote changes. A previous storage
+	// failure must remain repairable without a separate persistent resume queue.
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".md") {
+			isUpdated = true
+			break
+		}
 	}
 
 	var lastUpdate time.Time
@@ -141,32 +183,47 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Printf("The latest update time among all issues is: %s", lastUpdate)
 	}
 
-	// A zero lastUpdate omits since for the initial full sync. Incremental
-	// syncs use the same instant in UTC without reinterpreting wall-clock time.
+	// A zero lastUpdate omits since for the initial full sync.
+	// GitHub's since filter is exclusive. Include the boundary second so a
+	// page stop cannot omit records sharing the last cached update timestamp.
+	if !lastUpdate.IsZero() {
+		lastUpdate = lastUpdate.Add(-time.Second)
+	}
 	opt := newIssueListOptions(lastUpdate)
 
-	cfg := config.GetExecutionConfig(ctx)
-	client := gh.NewClient(nil).WithAuthToken(cfg.GitHubToken)
-	for {
+	accounts := config.GetGitHubAccountsContext(ctx)
+	baseClient := gh.NewClient(nil)
+	var nextURL string
+	fullyListed := false
+	for page := 1; ; page++ {
+		if maintenance.Requested(ctx) {
+			break
+		}
 		var (
 			issues []*gh.Issue
 			resp   *gh.Response
 		)
 		err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
-			permit, acquireErr := githubapi.Acquire(ctx, "core")
-			if acquireErr != nil {
-				return acquireErr
-			}
-			var apiErr error
-			issues, resp, apiErr = client.Issues.ListByRepo(ctx, r.Owner, r.Name, opt)
-			permit.Done(githubapi.ObserveREST(resp, apiErr))
-			return apiErr
+			return githubapi.Do(ctx, "core", accounts, func(token string) (githubapi.Observation, error) {
+				client := githubapi.NewREST(baseClient, token)
+				var apiErr error
+				if nextURL == "" {
+					issues, resp, apiErr = client.Issues.ListByRepo(ctx, r.Owner, r.Name, opt)
+				} else {
+					var req *http.Request
+					req, apiErr = client.NewRequest(http.MethodGet, nextURL, nil)
+					if apiErr == nil {
+						resp, apiErr = client.Do(ctx, req, &issues)
+					}
+				}
+				return githubapi.ObserveREST(resp, apiErr), apiErr
+			})
 		})
 		if err != nil {
 			ui.Errorf("Error fetching issues, %s", err)
 			return err
 		}
-		ui.Printf("Fetching page %d, total %d issues", opt.Page, len(issues))
+		ui.Printf("Fetching page %d, total %d issues", page, len(issues))
 
 		// Verified that for each issue, if the issue or any comment under it is updated, the issue's update time will be updated
 		// Traverse all issues
@@ -180,20 +237,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			}
 			var allComments []*gh.IssueComment
 			for {
-				var (
-					comments []*gh.IssueComment
-					resp     *gh.Response
-				)
-				err := retry.Do(ctx, config.GetRetryConfigContext(ctx), func() error {
-					permit, acquireErr := githubapi.Acquire(ctx, "core")
-					if acquireErr != nil {
-						return acquireErr
-					}
-					var apiErr error
-					comments, resp, apiErr = client.Issues.ListComments(ctx, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
-					permit.Done(githubapi.ObserveREST(resp, apiErr))
-					return apiErr
-				})
+				comments, resp, err := listIssueComments(ctx, baseClient, accounts, r.Owner, r.Name, issue.GetNumber(), commentsOpt)
 				if err != nil {
 					ui.Errorf("Error fetching comments of issue %d, %s", issue.GetNumber(), err)
 					return err
@@ -255,10 +299,11 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			}
 		}
 
-		if resp.NextPage == 0 {
+		nextURL = nextIssuePageURL(resp)
+		fullyListed = nextURL == ""
+		if maintenance.Requested(ctx) || fullyListed {
 			break
 		}
-		opt.Page = resp.NextPage
 	}
 
 	if isUpdated {
@@ -272,6 +317,12 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		}
 
 		base := "issues.tar.gz"
+		if !useCache && !fullyListed {
+			// A fresh no-cache workdir contains only this run's downloaded
+			// pages. Preserve the canonical archive until a complete listing
+			// is available, and retain this page as a separate backup artifact.
+			base = "issues.partial." + path.Base(workingDir) + ".tar.gz"
+		}
 
 		// Handle storages
 		for _, s := range storages {
@@ -291,5 +342,11 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		ui.Printf("All is up to date, no need to restore")
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
+	}
 	return nil
 }

@@ -117,6 +117,96 @@ test('theme still initializes and switches when browser storage is blocked', () 
     assert.equal(page.root.dataset.theme, 'dark');
 });
 
+function maintenanceHarness(responses) {
+    const controls = Object.fromEntries(['#maintenance-status', '#btn-maintenance', '#btn-maintenance-refresh'].map(id => [id, {
+        textContent: '', disabled: false, addEventListener() {},
+    }]));
+    const requests = [];
+    const timers = [];
+    const context = vm.createContext({
+        document: { addEventListener() {}, querySelector: id => controls[id] || null, querySelectorAll: () => [] },
+        window: { addEventListener() {}, GitrievePagination: pagination },
+        location: { hash: '#/repositories' }, URLSearchParams,
+        setTimeout(fn) { timers.push(fn); return timers.length; }, clearTimeout() {}, setInterval() {},
+        fetch: async (path, opts) => {
+            requests.push({path, method: opts.method || 'GET'});
+            return {ok:true, json:async () => ({data: responses.shift()})};
+        },
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'static/js/main.js'), 'utf8'), context);
+    return {context, controls, requests, timers};
+}
+
+test('maintenance readiness waits for drain and never reloads repositories', async () => {
+    const h = maintenanceHarness([
+        {enabled:true, ready:false, running:2, pending:1, preparing:1},
+        {enabled:true, ready:true, running:0, pending:0, preparing:0},
+    ]);
+    await vm.runInContext('refreshMaintenance()',h.context);
+    assert.equal(h.controls['#btn-maintenance'].disabled,true);
+    assert.match(h.controls['#maintenance-status'].textContent,/2/);
+    assert.doesNotMatch(h.controls['#maintenance-status'].textContent,/可以安全升级/);
+    assert.equal(h.timers.length,1);
+    await h.timers[0]();
+    assert.match(h.controls['#maintenance-status'].textContent,/可以安全升级/);
+    assert.equal(h.controls['#btn-maintenance'].disabled,false);
+    assert.deepEqual(h.requests.map(r => r.path),['/api/maintenance','/api/maintenance']);
+});
+
+test('maintenance controls enter and leave without submitting jobs', async () => {
+    const h = maintenanceHarness([
+        {enabled:false, ready:false}, {enabled:true, ready:true}, {enabled:false, ready:false},
+    ]);
+    await vm.runInContext('refreshMaintenance()',h.context);
+    await vm.runInContext('toggleMaintenance()',h.context);
+    assert.match(h.controls['#btn-maintenance'].textContent,/退出维护/);
+    await vm.runInContext('toggleMaintenance()',h.context);
+    assert.match(h.controls['#btn-maintenance'].textContent,/进入维护/);
+    assert.deepEqual(h.requests.map(r => r.method),['GET','POST','DELETE']);
+    assert.ok(h.requests.every(r => r.path === '/api/maintenance'));
+});
+
+test('maintenance persistence errors do not show safe upgrade or allow exit', async () => {
+    const h = maintenanceHarness([
+        {enabled:true, drained:true, ready:false, error:'database write failed'},
+    ]);
+    await vm.runInContext('refreshMaintenance()',h.context);
+    assert.match(h.controls['#maintenance-status'].textContent,/database write failed/);
+    assert.doesNotMatch(h.controls['#maintenance-status'].textContent,/可以安全升级/);
+    assert.equal(h.controls['#btn-maintenance'].disabled,true);
+    assert.equal(h.timers.length,0);
+    await vm.runInContext('toggleMaintenance()',h.context);
+    assert.equal(h.requests.length,1);
+});
+
+test('server shutdown cannot be reversed from the maintenance control', async () => {
+    const h = maintenanceHarness([{enabled:true, ready:true, shutting_down:true}]);
+    await vm.runInContext('refreshMaintenance()',h.context);
+    assert.equal(h.controls['#btn-maintenance'].disabled,true);
+    await vm.runInContext('toggleMaintenance()',h.context);
+    assert.equal(h.requests.length,1);
+});
+
+test('stuck repository badges retain the active execution status', () => {
+    const context = vm.createContext({
+        document: { addEventListener() {} },
+        window: { addEventListener() {}, GitrievePagination: pagination },
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'static/js/main.js'), 'utf8'), context);
+    for (const status of ['running', 'pending']) {
+        context.repo = { health_status: 'stuck', last_status: status, stuck: true };
+        const html = vm.runInContext('repositoryHealthBadge(repo)', context);
+        const labels = [...html.matchAll(/<span\b[^>]*>([^<]*)<\/span>/g)].map(match => match[1]);
+        assert.deepEqual(labels, [status, 'stuck']);
+    }
+    for (const health of ['running', 'pending', 'healthy', 'failed', 'overdue', 'never_synced']) {
+        context.repo = { health_status: health, last_status: health, stuck: false };
+        const html = vm.runInContext('repositoryHealthBadge(repo)', context);
+        const labels = [...html.matchAll(/<span\b[^>]*>([^<]*)<\/span>/g)].map(match => match[1]);
+        assert.deepEqual(labels, [health]);
+    }
+});
+
 test('renders repository actions before the repository name', async () => {
     const app = { innerHTML: '' };
     const control = () => ({
