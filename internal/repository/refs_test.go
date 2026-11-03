@@ -214,7 +214,7 @@ func TestSyncResumesAfterInterruptedConflictRelocation(t *testing.T) {
 	defer cancel()
 	original := f.local.Storer
 	f.local.Storer = &interruptRefRemoval{Storer: original, cancel: cancel}
-	_, err := syncBranches(ctx, f.local, true, nil)
+	_, err := syncBranches(ctx, f.local, true, nil, newGitAccounts(context.Background(), "example.test"), "code")
 	require.ErrorIs(t, err, context.Canceled)
 	f.local.Storer = original
 	requireArchived(t, f.local, "refs/remotes/origin/noa/v8/old", f.old)
@@ -305,7 +305,7 @@ func TestArchiveWriteFailureNeverRemovesConflictingRef(t *testing.T) {
 	f := newRefFixture(t, "noa/v8", true)
 	replaceRemoteBranch(t, f, "noa/v8", "noa/v8/new")
 	f.local.Storer = &failedArchiveWrite{Storer: f.local.Storer}
-	_, err := syncBranches(context.Background(), f.local, true, nil)
+	_, err := syncBranches(context.Background(), f.local, true, nil, newGitAccounts(context.Background(), "example.test"), "code")
 	require.ErrorContains(t, err, "archive storage failed")
 	requireRefHash(t, f.local, "refs/remotes/origin/noa/v8", f.old)
 }
@@ -330,7 +330,7 @@ func TestArchiveVerificationFailureNeverRemovesConflictingRef(t *testing.T) {
 	f := newRefFixture(t, "noa/v8", true)
 	replaceRemoteBranch(t, f, "noa/v8", "noa/v8/new")
 	f.local.Storer = &corruptArchiveWrite{Storer: f.local.Storer, wrongHash: f.base}
-	_, err := syncBranches(context.Background(), f.local, true, nil)
+	_, err := syncBranches(context.Background(), f.local, true, nil, newGitAccounts(context.Background(), "example.test"), "code")
 	require.ErrorContains(t, err, "archive verification failed")
 	requireRefHash(t, f.local, "refs/remotes/origin/noa/v8", f.old)
 	requireRefHash(t, f.local, "refs/heads/noa/v8", f.old)
@@ -383,7 +383,7 @@ func TestSyncRecordsPendingBeforeAdvancingPreviouslySkippedBranch(t *testing.T) 
 	_, err = os.Stat(filepath.Join(f.localDir, ".git", "gitrieve-sync-pending"))
 	require.True(t, os.IsNotExist(err))
 	f.local.Storer = &requirePendingBeforeMerge{Storer: f.local.Storer}
-	_, err = syncBranches(context.Background(), f.local, true, nil)
+	_, err = syncBranches(context.Background(), f.local, true, nil, newGitAccounts(context.Background(), "example.test"), "code")
 	require.NoError(t, err)
 	requireRefHash(t, f.local, "refs/heads/feature", latest)
 }

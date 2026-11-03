@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/wnarutou/gitrieve/internal/ui"
 )
 
@@ -63,12 +64,21 @@ func completeBranchSync(repo *git.Repository) error {
 // Archive refs are additive: even a tracking-only branch or a force-pushed tip
 // remains reachable. Only conflicting tracking names may be removed, and only
 // after their durable archive refs have been verified.
-func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, progress io.Writer) (bool, error) {
+func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, progress io.Writer, accounts *gitAccounts, component string) (bool, error) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
 		return false, err
 	}
-	advertised, err := remote.ListContext(ctx, &git.ListOptions{})
+	accounts.restrictRemote(remote.Config().URLs)
+	ui.Printf("Sync phase: remote reference discovery started")
+	var advertised []*plumbing.Reference
+	err = accounts.do(ctx, func(auth transport.AuthMethod) error {
+		return retryGitEOF(ctx, component+" reference discovery", func() error {
+			var listErr error
+			advertised, listErr = remote.ListContext(ctx, &git.ListOptions{Auth: auth})
+			return listErr
+		})
+	})
 	if err != nil {
 		return false, fmt.Errorf("list remote branches: %w", err)
 	}
@@ -128,7 +138,21 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 	}
 	// Keep the existing unbounded fetch behavior even for a shallow initial
 	// clone. Limiting this fetch can leave an ancestry gap between cached tips.
-	err = repo.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: specs, Force: true, Progress: progress})
+	ui.Printf("Sync phase: Git fetch started")
+	err = accounts.do(ctx, func(auth transport.AuthMethod) error {
+		return retryGitEOF(ctx, component+" fetch", func() error {
+			// A failed previous attempt may have updated some tracking refs.
+			// Protect those tips too before a retry or account fallback fetch.
+			if _, err := archiveTrackingRefs(ctx, repo); err != nil {
+				return err
+			}
+			fetchErr := repo.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: specs, Force: true, Progress: progress, Auth: auth})
+			if store, ok := repo.Storer.(interface{ operationError(error) error }); ok {
+				return store.operationError(fetchErr)
+			}
+			return fetchErr
+		})
+	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return changed, fmt.Errorf("fetch remote branches: %w", err)
 	}
@@ -171,13 +195,35 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		if branch == defaultBranch {
 			defaultLocal = local
 		}
+		if branch != defaultBranch {
+			wasPending, err := pendingBranchSync(repo)
+			if err != nil {
+				return changed, err
+			}
+			if err := recordBranchSync(repo); err != nil {
+				return changed, err
+			}
+			updated, err := updateArchivedBranch(repo, local.Short(), tracking.Hash())
+			if errors.Is(err, git.ErrNonFastForwardUpdate) {
+				ui.Printf("Keeping local branch %s unchanged: remote history is not a fast-forward; remote tip is archived.\n", local.Short())
+			} else if err != nil {
+				return changed, err
+			}
+			if !updated && !wasPending {
+				if err := completeBranchSync(repo); err != nil {
+					return changed, err
+				}
+			}
+			changed = changed || updated
+			continue
+		}
 		current, err := repo.Reference(local, false)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			// Save the mapping before creating the branch so a retry can reuse it.
 			if err := recordBranchSync(repo); err != nil {
 				return changed, err
 			}
-			if err := w.Checkout(&git.CheckoutOptions{Branch: local, Create: true, Force: true, Hash: tracking.Hash()}); err != nil {
+			if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: local, Create: true, Force: true, Hash: tracking.Hash()}); err != nil {
 				return changed, err
 			}
 			changed = true
@@ -189,7 +235,10 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		if current.Hash() == tracking.Hash() {
 			continue
 		}
-		if err := w.Checkout(&git.CheckoutOptions{Branch: local, Force: true}); err != nil {
+		if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: local, Force: true}); err != nil {
+			return changed, err
+		}
+		if err := restoreManagedWorktree(repo, w); err != nil {
 			return changed, err
 		}
 		// Pull uses the same fast-forward-only merge, but also fetches again.
@@ -217,9 +266,10 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 			return changed, err
 		}
 		changed = true
-		if err := w.Checkout(&git.CheckoutOptions{Branch: local, Force: true}); err != nil {
+		if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: local, Force: true}); err != nil {
 			return changed, err
 		}
+		ui.Printf("local branch %s has successed pull from remote branch origin/%s, already up to date. \n", local.Short(), branch.Short())
 	}
 	if err := ctx.Err(); err != nil {
 		return changed, err
@@ -230,7 +280,10 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		}
 		changed = true
 	}
-	if err := w.Checkout(&git.CheckoutOptions{Branch: defaultLocal, Force: true}); err != nil {
+	if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: defaultLocal, Force: true}); err != nil {
+		return changed, err
+	}
+	if err := restoreManagedWorktree(repo, w); err != nil {
 		return changed, err
 	}
 	return changed, nil

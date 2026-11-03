@@ -12,6 +12,7 @@ import (
 	gh "github.com/google/go-github/v56/github"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/lock"
+	"github.com/wnarutou/gitrieve/internal/maintenance"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/scm/github"
 	"github.com/wnarutou/gitrieve/internal/storage"
@@ -35,6 +36,9 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
+	}
 	releaseNumLimit := config.GetReleaseNumLimitContext(ctx)
 	releaseSizeLimit := config.GetReleaseSizeLimitContext(ctx)
 	r, err := scm.NewRepository(repo.URL)
@@ -49,6 +53,9 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 		return err
 	}
 	defer unlock()
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
+	}
 	c, err := github.NewWithContext(ctx)
 	if err != nil {
 		return err
@@ -74,6 +81,9 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if maintenance.Requested(ctx) {
+			return maintenance.ErrRequested
+		}
 		if releaseSizeLimit >= 0 {
 			if allReleaseSize >= releaseSizeLimit {
 				ui.Printf("The size %d limit has been reached, no more downloading", releaseSizeLimit)
@@ -87,6 +97,12 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 		}
 		reserveTagName = append(reserveTagName, release.GetTagName())
 		for _, asset := range assets {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if maintenance.Requested(ctx) {
+				return maintenance.ErrRequested
+			}
 			if asset.GetState() != "uploaded" {
 				continue
 			}
@@ -181,42 +197,45 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if maintenance.Requested(ctx) {
+				return maintenance.ErrRequested
+			}
 		}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
+	}
 	for _, s := range storages {
+		if s.Type == storage.FileStorage {
+			root, err := filepath.Abs(filepath.Join(s.Path, r.Host, r.Owner, r.Name, "release"))
+			if err != nil {
+				return err
+			}
+			if err := cleanupFileReleases(ctx, root, reserveTagName); err != nil {
+				return err
+			}
+			continue
+		}
 		backend, err := storage.GetStorage(s)
 		if err != nil {
 			return err
 		}
 
-		var objectMetaInfo []storage.ObjectMetaInfo
-		if s.Type == storage.FileStorage {
-			if filepath.IsAbs(s.Path) {
-				objectMetaInfo, err = backend.ListObjectMetaInfo(path.Join(s.Path, r.Host, r.Owner, r.Name, "release"))
-				if err != nil {
-					continue
-				}
-			} else {
-				currentDir, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				objectMetaInfo, err = backend.ListObjectMetaInfo(path.Join(currentDir, s.Path, r.Host, r.Owner, r.Name, "release"))
-				if err != nil {
-					continue
-				}
-			}
-		} else {
-			objectMetaInfo, err = backend.ListObjectMetaInfo(path.Join(s.Path, r.Host, r.Owner, r.Name, "release"))
-			if err != nil {
-				continue
-			}
+		objectMetaInfo, err := backend.ListObjectMetaInfo(path.Join(s.Path, r.Host, r.Owner, r.Name, "release"))
+		if err != nil {
+			continue
 		}
 
 		for _, dirInfo := range objectMetaInfo {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if maintenance.Requested(ctx) {
+				return maintenance.ErrRequested
+			}
 			dirName := filepath.Base(dirInfo.Path)
 			found := false
 			for _, tagName := range reserveTagName {
@@ -233,6 +252,12 @@ func DownloadAllAssets(ctx context.Context, repo typedef.Repository, storages []
 				ui.Printf("Deleted directory %s", dirInfo.Path)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if maintenance.Requested(ctx) {
+		return maintenance.ErrRequested
 	}
 	return nil
 }
