@@ -207,6 +207,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 			return githubapi.Do(ctx, "core", accounts, func(token string) (githubapi.Observation, error) {
 				client := githubapi.NewREST(baseClient, token)
 				var apiErr error
+				resp = nil
 				if nextURL == "" {
 					issues, resp, apiErr = client.Issues.ListByRepo(ctx, r.Owner, r.Name, opt)
 				} else {
@@ -216,6 +217,7 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 						resp, apiErr = client.Do(ctx, req, &issues)
 					}
 				}
+				logIssueRequest(fmt.Sprintf("Issues request for %s/%s batch %d", r.Owner, r.Name, page), accounts, token, resp, apiErr)
 				return githubapi.ObserveREST(resp, apiErr), apiErr
 			})
 		})

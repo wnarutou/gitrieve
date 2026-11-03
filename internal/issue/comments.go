@@ -3,6 +3,7 @@ package issue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -30,13 +31,11 @@ func listIssueComments(ctx context.Context, baseClient *gh.Client, accounts []gi
 				client := githubapi.NewREST(baseClient, token)
 				var requestErr error
 				comments, resp, requestErr = client.Issues.ListComments(ctx, owner, repo, number, opt)
-				if requestErr != nil {
-					requestID := "unknown"
-					if resp != nil && resp.Response != nil && resp.Header.Get("X-GitHub-Request-Id") != "" {
-						requestID = resp.Header.Get("X-GitHub-Request-Id")
-					}
-					ui.Printf("Comments request for %s/%s issue #%d failed (GitHub Request ID: %s): %v", owner, repo, number, requestID, requestErr)
+				page := 1
+				if opt != nil && opt.Page > 0 {
+					page = opt.Page
 				}
+				logIssueRequest(fmt.Sprintf("Comments request for %s/%s issue #%d page %d", owner, repo, number, page), accounts, token, resp, requestErr)
 				return githubapi.ObserveREST(resp, requestErr), requestErr
 			})
 			if apiErr == nil {
