@@ -94,10 +94,13 @@ reloads for this page.
 ### Deletion-safe sync (critical invariant — do not regress)
 A core design goal: **once code and history are pulled locally, a sync must never delete them**, even when the upstream repo is taken down, DMCA-disabled, deleted, made private, or replaced with a single README. This makes gitrieve a true archive/backup tool, not a mirror. When modifying `internal/repository/repository.go` (`Sync`), preserve these guarantees:
 
-- **Remote unreachable → early exit.** `gitRepo.Fetch` failure returns early (`repository.go` ~line 159-162); no archiving and no `os.RemoveAll` cleanup runs, so the local cache and prior archived snapshots are untouched. Do NOT move cleanup before fetch or swallow fetch errors to continue.
-- **Branches are added, never deleted.** The `refs.ForEach` loop (`repository.go` ~line 199-286) only creates/updates local branches; it never deletes a local branch. Upstream-deleted branches must remain locally.
-- **Pull, not reset.** Updates use `w.Pull` (merge), never `git reset --hard origin`. A force-push rewriting the upstream default branch only moves the `origin/*` tracking refs; local branches and their old commit objects must not be overwritten or discarded.
-- **Old commits retained.** Commits are immutable objects and the sync never force-moves local refs, so already-pulled history stays in the local `.git` object store and is recoverable via `git checkout <old-hash>`.
+- **Remote unreachable → early exit.** `syncBranches` lists the remote before changing refs. List/fetch failures return before archive upload or cache cleanup. A failed fetch may leave additive archive refs or relocated tracking names, but their old history stays reachable. Do NOT move cleanup before fetch or swallow fetch errors to continue.
+- **Local branches are added, never deleted.** Upstream-deleted local branches remain unchanged. New branches that collide with an existing local branch path use a stable `gitrieve-<hash>` alias with the original upstream recorded in Git branch configuration.
+- **Fast-forward merge, never reset.** Updates merge already-fetched tips with `Repository.Merge(FastForwardMerge)`, retaining the same fast-forward-only rule as `w.Pull` without its extra network fetch. A force-push may move `origin/*` tracking refs, but never force-moves existing local branches. Checkout refreshes the working tree after a successful merge.
+- **Old commits retained by permanent refs.** Before and after fetch, origin tracking tips are pinned under `refs/gitrieve/archive/`. Only a tracking ref whose path conflicts with an incoming branch may be removed, after its archive ref has been written and verified; unrelated stale refs stay in place. This also protects branches when `allBranches: false`. Archive refs are never pruned automatically.
+- **Interrupted uploads retry.** `.git/gitrieve-sync-pending` is set before reference changes and cleared only after a successful sync and all configured archive writes. An up-to-date fetch must not skip publishing pending history.
+
+See `docs/git-history-preservation.md` for archive reference encoding and recovery.
 
 Recommended-for-recoverability config: `allBranches: true` (pull every branch's commits) and `useCache: true` (keep the local `.git` cache across syncs; otherwise the working dir is removed at the end of each sync).
 

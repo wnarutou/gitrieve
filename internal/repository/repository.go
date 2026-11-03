@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
@@ -219,167 +217,17 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		return err
 	}
 
-	// fetch all remote branches
-	err = gitRepo.FetchContext(syncCtx, &git.FetchOptions{
-		RemoteName: "origin",
-		RefSpecs: []config.RefSpec{
-			config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
-		},
-		Force:    true,
-		Progress: progress,
-	})
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		ui.Errorf("Error fetching remote branches, %s", err)
-		return err
-	}
-
-	// get remote references
-	refs, err := gitRepo.References()
+	branchesUpdated, err := syncBranches(syncCtx, gitRepo, allBranches, progress)
 	if err != nil {
-		ui.Errorf("Error get remote references, %s", err)
+		ui.Errorf("Error synchronizing branches, %s", err)
 		return err
 	}
-
-	// get worktree
-	w, err := gitRepo.Worktree()
+	isUpdated = isUpdated || branchesUpdated
+	pending, err := pendingBranchSync(gitRepo)
 	if err != nil {
-		ui.Errorf("Error get worktree, %s", err)
 		return err
 	}
-
-	// get remote default branch
-	var remoteDefaultBranchName string
-	var remoteDefaultBranchRef plumbing.ReferenceName
-
-	remote, err := gitRepo.Remote("origin")
-	if err != nil {
-		ui.Errorf("Error get remote, %s", err)
-		return err
-	}
-	remoteRefs, err := remote.ListContext(syncCtx, &git.ListOptions{})
-	if err != nil {
-		// The default branch cannot be determined without this listing, and a
-		// cancellation must stop the sync here rather than falling through.
-		ui.Errorf("Error get remote references, %s", err)
-		return err
-	}
-	for _, ref := range remoteRefs {
-		if ref.Name() == "HEAD" {
-			remoteDefaultBranchRef = ref.Target()
-			remoteDefaultBranchName = remoteDefaultBranchRef.Short()
-		}
-	}
-
-	// find all remote branches
-	if err := refs.ForEach(func(ref *plumbing.Reference) error {
-		if ref.Name().IsRemote() {
-			// get remote branch name
-			remoteBranchName := ref.Name().Short()
-
-			// if not pull all branches and this branch is not default then skip
-			if !allBranches && (remoteDefaultBranchName != remoteBranchName) {
-				return nil
-			}
-
-			// set local branch name
-			localBranchName := remoteBranchName[len("origin/"):]
-
-			// create local branch reference
-			branchRef := plumbing.NewBranchReferenceName(localBranchName)
-
-			// check local branch exist or not
-			_, err := gitRepo.Reference(branchRef, false)
-
-			// if local branch not exist
-			if err == plumbing.ErrReferenceNotFound {
-				isUpdated = true
-				// create local branch and switch to the new local branch
-				err = w.Checkout(&git.CheckoutOptions{
-					Branch: branchRef,
-					Create: true,
-					Force:  true,
-					// create local branch basing on ref.Hash(), that means head of remote branch,
-					//   to avoid content of this new branch is a copy of last local branch,
-					//   which will cause non-fast-forward update.
-					Hash: ref.Hash(),
-				})
-				if err != nil {
-					ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
-					return err
-				}
-				ui.Printf("local branch %s has been checked out. \n", localBranchName)
-
-				// set upstream branch of local branch to avoid the local branch
-				//   without a tracking remote branch
-				err = gitRepo.CreateBranch(&config.Branch{
-					Name:   localBranchName,
-					Remote: "origin",
-					Merge:  branchRef,
-				})
-				if err != nil {
-					ui.Errorf("Error setting %s's upstream branch , %s", localBranchName, err)
-					return err
-				}
-
-				ui.Printf("local branch %s has been set to track remote branch %s. \n", localBranchName, remoteBranchName)
-			} else if err != nil {
-				ui.Errorf("Error checking local branch %s existing, %s", localBranchName, err)
-				return err
-			} else {
-				ui.Printf("local branch %s exists, skip creating. \n", localBranchName)
-			}
-
-			// switch to local branch, only after that we can do pull
-			err = w.Checkout(&git.CheckoutOptions{
-				Branch: branchRef,
-				// abandon the modify of local
-				Force: true,
-			})
-			if err != nil {
-				ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
-				return err
-			}
-
-			// pull from upstream branch
-			err = w.PullContext(syncCtx, &git.PullOptions{
-				RemoteName:    "origin",
-				ReferenceName: branchRef,
-				// pull all commits, not only the latest
-				Depth:    depth,
-				Progress: progress,
-			})
-			if err == git.NoErrAlreadyUpToDate {
-				ui.Printf("local branch %s already up to date. \n", localBranchName)
-			} else if err != nil {
-				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
-				if syncCtx.Err() != nil {
-					// Cancelled — stop the whole sync instead of continuing to
-					// the remaining branches. The fetched objects stay in the
-					// local cache and are picked up on the next run.
-					return err
-				}
-			} else {
-				isUpdated = true
-				ui.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
-			}
-		}
-		return nil
-	}); err != nil {
-		// refs.ForEach stops at the first error, including a cancellation.
-		ui.Errorf("Error updating branches: %s", err)
-		return err
-	}
-
-	// switch to default branch
-	err = w.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName(remoteDefaultBranchName),
-		// abandon the modify of local
-		Force: true,
-	})
-	if err != nil {
-		ui.Errorf("Error checkout default branch %s, %s", remoteDefaultBranchRef, err)
-		return err
-	}
+	isUpdated = isUpdated || pending
 
 	if isUpdated {
 		if syncCtx.Err() != nil {
@@ -429,6 +277,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	if syncCtx.Err() != nil {
 		// Cancelled — stop before any remaining work (e.g. temp-dir cleanup).
 		return syncCtx.Err()
+	}
+	if err := completeBranchSync(gitRepo); err != nil {
+		return err
 	}
 
 	// cleanup
