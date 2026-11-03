@@ -23,7 +23,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
-// Keep real clone/fetch/list/pull and on-disk cache behavior, replacing only
+// Keep real clone/list/fetch and on-disk cache behavior, replacing only
 // the remote transport with an embedded Git server and injected failures.
 type eofTestTransport struct {
 	transport.Transport
@@ -102,7 +102,7 @@ func setupEOFSync(t *testing.T, wiki bool, fail func(int) error) (typedef.Reposi
 
 func TestSyncRecoversFromEOFInEachGitPhase(t *testing.T) {
 	for _, wiki := range []bool{false, true} {
-		for index, phase := range []string{"clone", "fetch", "references", "pull"} {
+		for index, phase := range []string{"clone", "references", "fetch"} {
 			t.Run(fmt.Sprintf("wiki=%t/%s", wiki, phase), func(t *testing.T) {
 				repo, cacheDir, remote := setupEOFSync(t, wiki, func(call int) error {
 					if call == index+1 {
@@ -111,7 +111,7 @@ func TestSyncRecoversFromEOFInEachGitPhase(t *testing.T) {
 					return nil
 				})
 				require.NoError(t, Sync(context.Background(), repo, wiki, nil))
-				require.Equal(t, 5, remote.calls, "four Git phases plus one failed attempt")
+				require.Equal(t, 4, remote.calls, "three network phases plus one failed attempt; branch updates do not fetch again")
 				contents, err := os.ReadFile(filepath.Join(cacheDir, "Home.md"))
 				require.NoError(t, err)
 				require.Equal(t, "archived contents\n", string(contents))
@@ -128,7 +128,7 @@ func TestSyncRecoversFromEOFInEachGitPhase(t *testing.T) {
 
 func TestSyncEOFExhaustionFailsAndPreservesCompletedClone(t *testing.T) {
 	for _, wiki := range []bool{false, true} {
-		for index, phase := range []string{"clone", "fetch", "references", "pull"} {
+		for index, phase := range []string{"clone", "references", "fetch"} {
 			t.Run(fmt.Sprintf("wiki=%t/%s", wiki, phase), func(t *testing.T) {
 				repo, cacheDir, remote := setupEOFSync(t, wiki, func(call int) error {
 					if call >= index+1 {
@@ -137,7 +137,7 @@ func TestSyncEOFExhaustionFailsAndPreservesCompletedClone(t *testing.T) {
 					return nil
 				})
 				err := Sync(context.Background(), repo, wiki, nil)
-				require.ErrorIs(t, err, io.EOF, "exhausted pull retries must not report success")
+				require.ErrorIs(t, err, io.EOF, "exhausted Git retries must not report success")
 				require.Equal(t, index+4, remote.calls, "only three retries after the failed initial attempt")
 				if phase == "clone" {
 					_, err := os.Stat(cacheDir)
@@ -179,7 +179,7 @@ func TestSyncRetriesTruncatedClonePack(t *testing.T) {
 			repo, cacheDir, remote := setupEOFSync(t, wiki, func(int) error { return nil })
 			remote.truncateFirstPack = true
 			require.NoError(t, Sync(context.Background(), repo, wiki, nil))
-			require.Equal(t, 5, remote.calls)
+			require.Equal(t, 4, remote.calls)
 			contents, err := os.ReadFile(filepath.Join(cacheDir, "Home.md"))
 			require.NoError(t, err)
 			require.Equal(t, "archived contents\n", string(contents))

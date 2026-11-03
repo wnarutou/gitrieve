@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -263,245 +262,16 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	}
 	accounts.restrictRemote(remote.Config().URLs)
 
-	// fetch all remote branches
-	ui.Printf("Sync phase: Git fetch started")
-	err = accounts.do(syncCtx, func(auth transport.AuthMethod) error {
-		return retryGitEOF(syncCtx, component+" fetch", func() error {
-			return store.operationError(gitRepo.FetchContext(syncCtx, &git.FetchOptions{
-				RemoteName: "origin",
-				RefSpecs: []config.RefSpec{
-					config.RefSpec("+refs/heads/*:refs/remotes/origin/*"),
-				},
-				Auth:     auth,
-				Force:    true,
-				Progress: progress,
-			}))
-		})
-	})
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		ui.Errorf("Error fetching remote branches, %s", err)
-		return err
-	}
-
-	// get remote references
-	refs, err := gitRepo.References()
+	branchesUpdated, err := syncBranches(syncCtx, gitRepo, allBranches, progress, accounts, component)
 	if err != nil {
-		ui.Errorf("Error get remote references, %s", err)
+		ui.Errorf("Error synchronizing branches, %s", err)
 		return err
 	}
-
-	// get worktree
-	w, err := gitRepo.Worktree()
-	if err != nil {
-		ui.Errorf("Error get worktree, %s", err)
-		return err
-	}
-
-	// get remote default branch
-	var remoteDefaultBranchName string
-	var remoteDefaultBranchRef plumbing.ReferenceName
-
-	ui.Printf("Sync phase: remote reference discovery started")
-	var remoteRefs []*plumbing.Reference
-	err = accounts.do(syncCtx, func(auth transport.AuthMethod) error {
-		return retryGitEOF(syncCtx, component+" reference discovery", func() error {
-			var listErr error
-			remoteRefs, listErr = remote.ListContext(syncCtx, &git.ListOptions{Auth: auth})
-			return listErr
-		})
-	})
-	if err != nil {
-		// The default branch cannot be determined without this listing, and a
-		// cancellation must stop the sync here rather than falling through.
-		ui.Errorf("Error get remote references, %s", err)
-		return err
-	}
-	for _, ref := range remoteRefs {
-		if ref.Name() == "HEAD" {
-			remoteDefaultBranchRef = ref.Target()
-			remoteDefaultBranchName = remoteDefaultBranchRef.Short()
-		}
-	}
-	// A failed checkout in an earlier sync may already have created a branch
-	// ref without producing an archive. Recover the default worktree below and
-	// publish an archive even when all fetched branch tips are unchanged.
-	head, err := gitRepo.Head()
+	pending, err := pendingBranchSync(gitRepo)
 	if err != nil {
 		return err
 	}
-	if head.Name() != remoteDefaultBranchRef {
-		isUpdated = true
-	}
-
-	// find all remote branches
-	if err := refs.ForEach(func(ref *plumbing.Reference) error {
-		if syncCtx.Err() != nil {
-			return syncCtx.Err()
-		}
-		if ref.Name().IsRemote() && ref.Type() == plumbing.HashReference {
-			// get remote branch name
-			remoteBranchName := ref.Name().Short()
-			localBranchName, isOrigin := strings.CutPrefix(remoteBranchName, "origin/")
-			if !isOrigin {
-				return nil
-			}
-
-			// if not pull all branches and this branch is not default then skip
-			if !allBranches && (remoteDefaultBranchName != localBranchName) {
-				return nil
-			}
-
-			// Non-default branches only need refs and objects in the archive.
-			// Checking them out can fail for names that Git stores successfully
-			// but the host filesystem cannot represent (e.g. >255-byte names).
-			if localBranchName != remoteDefaultBranchName {
-				if err := syncCtx.Err(); err != nil {
-					return err
-				}
-				updated, err := updateArchivedBranch(gitRepo, localBranchName, ref.Hash())
-				if errors.Is(err, git.ErrNonFastForwardUpdate) {
-					ui.Printf("Preserving local branch %s: upstream is not a fast-forward.\n", localBranchName)
-					return nil
-				}
-				if err != nil {
-					return fmt.Errorf("update archived branch %s: %w", localBranchName, err)
-				}
-				isUpdated = isUpdated || updated
-				return nil
-			}
-
-			// create local branch reference
-			branchRef := plumbing.NewBranchReferenceName(localBranchName)
-
-			// check local branch exist or not
-			_, err := gitRepo.Reference(branchRef, false)
-
-			// if local branch not exist
-			if err == plumbing.ErrReferenceNotFound {
-				isUpdated = true
-				// create local branch and switch to the new local branch
-				err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
-					Branch: branchRef,
-					Create: true,
-					Force:  true,
-					// create local branch basing on ref.Hash(), that means head of remote branch,
-					//   to avoid content of this new branch is a copy of last local branch,
-					//   which will cause non-fast-forward update.
-					Hash: ref.Hash(),
-				})
-				if err != nil {
-					ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
-					return err
-				}
-				ui.Printf("local branch %s has been checked out. \n", localBranchName)
-
-				// set upstream branch of local branch to avoid the local branch
-				//   without a tracking remote branch
-				err = gitRepo.CreateBranch(&config.Branch{
-					Name:   localBranchName,
-					Remote: "origin",
-					Merge:  branchRef,
-				})
-				if err != nil {
-					ui.Errorf("Error setting %s's upstream branch , %s", localBranchName, err)
-					return err
-				}
-
-				ui.Printf("local branch %s has been set to track remote branch %s. \n", localBranchName, remoteBranchName)
-			} else if err != nil {
-				ui.Errorf("Error checking local branch %s existing, %s", localBranchName, err)
-				return err
-			} else {
-				ui.Printf("local branch %s exists, skip creating. \n", localBranchName)
-			}
-
-			// switch to local branch, only after that we can do pull
-			err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
-				Branch: branchRef,
-				// abandon the modify of local
-				Force: true,
-			})
-			if err != nil {
-				ui.Errorf("Error checkout local branch %s, %s", localBranchName, err)
-				return err
-			}
-			if err = restoreManagedWorktree(gitRepo, w); err != nil {
-				ui.Errorf("Error restoring managed worktree for local branch %s, %s", localBranchName, err)
-				return err
-			}
-
-			// pull from upstream branch
-			ui.Printf("Sync phase: Git pull started (branch=%s)", localBranchName)
-			beforePull, err := gitRepo.Reference(branchRef, true)
-			if err != nil {
-				ui.Errorf("Error reading local branch %s before pull, %s", localBranchName, err)
-				return err
-			}
-			err = accounts.do(syncCtx, func(auth transport.AuthMethod) error {
-				pull := func() error {
-					return store.operationError(pullManagedWorktree(syncCtx, gitRepo, w, &git.PullOptions{
-						RemoteName:    "origin",
-						ReferenceName: branchRef,
-						// pull all commits, not only the latest
-						Auth:     auth,
-						Depth:    depth,
-						Progress: progress,
-					}))
-				}
-				return retryGitEOF(syncCtx, component+" pull", func() error {
-					return pullWithManagedWorktreeRecovery(pull, func() error {
-						ui.Printf("local branch %s worktree changed during pull; restoring and retrying once.\n", localBranchName)
-						return restoreManagedWorktree(gitRepo, w)
-					})
-				})
-			})
-			afterPull, refErr := gitRepo.Reference(branchRef, true)
-			if refErr != nil {
-				ui.Errorf("Error reading local branch %s after pull, %s", localBranchName, refErr)
-				return refErr
-			}
-			if beforePull.Hash() != afterPull.Hash() {
-				isUpdated = true
-			}
-			if err == git.NoErrAlreadyUpToDate {
-				ui.Printf("local branch %s already up to date. \n", localBranchName)
-			} else if err != nil {
-				ui.Errorf("Error pulling local branch %s, %s", localBranchName, err)
-				if isGitEOF(err) || errors.Is(err, errPackCleanup) || errors.Is(err, git.ErrUnstagedChanges) || errors.Is(err, errManagedIndexRecovery) {
-					return err
-				}
-				if syncCtx.Err() != nil || gitAccountError(err) || isGitIdleTimeout(err) {
-					// Cancelled or stalled — stop the whole sync instead of continuing to
-					// remaining branches. Exhausted authentication candidates
-					// must also fail the job, preserving the existing local cache.
-					return err
-				}
-			} else {
-				isUpdated = true
-				ui.Printf("local branch %s has successed pull from remote branch %s, already up to date. \n", localBranchName, remoteBranchName)
-			}
-		}
-		return nil
-	}); err != nil {
-		// refs.ForEach stops at the first error, including a cancellation.
-		ui.Errorf("Error updating branches: %s", err)
-		return err
-	}
-
-	// switch to default branch
-	err = checkoutManagedWorktree(gitRepo, w, &git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName(remoteDefaultBranchName),
-		// abandon the modify of local
-		Force: true,
-	})
-	if err != nil {
-		ui.Errorf("Error checkout default branch %s, %s", remoteDefaultBranchRef, err)
-		return err
-	}
-	if err = restoreManagedWorktree(gitRepo, w); err != nil {
-		ui.Errorf("Error restoring managed worktree for default branch %s, %s", remoteDefaultBranchRef, err)
-		return err
-	}
+	isUpdated = isUpdated || branchesUpdated || pending
 
 	if isUpdated {
 		if maintenance.Requested(ctx) && ctx.Err() == nil {
@@ -561,6 +331,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 	// not have run yet when a request arrives during archive publication.
 	if maintenance.Requested(ctx) {
 		return maintenance.ErrRequested
+	}
+
+	if err := completeBranchSync(gitRepo); err != nil {
+		return err
 	}
 
 	// cleanup

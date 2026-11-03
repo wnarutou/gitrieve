@@ -180,7 +180,7 @@ func TestGitAccountCloneFallbackKeepsSuccessfulCredential(t *testing.T) {
 			require.Greater(t, len(captured), 2)
 			require.Equal(t, tokens[0], captured[0])
 			for _, token := range captured[1:] {
-				require.Equal(t, tokens[1], token, "successful credential must persist through fetch/list/pull")
+				require.Equal(t, tokens[1], token, "successful credential must persist through clone/list/fetch")
 			}
 			logs := strings.Join(sink.snapshot(), "\n")
 			require.Contains(t, logs, "Git authentication: credential 1/2 could not access repository")
@@ -281,7 +281,7 @@ func TestGitAccountDiagnosticsReflectEffectiveCredentials(t *testing.T) {
 	}
 }
 
-func TestGitAccountFetchListAndPullEachFallback(t *testing.T) {
+func TestGitAccountListAndFetchEachFallback(t *testing.T) {
 	ctx, tokens := githubapitest.Context(t)
 	stage := false
 	advertisements := 0
@@ -290,11 +290,9 @@ func TestGitAccountFetchListAndPullEachFallback(t *testing.T) {
 			advertisements++
 			switch advertisements {
 			case 1:
-				return 404 // fetch: A -> B
+				return 404 // list: A -> B
 			case 3:
-				return 401 // list: B -> A
-			case 5:
-				return 403 // pull: A -> B
+				return 401 // fetch: B -> A
 			}
 		}
 		return 0
@@ -306,7 +304,7 @@ func TestGitAccountFetchListAndPullEachFallback(t *testing.T) {
 	seen.tokens = nil
 	seen.mu.Unlock()
 	require.NoError(t, Sync(ctx, repo, false, nil))
-	require.Equal(t, []string{tokens[0], tokens[1], tokens[1], tokens[0], tokens[0], tokens[1]}, seen.snapshot())
+	require.Equal(t, []string{tokens[0], tokens[1], tokens[1], tokens[0]}, seen.snapshot())
 }
 
 func TestGitAccountWikiCacheSurvivesCredentialChange(t *testing.T) {
@@ -335,15 +333,15 @@ func TestGitAccountWikiCacheSurvivesCredentialChange(t *testing.T) {
 	require.Contains(t, captured, tokens[1])
 }
 
-func TestGitAccountPullAllDeniedFailsAndPreservesCache(t *testing.T) {
+func TestGitAccountFetchAllDeniedAfterDiscoveryPreservesCache(t *testing.T) {
 	ctx, tokens := githubapitest.Context(t)
 	stage := false
 	advertisements := 0
 	_, seen := serveAccountGit(t, func(_ string, request *http.Request) int {
 		if stage && strings.HasSuffix(request.URL.Path, "/info/refs") {
 			advertisements++
-			if advertisements >= 3 {
-				return 403 // Fetch and list succeed; both pull credentials fail.
+			if advertisements >= 2 {
+				return 403 // Discovery succeeds; both fetch credentials fail.
 			}
 		}
 		return 0
@@ -359,7 +357,7 @@ func TestGitAccountPullAllDeniedFailsAndPreservesCache(t *testing.T) {
 	seen.mu.Unlock()
 	err := Sync(ctx, repo, false, nil)
 	require.ErrorIs(t, err, transport.ErrAuthorizationFailed)
-	require.Equal(t, []string{tokens[0], tokens[0], tokens[0], tokens[1]}, seen.snapshot())
+	require.Equal(t, []string{tokens[0], tokens[0], tokens[1]}, seen.snapshot())
 	_, err = os.Stat(marker)
 	require.NoError(t, err)
 }
