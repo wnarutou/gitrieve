@@ -59,7 +59,7 @@ func restoreManagedWorktreeWithChmod(repo *git.Repository, worktree *git.Worktre
 	if err != nil {
 		return err
 	}
-	if err := cleanManagedWorktree(worktree, gitlinks); err != nil {
+	if err := cleanManagedWorktree(repo, worktree, gitlinks); err != nil {
 		return fmt.Errorf("clean untracked files from managed worktree: %w", err)
 	}
 	if err := repairWorktreeModes(repo, worktree, chmod); err != nil {
@@ -75,7 +75,7 @@ func restoreManagedWorktreeWithChmod(repo *git.Repository, worktree *git.Worktre
 			headBefore.Name(), headBefore.Hash(), headAfter.Name(), headAfter.Hash())
 	}
 
-	status, err := worktree.Status()
+	status, err := managedWorktreeStatus(repo, worktree)
 	if err != nil {
 		return fmt.Errorf("verify managed worktree recovery: %w", err)
 	}
@@ -116,7 +116,7 @@ func repairWorktreeModes(repo *git.Repository, worktree *git.Worktree, chmod chm
 		entries[entry.Name] = entry.Mode
 	}
 
-	status, err := worktree.Status()
+	status, err := managedWorktreeStatus(repo, worktree)
 	if err != nil {
 		return fmt.Errorf("inspect worktree before mode recovery: %w", err)
 	}
