@@ -208,8 +208,8 @@ func managedGitlinks(repo *git.Repository) (map[string]bool, error) {
 // go-git's Clean(Dir: true) removes even tracked, empty gitlink directories
 // and traverses populated submodules. Keep those subtrees opaque: this sync
 // archives the parent repository without recursively fetching submodules.
-func cleanManagedWorktree(worktree *git.Worktree, gitlinks map[string]bool) error {
-	status, err := worktree.Status()
+func cleanManagedWorktree(repo *git.Repository, worktree *git.Worktree, gitlinks map[string]bool) error {
+	status, err := managedWorktreeStatus(repo, worktree)
 	if err != nil {
 		return err
 	}
