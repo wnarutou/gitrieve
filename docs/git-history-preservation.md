@@ -5,6 +5,28 @@ names, or are force-pushed. Use `useCache: true` to retain the local repository
 between jobs, and `depth: 0` when full history is required. A shallow archive can
 only preserve the history it downloaded.
 
+## Missing upstream branches
+
+An upstream-deleted branch is an informational event, not a synchronization
+failure. Gitrieve logs the missing branch, retains its local branch, tracking
+reference and archived history, and continues synchronizing surviving branches.
+The tracking-name conflict handling described below still applies.
+
+If a branch disappears between reference discovery and fetch, Gitrieve rechecks
+the upstream list and retries only the surviving branches from the original
+plan. Each retry must remove at least one missing branch, so repeated deletions
+cannot cause an unbounded retry loop. Newly discovered branches wait for the next
+sync's preservation and path-conflict checks. If a new default branch was already
+in the original plan, it becomes the checkout; otherwise the current checkout is
+kept until the next sync. An upstream with no remaining branches keeps the cached
+checkout and history. If the server omits HEAD after deleting the cached default
+branch, the cached checkout is retained while surviving branches synchronize.
+An otherwise unexplained invalid remote HEAD still stops synchronization.
+
+Reference discovery, authentication, network and storage failures still stop
+synchronization. A missing-ref error without a confirmed missing upstream branch
+also remains an error.
+
 ## Branch path conflicts
 
 A cached reference such as `origin/noa/v8` can prevent fetching a newer upstream

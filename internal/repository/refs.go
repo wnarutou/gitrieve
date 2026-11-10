@@ -70,15 +70,7 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		return false, err
 	}
 	accounts.restrictRemote(remote.Config().URLs)
-	ui.Printf("Sync phase: remote reference discovery started")
-	var advertised []*plumbing.Reference
-	err = accounts.do(ctx, func(auth transport.AuthMethod) error {
-		return retryGitEOF(ctx, component+" reference discovery", func() error {
-			var listErr error
-			advertised, listErr = remote.ListContext(ctx, &git.ListOptions{Auth: auth})
-			return listErr
-		})
-	})
+	advertised, err := listBranchReferences(ctx, remote, accounts, component)
 	if err != nil {
 		return false, fmt.Errorf("list remote branches: %w", err)
 	}
@@ -103,8 +95,37 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 			defaultFound = true
 		}
 	}
-	if !defaultFound {
-		return false, fmt.Errorf("remote HEAD does not identify an advertised branch")
+	if !defaultFound && len(branches) > 0 {
+		// Some servers omit HEAD when its target has been deleted. Only treat
+		// that as a missing branch if our cached default confirms the loss;
+		// otherwise an unexplained/malformed remote HEAD remains an error.
+		head, err := repo.Head()
+		if err != nil {
+			return false, err
+		}
+		cfg, err := repo.Config()
+		if err != nil {
+			return false, err
+		}
+		cachedDefault := head.Name()
+		if branch := cfg.Branches[cachedDefault.Short()]; branch != nil && branch.Remote == "origin" {
+			cachedDefault = branch.Merge
+		}
+		cachedFound := false
+		for _, branch := range branches {
+			cachedFound = cachedFound || branch == cachedDefault
+		}
+		if !cachedDefault.IsBranch() || cachedFound || (defaultBranch != "" && defaultBranch != cachedDefault) {
+			return false, fmt.Errorf("remote HEAD does not identify an advertised branch")
+		}
+		if _, err := repo.Reference(plumbing.ReferenceName(originRefPrefix+cachedDefault.Short()), false); err != nil {
+			return false, fmt.Errorf("verify missing cached default branch: %w", err)
+		}
+		ui.Printf("Upstream default branch %s no longer exists upstream; keeping current local checkout.", cachedDefault.Short())
+		defaultBranch = ""
+	}
+	if err := logMissingTrackingBranches(ctx, repo, branches); err != nil {
+		return false, err
 	}
 
 	changed, err := archiveTrackingRefs(ctx, repo)
@@ -115,12 +136,8 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		return changed, err
 	}
 
-	// Fetch precisely the listed branches. If upstream changes between list and
-	// fetch, fail safely instead of fetching an unexamined conflicting path.
-	specs := make([]config.RefSpec, 0, len(branches))
-	for _, branch := range branches {
-		specs = append(specs, config.RefSpec("+"+branch.String()+":"+originRefPrefix+branch.Short()))
-	}
+	// Fetch only examined paths. A disappearing branch shrinks this plan; new
+	// upstream paths wait until the next sync's conflict checks.
 	for _, ref := range advertised {
 		if !ref.Name().IsBranch() || ref.Type() != plumbing.HashReference {
 			continue
@@ -138,21 +155,75 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 	}
 	// Keep the existing unbounded fetch behavior even for a shallow initial
 	// clone. Limiting this fetch can leave an ancestry gap between cached tips.
-	ui.Printf("Sync phase: Git fetch started")
-	err = accounts.do(ctx, func(auth transport.AuthMethod) error {
-		return retryGitEOF(ctx, component+" fetch", func() error {
-			// A failed previous attempt may have updated some tracking refs.
-			// Protect those tips too before a retry or account fallback fetch.
-			if _, err := archiveTrackingRefs(ctx, repo); err != nil {
-				return err
-			}
-			fetchErr := repo.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: specs, Force: true, Progress: progress, Auth: auth})
-			if store, ok := repo.Storer.(interface{ operationError(error) error }); ok {
-				return store.operationError(fetchErr)
-			}
-			return fetchErr
+	for {
+		if err := ctx.Err(); err != nil {
+			return changed, err
+		}
+		if len(branches) == 0 {
+			// Empty RefSpecs would fetch configured defaults, including paths
+			// that have not passed the preservation checks above.
+			err = git.NoErrAlreadyUpToDate
+			break
+		}
+		specs := make([]config.RefSpec, 0, len(branches))
+		for _, branch := range branches {
+			specs = append(specs, config.RefSpec("+"+branch.String()+":"+originRefPrefix+branch.Short()))
+		}
+		ui.Printf("Sync phase: Git fetch started")
+		err = accounts.do(ctx, func(auth transport.AuthMethod) error {
+			return retryGitEOF(ctx, component+" fetch", func() error {
+				// A failed previous attempt may have updated some tracking refs.
+				// Protect those tips too before a retry or account fallback fetch.
+				if _, err := archiveTrackingRefs(ctx, repo); err != nil {
+					return err
+				}
+				fetchErr := repo.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: specs, Force: true, Progress: progress, Auth: auth})
+				if store, ok := repo.Storer.(interface{ operationError(error) error }); ok {
+					return store.operationError(fetchErr)
+				}
+				return fetchErr
+			})
 		})
-	})
+		// Only standalone Git reference errors are recoverable. A joined local
+		// storage/cleanup failure must remain fatal even if a ref is missing.
+		_, missing := err.(git.NoMatchingRefSpecError)
+		if !missing && err != transport.ErrEmptyRemoteRepository {
+			break
+		}
+		fresh, listErr := listBranchReferences(ctx, remote, accounts, component)
+		if listErr != nil {
+			return changed, fmt.Errorf("recheck remote branches: %w", listErr)
+		}
+		available := make(map[plumbing.ReferenceName]bool)
+		var freshDefault plumbing.ReferenceName
+		for _, ref := range fresh {
+			if ref.Name() == plumbing.HEAD {
+				freshDefault = ref.Target()
+			}
+			if ref.Name().IsBranch() && ref.Type() == plumbing.HashReference {
+				available[ref.Name()] = true
+			}
+		}
+		remaining := make([]plumbing.ReferenceName, 0, len(branches))
+		for _, branch := range branches {
+			if available[branch] {
+				remaining = append(remaining, branch)
+			} else {
+				ui.Printf("Keeping local history for branch %s: branch no longer exists upstream; skipping fetch.", branch.Short())
+			}
+		}
+		if len(remaining) == len(branches) {
+			// Do not hide an unexplained ref error or retry indefinitely.
+			break
+		}
+		branches = remaining
+		for _, branch := range branches {
+			if branch == freshDefault {
+				defaultBranch = freshDefault
+				break
+			}
+		}
+	}
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return changed, fmt.Errorf("fetch remote branches: %w", err)
 	}
@@ -176,7 +247,9 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 	if err != nil {
 		return changed, err
 	}
-	var defaultLocal plumbing.ReferenceName
+	// If the upstream default disappears and its replacement is a new path,
+	// keep the current checkout until that replacement is examined next sync.
+	defaultLocal := initialHead.Target()
 	for _, branch := range branches {
 		if err := ctx.Err(); err != nil {
 			return changed, err
@@ -280,13 +353,52 @@ func syncBranches(ctx context.Context, repo *git.Repository, allBranches bool, p
 		}
 		changed = true
 	}
-	if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: defaultLocal, Force: true}); err != nil {
-		return changed, err
+	if defaultLocal != "" {
+		if err := checkoutManagedWorktree(repo, w, &git.CheckoutOptions{Branch: defaultLocal, Force: true}); err != nil {
+			return changed, err
+		}
 	}
 	if err := restoreManagedWorktree(repo, w); err != nil {
 		return changed, err
 	}
 	return changed, nil
+}
+
+func listBranchReferences(ctx context.Context, remote *git.Remote, accounts *gitAccounts, component string) ([]*plumbing.Reference, error) {
+	ui.Printf("Sync phase: remote reference discovery started")
+	var refs []*plumbing.Reference
+	err := accounts.do(ctx, func(auth transport.AuthMethod) error {
+		return retryGitEOF(ctx, component+" reference discovery", func() error {
+			var err error
+			refs, err = remote.ListContext(ctx, &git.ListOptions{Auth: auth})
+			return err
+		})
+	})
+	if err == transport.ErrEmptyRemoteRepository {
+		// A reachable, now-empty upstream does not invalidate cached history.
+		return nil, nil
+	}
+	return refs, err
+}
+
+func logMissingTrackingBranches(ctx context.Context, repo *git.Repository, branches []plumbing.ReferenceName) error {
+	available := make(map[plumbing.ReferenceName]bool, len(branches))
+	for _, branch := range branches {
+		available[plumbing.ReferenceName(originRefPrefix+branch.Short())] = true
+	}
+	refs, err := repo.References()
+	if err != nil {
+		return err
+	}
+	return refs.ForEach(func(ref *plumbing.Reference) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if ref.Type() == plumbing.HashReference && strings.HasPrefix(ref.Name().String(), originRefPrefix) && !available[ref.Name()] {
+			ui.Printf("Keeping local history for branch %s: branch no longer exists upstream; skipping fetch.", strings.TrimPrefix(ref.Name().String(), originRefPrefix))
+		}
+		return nil
+	})
 }
 
 func archiveRefName(ref *plumbing.Reference) plumbing.ReferenceName {
