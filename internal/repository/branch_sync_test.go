@@ -175,6 +175,9 @@ func TestSyncArchivesBranchesWithoutCheckingOutUnrepresentableNames(t *testing.T
 				require.NoError(t, err)
 				require.NoError(t, os.WriteFile(dest, data, 0644))
 			}
+			// Release the archive before a later sync replaces it on Windows.
+			require.NoError(t, gz.Close())
+			require.NoError(t, f.Close())
 			restored, err := git.PlainOpen(filepath.Join(restoredDir, name))
 			require.NoError(t, err)
 			commit, err := restored.CommitObject(badHash)
