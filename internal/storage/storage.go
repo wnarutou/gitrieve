@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"io"
 	"time"
 
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -29,6 +31,10 @@ type Storage interface {
 	GetObject(identifier string) (Object, error)
 	// PutObject stores the data in the storage backend identified by the given identifier.
 	PutObject(identifier string, data []byte) error
+	// PutObjectReader streams to a same-directory temporary file and replaces
+	// the destination only after a complete, successful write. It does not
+	// close data; callers must rewind seekable archives for each destination.
+	PutObjectReader(ctx context.Context, identifier string, data io.Reader) error
 	// DeleteObject deletes the object identified by the given identifier.
 	DeleteObject(identifier string) error
 }

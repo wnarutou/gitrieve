@@ -209,6 +209,20 @@ Recommended configuration for maximum recoverability:
 
 One caveat to be aware of: archiving writes to a fixed filename (e.g. `repo.tar.gz`) and overwrites any previous archive at the same path. So if an upstream is still reachable but its default branch has been rewritten to a single README, the *new* snapshot will replace the previous normal one at that path. Local cached code and history are still safe (see above), but to preserve distinct historical snapshots you should keep separate copies of archives under versioned paths.
 
+Code, wiki, issue, and discussion archives stream files one at a time into a
+temporary `.tar.gz` next to the source directory. Neither the complete compressed
+payload nor a manifest of the whole tree is retained in memory. All storage
+destinations reuse this seekable archive. Each destination stages the write in
+its own directory, flushes and closes it, then renames it over the published
+archive. Cancellation, read/write failures, and failed replacements preserve the
+previous published archive. Temporary files are removed on normal completion or
+failure; Git cache and history preservation rules are unchanged.
+
+Allow disk space for a temporary compressed archive on the cache volume and a
+staging file on the destination volume. Do not manually remove temporary files
+belonging to active jobs. Git operations and release downloads still have their
+own memory costs, so configure concurrency for the host's available resources.
+
 ## Run as docker container
 
 ### Docker CLI
