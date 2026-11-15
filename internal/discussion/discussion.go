@@ -2,7 +2,9 @@ package discussion
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -161,7 +163,7 @@ type repliesQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
-func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) error {
+func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.MultiStorage) (resultErr error) {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -520,11 +522,12 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		// Archive the discussion dir directly from gitDir. Create takes an
 		// absolute path and never changes the process cwd, so it is safe to
 		// run from concurrent job goroutines.
-		buf, err := archive.Create(ctx, gitDir, "discussion")
+		packed, err := archive.Create(ctx, gitDir, "discussion")
 		if err != nil {
 			ui.Errorf("Error creating archive: %s", err)
 			return err
 		}
+		defer func() { resultErr = errors.Join(resultErr, packed.Close()) }()
 
 		base := "discussions.tar.gz"
 		if !useCache && !fullyListed {
@@ -540,7 +543,10 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 				ui.Errorf("Error getting backend: %s", err)
 				return err
 			}
-			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
+			if _, err := packed.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			err = backend.PutObjectReader(ctx, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed)
 			if err != nil {
 				ui.Errorf("Error storing file: %s", err)
 				return err

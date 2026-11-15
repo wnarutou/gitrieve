@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"time"
@@ -293,11 +294,12 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		// absolute path and never changes the process cwd, so it is safe to
 		// run from concurrent job goroutines.
 		ui.Printf("Sync phase: archive creation started")
-		buf, err := archive.Create(ctx, gitDir, targetDir)
+		packed, err := archive.Create(ctx, gitDir, targetDir)
 		if err != nil {
 			ui.Errorf("Error creating archive, %s", err)
 			return err
 		}
+		defer func() { resultErr = errors.Join(resultErr, packed.Close()) }()
 
 		// For codes, there is no need to save the history: the latest one is
 		// the full version and already contains all the history, so it can be
@@ -312,7 +314,10 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				return err
 			}
 			ui.Printf("Sync phase: storage upload started (storage=%s type=%s)", s.Name, s.Type)
-			err = backend.PutObject(path.Join(s.Path, r.Host, r.Owner, r.Name, base), buf.Bytes())
+			if _, err := packed.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			err = backend.PutObjectReader(ctx, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed)
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
 				return err

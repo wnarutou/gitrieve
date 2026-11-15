@@ -44,7 +44,12 @@ go build -o gitrieve main.go
 - Config parsed into `Config` struct with `Repository[]`, `Storage[]`, and global settings
 - Storage backends selected by name reference in repository config
 - Daemon and server modes use `gocron/v2` for scheduled jobs
-- Archives created with `archiver/v4`, stored by direct file write
+- Archives stream through Go's `archive/tar` and `compress/gzip` into temporary
+  disk files beside each source directory. Close the returned archive to remove
+  it. Rewind it before each storage destination; never materialize it as `[]byte`.
+- File storage stages streamed writes beside the destination, syncs and closes
+  them, then renames over the old file. Never delete/truncate an old archive
+  before its replacement succeeds. Preserve cancellation and cleanup errors.
 
 ### Concurrency: cross-process per-repo locks
 Same repo + same component syncs are serialized across goroutines AND processes
