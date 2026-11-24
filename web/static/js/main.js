@@ -154,7 +154,9 @@ const state = {
     routeEpoch: 0,
     es: null,
     logJob: null,
-    logIds: {}
+    logIds: {},
+    restoreScan: null,
+    restoreStorage: null
 };
 
 function toast(message, isError) {
@@ -797,7 +799,8 @@ async function renderRepositories(expectedRouteEpoch) {
 
     $('#app').innerHTML = `
         <div class="page-header"><h2>Repositories</h2>
-            <div class="toolbar-group"><button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
+            <div class="toolbar-group"><button id="btn-restore-from-backup" class="btn">Restore from backup</button>
+                <button id="btn-add-repo" class="btn btn-primary">Add Repository</button>
                 <button id="btn-refresh-repos" class="btn">Refresh</button></div>
         </div>
         <div class="summary-grid">${repositorySummaryCards(summary)}</div>
@@ -827,6 +830,7 @@ async function renderRepositories(expectedRouteEpoch) {
     $('#repos-sort').value = state.reposSort;
     $('#repos-direction').value = state.reposDirection;
     $('#btn-add-repo').addEventListener('click', () => openRepoForm(null));
+    $('#btn-restore-from-backup').addEventListener('click', openRestoreModal);
     $('#btn-refresh-repos').addEventListener('click', () => renderRepositories());
     const applyRepositoryFilters = () => setRepositoryRoute({
         reposSearch: $('#repos-search').value.trim(), reposHealth: $('#repos-health').value,
@@ -870,6 +874,158 @@ async function renderRepositories(expectedRouteEpoch) {
         const r = repos.find(x => repoKey(x) === b.dataset.key);
         if (r) openExecutionDetails(r.latest_execution_id, r.Name, r);
     }));
+}
+
+function closeRestoreModal() {
+    $('#restore-modal').classList.add('hidden');
+}
+
+async function openRestoreModal() {
+    state.restoreScan = null;
+    state.restoreStorage = null;
+    $('#restore-scan-result').textContent = '';
+    $('#restore-scan-result').classList.remove('error-text');
+    $('#restore-repo-list').innerHTML = '';
+    $('#restore-repo-list').classList.add('hidden');
+    const scan = $('#btn-restore-scan');
+    const start = $('#btn-restore-start');
+    scan.disabled = true;
+    start.disabled = true;
+    start.textContent = 'Restore all';
+    const select = $('#restore-source');
+    select.innerHTML = '<option value="">Loading…</option>';
+    $('#restore-modal').classList.remove('hidden');
+
+    try {
+        const storages = await api('/api/storage');
+        const files = (storages || []).filter(s => s.Type === 'file');
+        if (!files.length) {
+            select.innerHTML = '<option value="">No file storage configured</option>';
+            $('#restore-scan-result').textContent = 'Add a file storage backend before restoring from backup.';
+            $('#restore-scan-result').classList.add('error-text');
+            return;
+        }
+        select.innerHTML = files.map(s =>
+            '<option value="' + esc(s.Name) + '">' + esc(s.Name + ' — ' + (s.Path || '')) + '</option>'
+        ).join('');
+        select.onchange = resetRestoreScan;
+        scan.disabled = false;
+        $('#restore-scan-result').textContent = 'Select a backup source, then scan.';
+    } catch (e) {
+        select.innerHTML = '<option value="">Failed to load storages</option>';
+        $('#restore-scan-result').textContent = 'Failed to load storage backends: ' + e.message;
+        $('#restore-scan-result').classList.add('error-text');
+    }
+}
+
+async function scanRestoreBackups() {
+    const storageName = $('#restore-source').value;
+    if (!storageName) return;
+    const scan = $('#btn-restore-scan');
+    const start = $('#btn-restore-start');
+    scan.disabled = true;
+    start.disabled = true;
+    state.restoreScan = null;
+    $('#restore-repo-list').innerHTML = '';
+    $('#restore-repo-list').classList.add('hidden');
+    $('#restore-scan-result').classList.remove('error-text');
+    $('#restore-scan-result').textContent = 'Scanning backup…';
+
+    try {
+        const data = await api('/api/restore/scan', {
+            method: 'POST',
+            body: JSON.stringify({ storage_name: storageName })
+        });
+        state.restoreScan = data;
+        state.restoreStorage = storageName;
+        renderRestoreScan(data);
+        start.disabled = !data || !data.total_repositories;
+        start.textContent = 'Restore all' + (data && data.total_repositories ? ' (' + data.total_repositories + ')' : '');
+    } catch (e) {
+        $('#restore-scan-result').textContent = 'Scan failed: ' + e.message;
+        $('#restore-scan-result').classList.add('error-text');
+    } finally {
+        scan.disabled = false;
+    }
+}
+
+function resetRestoreScan() {
+    state.restoreScan = null;
+    state.restoreStorage = null;
+    $('#restore-repo-list').innerHTML = '';
+    $('#restore-repo-list').classList.add('hidden');
+    $('#restore-scan-result').classList.remove('error-text');
+    $('#restore-scan-result').textContent = 'Backup source changed; scan again.';
+    const start = $('#btn-restore-start');
+    start.disabled = true;
+    start.textContent = 'Restore all';
+}
+
+function renderRestoreScan(data) {
+    const total = (data && data.total_repositories) || 0;
+    const components = (data && data.total_components) || 0;
+    const present = (data && data.present_components) || 0;
+    const summary = 'Found ' + countLabel(total, 'repository', 'repositories') + ' with ' +
+        countLabel(components, 'cache component', 'cache components') + '. ' +
+        countLabel(present, 'cache component', 'cache components') + ' already present locally.';
+    $('#restore-scan-result').textContent = summary + (data && data.root ? ' Source: ' + data.root : '');
+    if (!total) return;
+
+    const warnings = ((data && data.warnings) || []).slice(0, 20);
+    const warningHTML = warnings.length
+        ? '<div class="restore-warning">' + warnings.map(w => esc(w)).join('<br>') + '</div>' : '';
+    const repositories = data.repositories || [];
+    const visible = repositories.slice(0, 200);
+    const rows = visible.map(repo => {
+        const tags = [];
+        if (!repo.configured) tags.push('<span class="restore-tag warn">cache only</span>');
+        if (repo.release) tags.push('<span class="restore-tag">release assets</span>');
+        const componentsText = (repo.components || []).map(c =>
+            c.component + (c.present ? ' (already present)' : '')
+        ).join(', ');
+        return '<div class="restore-row"><strong>' + esc(repo.key) + ' ' + tags.join('') +
+            '</strong><span class="restore-components">' + esc(componentsText) + '</span></div>';
+    }).join('');
+    const more = repositories.length > visible.length
+        ? '<div class="restore-row muted">… and ' + (repositories.length - visible.length) + ' more repositories</div>' : '';
+    const list = $('#restore-repo-list');
+    list.innerHTML = (warningHTML ? '<div class="restore-row">' + warningHTML + '</div>' : '') + rows + more;
+    list.classList.remove('hidden');
+}
+
+async function startRestoreBackups() {
+    if (!state.restoreScan || !state.restoreScan.total_repositories) return;
+    const storageName = state.restoreStorage;
+    if (!storageName) return;
+    const total = state.restoreScan.total_repositories;
+    if (!confirm('Restore ' + countLabel(total, 'repository', 'repositories') + ' from "' + storageName +
+        '"? Existing valid caches will be skipped.')) return;
+
+    const start = $('#btn-restore-start');
+    start.disabled = true;
+    start.textContent = 'Starting…';
+    try {
+        const data = await api('/api/restore', {
+            method: 'POST',
+            body: JSON.stringify({ storage_name: storageName })
+        });
+        const jobIDs = (data && data.job_ids) || [];
+        closeRestoreModal();
+        if (jobIDs.length === 1) {
+            toast('Restore started (' + jobIDs[0].slice(0, 8) + '…)');
+            openLogModal(jobIDs[0], 'Restore from backup');
+        } else {
+            toast('Restore was accepted but no job log was returned');
+        }
+    } catch (e) {
+        toast('Failed to start restore: ' + e.message, true);
+        start.disabled = false;
+        start.textContent = 'Restore all (' + total + ')';
+    }
+}
+
+function countLabel(count, singular, plural) {
+    return count + ' ' + (count === 1 ? singular : plural);
 }
 
 function openStorageForm(storage) {
@@ -1264,6 +1420,13 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#storage-modal-close').addEventListener('click', () => $('#storage-modal').classList.add('hidden'));
     $('#storage-modal').addEventListener('click', (ev) => {
         if (ev.target === ev.currentTarget) $('#storage-modal').classList.add('hidden');
+    });
+    $('#btn-restore-scan').addEventListener('click', scanRestoreBackups);
+    $('#btn-restore-start').addEventListener('click', startRestoreBackups);
+    $('#btn-restore-cancel').addEventListener('click', closeRestoreModal);
+    $('#restore-modal-close').addEventListener('click', closeRestoreModal);
+    $('#restore-modal').addEventListener('click', (ev) => {
+        if (ev.target === ev.currentTarget) closeRestoreModal();
     });
 
     refreshMetrics();

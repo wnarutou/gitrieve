@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/google/uuid"
 	"github.com/wnarutou/gitrieve/internal/archive"
+	"github.com/wnarutou/gitrieve/internal/cache"
 	internalconfig "github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/maintenance"
@@ -192,6 +192,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 		gitDir = path.Join(workingDir, r.Host, r.Owner, repoName, "code")
 		gitUrl = repo.URL
 	}
+	if err := restoreCacheForSync(ctx, currentDir, r, repo, iswiki, storages); err != nil {
+		return err
+	}
 	var exist bool
 	// Both code and wiki clones store their local metadata in .git;
 	// the .wiki suffix only belongs to the remote URL.
@@ -314,10 +317,9 @@ func Sync(ctx context.Context, repo typedef.Repository, iswiki bool, storages []
 				return err
 			}
 			ui.Printf("Sync phase: storage upload started (storage=%s type=%s)", s.Name, s.Type)
-			if _, err := packed.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			err = backend.PutObjectReader(ctx, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed)
+			err = storage.PutObjectReaderWithChecksum(
+				ctx, backend, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed,
+			)
 			if err != nil {
 				ui.Errorf("Error storing file, %s", err)
 				return err
@@ -410,6 +412,38 @@ func updateArchivedBranch(repo *git.Repository, name string, hash plumbing.Hash)
 		return false, err
 	}
 	return true, nil
+}
+
+// restoreCacheForSync restores the local Git cache before any network access.
+// A corrupt or unavailable backup is best-effort: the normal clone/fetch path
+// still runs, but an existing valid cache is never overwritten.
+func restoreCacheForSync(
+	ctx context.Context,
+	currentDir string,
+	r *scm.Repository,
+	repo typedef.Repository,
+	iswiki bool,
+	storages []typedef.MultiStorage,
+) error {
+	if !repo.UseCache {
+		return nil
+	}
+	component := cache.ComponentCode
+	if iswiki {
+		component = cache.ComponentWiki
+	}
+	result, err := cache.RestoreComponent(ctx, currentDir, r, component, storages)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		ui.Errorf("Warning: failed to restore %s cache for %s: %s", component, repo.URL, err)
+		return nil
+	}
+	if result.Status == cache.StatusRestored {
+		ui.Printf("Restored %s cache for %s from storage %s", component, repo.URL, result.StorageName)
+	}
+	return nil
 }
 
 // Expand 返回一个配置条目实际对应的具体仓库列表。type=repo 原样返回自身；

@@ -68,6 +68,16 @@ func TestRepositoryHealthAssets(t *testing.T) {
 	require.Contains(t, string(template), "id=\"execution-details\"")
 	require.Contains(t, string(template), "id=\"execution-status\"")
 	require.Contains(t, string(template), "id=\"btn-retry-execution\"")
+	require.Contains(t, script, "function openRestoreModal()")
+	require.Contains(t, script, "function scanRestoreBackups()")
+	require.Contains(t, script, "function startRestoreBackups()")
+	require.Contains(t, script, "btn-restore-from-backup")
+	require.Contains(t, script, "/api/restore/scan")
+	require.Contains(t, script, "/api/restore")
+	require.Contains(t, string(template), "id=\"restore-modal\"")
+	require.Contains(t, string(template), "id=\"restore-source\"")
+	require.Contains(t, string(template), "id=\"btn-restore-scan\"")
+	require.Contains(t, string(template), "id=\"btn-restore-start\"")
 	require.Contains(t, string(css), ".summary-grid")
 	require.Contains(t, string(css), ".component-row")
 
@@ -104,6 +114,10 @@ func TestRepositoryHealthAssets(t *testing.T) {
 		require.NotContains(t, timer, "renderRepositories")
 		require.NotContains(t, timer, "renderApp")
 	}
+
+	restore := jsFunctionSection(t, script, "function openRestoreModal", "function openStorageForm")
+	require.Contains(t, restore, "/api/restore/scan")
+	require.NotContains(t, restore, "renderRepositories(")
 }
 
 func jsFunctionSection(t *testing.T, script, start, end string) string {

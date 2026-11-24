@@ -19,6 +19,7 @@ go build -o gitrieve main.go
 # Commands
 ./gitrieve run          # archive all repos in config
 ./gitrieve repository <name>  # archive single repo
+./gitrieve restore <name>     # restore local caches from storage backups
 ./gitrieve release <name>     # download release assets
 ./gitrieve daemon       # run cron schedules without the Web UI/API
 ./gitrieve server       # run Web UI/API and cron schedules together
@@ -30,7 +31,7 @@ go build -o gitrieve main.go
 ## Architecture
 
 ### Directory Structure
-- `cmd/` - Cobra CLI commands (root, run, repository, daemon, release, issue, wiki, discussion)
+- `cmd/` - Cobra CLI commands (root, run, repository, restore, daemon, release, issue, wiki, discussion)
 - `internal/` - Core logic organized by domain:
   - `config/` - Viper-based configuration loading
   - `repository/` - Git cloning/fetching logic
@@ -87,6 +88,19 @@ failed/cancelled, overdue, then healthy. Keep last attempt separate from last
 success, and compute summary counts across all search matches before health/
 diagnostic filters and pagination. Bulk retry must recompute and confirm the
 current eligible count, then account for partial outcomes.
+
+The Repositories page `Restore from backup` action is a one-time maintenance
+workflow: it scans a configured file storage tree for archives, not configured
+repositories or execution history. It must use an empty `repo_key` so restore
+jobs never change repository last-success or health state, and completion must
+not auto-refresh the page.
+
+Restore treats a Git cache as valid only when the required `.git` structure is
+present, the repository opens, and a present HEAD resolves to a readable
+commit. Issue/discussion caches carry completion metadata so an empty cache can
+be distinguished from a partial directory. New archives write SHA-256 sidecars
+that restores verify when present, while legacy archives without sidecars stay
+supported.
 
 Stuck classification applies when the latest execution has remained either
 `pending` or `running` beyond `syncStuckThreshold`; do not narrow it to only

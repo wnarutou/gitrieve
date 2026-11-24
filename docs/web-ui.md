@@ -129,6 +129,32 @@ enqueue failure does not stop the remaining repositories.
 timer reload, or reloads because a job's SSE stream completes. Click **Refresh**
 or revisit the page to see later server-side changes.
 
+### Restore caches from a backup
+
+The Repositories page header includes **Restore from backup**. This is a
+one-time disaster-recovery workflow and does not depend on repositories already
+existing in configuration or execution history.
+
+1. Select a configured `file` storage backend (normally the `./repo` mount).
+2. Scan the storage tree. The server discovers repositories from
+   `<host>/<owner>/<repo>/` archives, including repositories no longer present
+   in `config.yaml`.
+3. Review the discovered repositories, component counts, existing caches, and
+   warnings.
+4. Confirm **Restore all**. Progress appears in the normal job log modal.
+
+Repositories marked **cache only** are restored but are not currently
+configured. Release assets already exist in the storage tree and require no
+extra local copy. The restore job has an empty repository key, so it does not
+alter repository `last_success_time` or health. Restore completion never
+auto-refreshes the Repositories page.
+
+Restore validates Git caches by opening them and reading the HEAD commit.
+Issue/discussion caches written by current versions include a completion marker
+so a legitimate empty cache is not mistaken for a partial one. New archives
+also include a `.sha256` sidecar; when present it is verified before the cache
+is installed. Older archives without these additions remain restorable.
+
 ### Configuration management
 
 - **Repositories** — add, edit, and remove repository entries from your `config.yaml` without editing the file by hand. Changes are persisted back to the config file.
