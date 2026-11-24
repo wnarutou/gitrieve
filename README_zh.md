@@ -9,8 +9,9 @@ Git Retrieve（gitrieve）是一个用于从任何Git服务器归档 Git 仓库�
 - [使用方法](#使用方法)
   - [repository](#repository)
   - [run](#run)
-  - [daemon](#daemon)
+  - [restore](#restore)
   - [release](#release)
+  - [daemon](#daemon)
 - [Web UI](#web-ui)
 - [配置](#配置)
 - [存储](#存储)
@@ -26,6 +27,7 @@ Git Retrieve（gitrieve）是一个用于从任何Git服务器归档 Git 仓库�
 - 定时任务
 - 本地文件存储（见 [存储](#存储)）
 - **防删除同步** —— 同步过程绝不会删除本地已拉取的代码与完整历史，即使上游仓库被下线、DMCA 禁用、删除、私有化或被替换为单个 README（见 [防删除同步](#防删除同步)）
+- 重新部署后可从存储归档恢复本地 Git、issue、discussion 缓存
 - Docker 支持（见 [使用 Docker 运行](#使用-docker-运行)）
 
 ## 安装
@@ -91,6 +93,18 @@ gitrieve run
 
 结合cron，你可以定期归档 Git 仓库。
 
+### restore
+
+`restore` 命令会从该仓库已配置的存储后端中，把归档恢复成本地 `.gitrieve` 缓存。适用于恢复存储备份（例如 `./repo` 目录）到新机器后重新部署的场景。
+
+```bash
+gitrieve restore gitrieve
+```
+
+当 `useCache: true` 时，正常同步在访问 Git 服务器之前，也会自动恢复缺失或不完整的本地缓存；已有且有效的缓存不会被覆盖。代码归档包含 `.git`，因此分支和提交历史会一起恢复。Git 缓存必须能被实际打开、具备必要的 `.git` 结构，并且存在的 HEAD 能解析到可读取的提交，才会被视为有效。issue 和 discussion 缓存会写入完成标记，以区分合法的空缓存和不完整缓存。
+
+新归档会在 `.tar.gz` 旁写入 `.sha256` 校验文件，恢复时若存在会强制校验；旧版本生成、没有校验文件的归档仍然兼容。启用对应下载选项时，issue、discussion 和 wiki 缓存也会恢复。release 资产直接保存在配置的存储中，无需恢复额外的本地缓存。
+
 ### release
 
 `release`命令会归档指定 Git 仓库的所有发布产物。
@@ -140,6 +154,9 @@ Repositories 页面提供服务端全局健康计数、失败/从未同步/逾�
 都会判定为卡住。不支持的已启用组件记为 `skipped`，真实组件失败会使整个执行失败。
 该页面**绝不自动刷新**，不会轮询、设置定时器，也不会因任务完成 SSE 事件而重载；
 需要新快照时请点击 Refresh 或重新进入页面。
+
+页面还提供 **Restore from backup** 一次性批量恢复入口：扫描配置中的文件存储
+（例如 `./repo`），恢复目录中发现的所有仓库缓存，不依赖当前仓库配置或执行数据库。
 
 ## 配置
 

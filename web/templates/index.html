@@ -136,6 +136,31 @@
         </div>
     </div>
 
+    <div id="restore-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span id="restore-modal-title" class="modal-title">Restore from backup</span>
+                <button id="restore-modal-close" class="btn btn-sm">Close</button>
+            </div>
+            <div class="form">
+                <div class="form-grid">
+                    <label class="field field-full">Backup source
+                        <select id="restore-source"></select>
+                    </label>
+                </div>
+                <div class="toolbar-group restore-toolbar">
+                    <button type="button" id="btn-restore-scan" class="btn">Scan backup</button>
+                </div>
+                <div id="restore-scan-result" class="restore-summary muted"></div>
+                <div id="restore-repo-list" class="restore-list hidden"></div>
+                <div class="form-actions">
+                    <button type="button" id="btn-restore-cancel" class="btn btn-sm">Close</button>
+                    <button type="button" id="btn-restore-start" class="btn btn-sm btn-primary" disabled>Restore all</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
 
     <script src="/static/js/pagination.js"></script>

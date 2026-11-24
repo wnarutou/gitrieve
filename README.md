@@ -9,6 +9,7 @@ Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
 - [Usage](#usage)
   - [repository](#repository)
   - [run](#run)
+  - [restore](#restore)
   - [release](#release)
   - [daemon](#daemon)
 - [Web UI](#web-ui)
@@ -26,6 +27,7 @@ Git Retrieve(gitrieve) is a tool to archive repositories from any Git servers.
 - Cron support
 - Local file storage (see [Storage](#storage))
 - **Deletion-safe sync** — local cached code and full history are never deleted by a sync, even when the upstream repo is taken down, DMCA-disabled, deleted, or replaced with a single README (see [Deletion-safe sync](#deletion-safe-sync))
+- Restore the local Git/issues/discussion cache from storage archives after a redeploy
 - Docker support (see [Run as docker container](#run-as-docker-container))
 
 ## Installation
@@ -93,6 +95,18 @@ gitrieve run
 
 Combined with cron, you can archive repositories periodically.
 
+### restore
+
+`restore` rebuilds the local `.gitrieve` cache from archives already present in the repository's configured storage backends. Use it after restoring a storage backup (for example the `./repo` directory) onto a new machine.
+
+```bash
+gitrieve restore gitrieve
+```
+
+With `useCache: true`, normal syncs also restore a missing or incomplete local cache automatically before contacting the Git server. An existing valid cache is never overwritten. The code archive contains `.git`, so branches and commit history are restored together. A Git cache is considered valid only when it can be opened, its required `.git` structure exists, and a present HEAD resolves to a readable commit. Issue and discussion caches use a completion metadata file so a legitimate empty cache is distinguishable from a partial one.
+
+New archives write a `.sha256` sidecar next to the `.tar.gz`; restores verify it when present. Archives created by older versions without a sidecar remain supported. Issue, discussion, and wiki caches are restored when their download options are enabled. Release assets are stored directly in the configured storage and need no separate local cache restore.
+
 ### release
 
 `release` archives all release assets of a repository.
@@ -139,6 +153,11 @@ An unsupported enabled component is recorded as skipped; a real component
 failure makes the overall execution fail. The page **never refreshes
 automatically** from polling, timers, or job-completion SSE events: use its
 Refresh button (or revisit the page) when you want a new snapshot.
+
+It also includes **Restore from backup**, a one-time bulk recovery entry that
+scans a configured file storage (such as `./repo`) and restores every
+discovered cache without relying on the current repository list or execution
+database.
 
 See the [Web UI guide](docs/web-ui.md) and the [API reference](docs/api.md) for details.
 

@@ -16,6 +16,7 @@ import (
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
 	"github.com/wnarutou/gitrieve/internal/logger"
+	"github.com/wnarutou/gitrieve/internal/recovery"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -27,6 +28,13 @@ type TestServer struct {
 
 func (s *TestServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
+}
+
+func (s *TestServer) Close() error {
+	if s.api != nil {
+		return s.api.Close()
+	}
+	return nil
 }
 
 // Cfg returns the config instance the API currently holds. Used by the
@@ -167,6 +175,16 @@ func NewStorageTestServer(cfg *config.Config, testDB *db.DB, executors ...*execu
 	s.router.POST("/api/storage", api.CreateStorage)
 	s.router.PUT("/api/storage/:id", api.UpdateStorage)
 	s.router.DELETE("/api/storage/:id", api.DeleteStorage)
+	return s
+}
+
+func NewRestoreTestServer(cfg *config.Config, testDB *db.DB, currentDir string) *TestServer {
+	api := NewAPI(cfg, testDB, nil)
+	api.recovery = recovery.NewService(testDB, logger.NewLogger(testDB), currentDir)
+	s := &TestServer{router: gin.Default(), api: api}
+	s.router.POST("/api/restore/scan", api.ScanRestore)
+	s.router.POST("/api/restore", api.StartRestore)
+	s.router.DELETE("/api/jobs/:id", api.CancelJob)
 	return s
 }
 

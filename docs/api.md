@@ -86,13 +86,14 @@ Requests missing or mismatching the token are rejected. When `authEnabled` is `f
 
 ## Jobs
 
-All server-originated work (cron, single-job requests, and bulk retries) enters
-the same executor queue. `cocurrencyNum` (the existing spelling) limits actual
-running work; accepted work remains `pending` until a slot is available. A
-repository cannot have two pending/running executions. On server startup, any
-execution and component left pending/running by the previous process is marked
-`failed` with an interruption message, so a restart cannot leave permanent
-active rows.
+All repository archive work (cron, single-job requests, and bulk retries)
+enters the same executor queue. `cocurrencyNum` (the existing spelling) limits
+actual running work; accepted work remains `pending` until a slot is available.
+A repository cannot have two pending/running executions. Restore-from-backup
+jobs are separate maintenance executions with an empty `repo_key`. On server
+startup, any execution and component left pending/running by the previous
+process is marked `failed` with an interruption message, so a restart cannot
+leave permanent active rows.
 
 ### Create a job
 
@@ -219,9 +220,111 @@ thousands of job IDs; use the Jobs page/API for individual executions.
 
 ---
 
+### Scan a backup for restorable repositories
+
+Scan a configured **file** storage backend without consulting configured
+repositories or execution history. The response describes the archives found
+under `<storage>/<host>/<owner>/<repo>/`.
+
+```
+POST /api/restore/scan
+```
+
+**Request body**
+
+```json
+{
+  "storage_name": "localFile"
+}
+```
+
+Omit `storage_name` only when exactly one file storage is configured.
+
+**Response `data`**
+
+```json
+{
+  "root": "/app/repo",
+  "total_repositories": 2,
+  "total_components": 3,
+  "present_components": 1,
+  "repositories": [
+    {
+      "key": "github.com/acme/demo",
+      "host": "github.com",
+      "owner": "acme",
+      "name": "demo",
+      "configured": false,
+      "release": true,
+      "components": [
+        {"component": "code", "archive": "demo.tar.gz", "present": false},
+        {"component": "issues", "archive": "issues.tar.gz", "present": false}
+      ]
+    }
+  ],
+  "warnings": []
+}
+```
+
+`configured` is informational only. Repositories absent from `config.yaml` are
+still included in the restore set.
+
+| Code | Meaning |
+|---|---|
+| 200 | Scan completed |
+| 400 | Invalid request, unknown source, S3 source, or missing backup root |
+
+---
+
+### Restore caches from a backup
+
+Start one maintenance job that rescans the selected file storage and restores
+every discovered Git, wiki, issue, and discussion cache. Existing valid caches
+are skipped. Release assets already live in the storage tree and are not copied.
+
+Git caches are opened and their HEAD commit is verified. Issue/discussion caches
+use completion metadata to distinguish a valid empty cache from a partial one.
+New archives have a `.sha256` sidecar that is verified when present; legacy
+archives without a sidecar remain supported.
+
+```
+POST /api/restore
+```
+
+**Request body**
+
+```json
+{
+  "storage_name": "localFile"
+}
+```
+
+The response uses the normal job shape and the job ID can be used with the log
+and cancel endpoints:
+
+```json
+{
+  "job_ids": ["1719800000"],
+  "status": "pending"
+}
+```
+
+The maintenance execution has an empty `repo_key`, so it does not update any
+repository's last-success time or health status.
+
+| Code | Meaning |
+|---|---|
+| 200 | Restore maintenance job accepted |
+| 400 | No file storage, invalid source, or no restorable repositories |
+| 409 | Another restore job is already running |
+| 503 | Restore service is unavailable or shutting down |
+| 500 | Failed to create the maintenance execution |
+
+---
+
 ### Cancel a job
 
-Cancel a running or pending job by its ID.
+Cancel a running or pending archive or restore-maintenance job by its ID.
 
 ```
 DELETE /api/jobs/:id

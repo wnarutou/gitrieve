@@ -9,6 +9,7 @@ import (
 	"github.com/wnarutou/gitrieve/cmd/issue"
 	"github.com/wnarutou/gitrieve/cmd/release"
 	"github.com/wnarutou/gitrieve/cmd/repository"
+	"github.com/wnarutou/gitrieve/cmd/restore"
 	"github.com/wnarutou/gitrieve/cmd/run"
 	"github.com/wnarutou/gitrieve/cmd/server"
 	"github.com/wnarutou/gitrieve/cmd/wiki"
@@ -37,6 +38,7 @@ func init() {
 	rootCmd.AddCommand(issue.Cmd)
 	rootCmd.AddCommand(wiki.Cmd)
 	rootCmd.AddCommand(discussion.Cmd)
+	rootCmd.AddCommand(restore.Cmd)
 	rootCmd.AddCommand(server.Cmd)
 	// flags
 	rootCmd.PersistentFlags().StringVarP(&config.Path, "config", "c", "config.yaml", "config file path")

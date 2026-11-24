@@ -33,6 +33,7 @@ type Server struct {
 	scheduler        gocron.Scheduler
 	database         *db.DB
 	executor         *executor.Executor
+	api              *internalserver.API
 	schedulerMu      sync.Mutex
 	logCleanupCancel context.CancelFunc
 	logCleanupDone   chan struct{}
@@ -82,6 +83,7 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 
 	// Initialize API
 	api := internalserver.NewAPI(cfg, database, exec)
+	s.api = api
 	api.SetScheduleRefresher(s)
 	if err := s.RefreshSchedules(cfg); err != nil {
 		ui.Errorf("Failed to schedule one or more repositories: %s", err)
@@ -126,6 +128,8 @@ func (s *Server) setupRoutes(cfg *config.Config) {
 	apiGroup.GET("/api/jobs", api.GetJobs)
 	apiGroup.GET("/api/jobs/:id/logs", api.GetJobLogs)
 	apiGroup.GET("/api/jobs/:id/components", api.GetJobComponents)
+	apiGroup.POST("/api/restore/scan", api.ScanRestore)
+	apiGroup.POST("/api/restore", api.StartRestore)
 	apiGroup.GET("/api/repositories", api.GetRepositories)
 	apiGroup.POST("/api/repositories", api.CreateRepository)
 	// *id catch-all: the identity key is a URL like github.com/owner/repo and
@@ -218,7 +222,10 @@ func (s *Server) Close() error {
 	s.schedulerMu.Lock()
 	defer s.schedulerMu.Unlock()
 
-	var schedulerErr, executorErr, databaseErr error
+	var apiErr, schedulerErr, executorErr, databaseErr error
+	if s.api != nil {
+		apiErr = s.api.Close()
+	}
 	if s.logCleanupCancel != nil {
 		s.logCleanupCancel()
 		<-s.logCleanupDone
@@ -232,7 +239,7 @@ func (s *Server) Close() error {
 	if s.database != nil {
 		databaseErr = s.database.Close()
 	}
-	return errors.Join(schedulerErr, executorErr, databaseErr)
+	return errors.Join(apiErr, schedulerErr, executorErr, databaseErr)
 }
 
 var Cmd = &cobra.Command{

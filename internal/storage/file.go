@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,24 +89,18 @@ func (f File) ListObject(prefix string) ([]Object, error) {
 }
 
 func (f File) GetObject(identifier string) (Object, error) {
-	if identifier == "" {
-		return Object{}, errors.New("invalid identifier: identifier cannot be empty")
+	reader, err := f.OpenObject(identifier)
+	if err != nil {
+		return Object{}, err
 	}
+	defer reader.Close()
 
 	filePath := filepath.Clean(identifier)
 	info, err := os.Stat(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Object{}, errors.New("invalid identifier: file does not exist")
-		}
 		return Object{}, err
 	}
-
-	if info.IsDir() {
-		return Object{}, errors.New("invalid identifier: identifier points to a directory, not a file")
-	}
-
-	data, err := os.ReadFile(filePath)
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return Object{}, err
 	}
@@ -117,6 +112,31 @@ func (f File) GetObject(identifier string) (Object, error) {
 			Size:         info.Size(),
 			LastModified: info.ModTime()},
 	}, nil
+}
+
+func (f File) OpenObject(identifier string) (io.ReadCloser, error) {
+	if identifier == "" {
+		return nil, errors.New("invalid identifier: identifier cannot be empty")
+	}
+
+	filePath := filepath.Clean(identifier)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrObjectNotFound, identifier)
+		}
+		return nil, err
+	}
+
+	if info.IsDir() {
+		return nil, errors.New("invalid identifier: identifier points to a directory, not a file")
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
 }
 
 func (f File) DeleteObject(identifier string) error {

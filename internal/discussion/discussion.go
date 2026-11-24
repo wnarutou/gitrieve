@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shurcooL/githubv4"
 	"github.com/wnarutou/gitrieve/internal/archive"
+	"github.com/wnarutou/gitrieve/internal/cache"
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/githubapi"
 	"github.com/wnarutou/gitrieve/internal/lock"
@@ -214,6 +214,17 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 	}
 
 	gitDir := path.Join(workingDir, r.Host, r.Owner, repoName, "discussion")
+	if useCache {
+		result, err := cache.RestoreComponent(ctx, currentDir, r, cache.ComponentDiscussion, storages)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			ui.Errorf("Warning: failed to restore discussion cache for %s: %s", repo.URL, err)
+		} else if result.Status == cache.StatusRestored {
+			ui.Printf("Restored discussion cache for %s from storage %s", repo.URL, result.StorageName)
+		}
+	}
 	err = storage.CreateDirIfNotExist(gitDir)
 	if err != nil {
 		ui.Errorf("Error creating working directory, %s", err)
@@ -518,6 +529,13 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 		discussionVariables["discussionCursor"] = query.Repository.Discussions.PageInfo.EndCursor
 	}
 
+	if useCache {
+		if err := cache.MarkPresent(gitDir, cache.ComponentDiscussion); err != nil {
+			ui.Errorf("Error marking discussion cache complete: %s", err)
+			return err
+		}
+	}
+
 	if isUpdated {
 		// Archive the discussion dir directly from gitDir. Create takes an
 		// absolute path and never changes the process cwd, so it is safe to
@@ -543,10 +561,9 @@ func Sync(ctx context.Context, repo typedef.Repository, storages []typedef.Multi
 				ui.Errorf("Error getting backend: %s", err)
 				return err
 			}
-			if _, err := packed.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			err = backend.PutObjectReader(ctx, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed)
+			err = storage.PutObjectReaderWithChecksum(
+				ctx, backend, path.Join(s.Path, r.Host, r.Owner, r.Name, base), packed,
+			)
 			if err != nil {
 				ui.Errorf("Error storing file: %s", err)
 				return err

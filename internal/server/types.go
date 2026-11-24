@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/wnarutou/gitrieve/internal/db"
+	"github.com/wnarutou/gitrieve/internal/recovery"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -30,6 +31,24 @@ type CreateJobRequest struct {
 type CreateJobResponse struct {
 	JobIDs []string `json:"job_ids"`
 	Status string   `json:"status"`
+}
+
+type RestoreRequest struct {
+	StorageName string `json:"storage_name"`
+}
+
+type RestoreRepositoryView struct {
+	recovery.Repository
+	Configured bool `json:"configured"`
+}
+
+type RestoreScanResponse struct {
+	Root              string                  `json:"root"`
+	Repositories      []RestoreRepositoryView `json:"repositories"`
+	TotalRepositories int                     `json:"total_repositories"`
+	TotalComponents   int                     `json:"total_components"`
+	PresentComponents int                     `json:"present_components"`
+	Warnings          []string                `json:"warnings"`
 }
 
 type BulkJobSelector struct {

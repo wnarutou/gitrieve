@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"github.com/wnarutou/gitrieve/internal/config"
 	"github.com/wnarutou/gitrieve/internal/db"
 	"github.com/wnarutou/gitrieve/internal/executor"
+	"github.com/wnarutou/gitrieve/internal/logger"
+	"github.com/wnarutou/gitrieve/internal/recovery"
 	"github.com/wnarutou/gitrieve/internal/typedef"
 )
 
@@ -29,6 +32,7 @@ type API struct {
 	bulkRepositoryStats func(context.Context, typedef.Repository) (map[string]db.RepositoryRunStats, error)
 	bulkExecute         func(context.Context, string, uint64, executor.EligibilityCheck) ([]string, error)
 	scheduleRefresher   ScheduleRefresher
+	recovery            *recovery.Service
 
 	// Test-only synchronization seam used to pause inside the unified
 	// publication callback after the Executor runtime store.
@@ -46,12 +50,26 @@ func NewAPI(cfg *config.Config, db *db.DB, exec *executor.Executor) *API {
 	if exec != nil {
 		initial = exec.RuntimeConfigSnapshot().Config()
 	}
-	api := &API{config: initial, db: db, executor: exec, readReloadSnapshot: config.ReadReloadSnapshot}
+	currentDir, _ := os.Getwd()
+	api := &API{
+		config:             initial,
+		db:                 db,
+		executor:           exec,
+		readReloadSnapshot: config.ReadReloadSnapshot,
+		recovery:           recovery.NewService(db, logger.NewLogger(db), currentDir),
+	}
 	api.bulkRepositoryStats = api.repositoryRunStatsForCandidate
 	if exec != nil {
 		api.bulkExecute = exec.ExecuteJobAtGenerationIfEligibleContext
 	}
 	return api
+}
+
+func (a *API) Close() error {
+	if a.recovery != nil {
+		return a.recovery.Close()
+	}
+	return nil
 }
 
 func (a *API) configSnapshot() *config.Config {
@@ -172,6 +190,142 @@ func (a *API) CreateJob(c *gin.Context) {
 			Status: string(executor.StatusPending),
 		},
 	})
+}
+
+func (a *API) ScanRestore(c *gin.Context) {
+	var req RestoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid request: " + err.Error()})
+		return
+	}
+	source, err := a.resolveRestoreSource(req.StorageName)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+	scan, err := recovery.Scan(source.Path, a.currentWorkingDir())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+
+	configured := make(map[string]bool)
+	var configuredPrefixes []string
+	if cfg := a.configSnapshot(); cfg != nil {
+		for _, repository := range cfg.Repository {
+			key := repository.Key()
+			if key == "" {
+				continue
+			}
+			if repository.GetType() == typedef.TypeUser || repository.GetType() == typedef.TypeOrg {
+				configuredPrefixes = append(configuredPrefixes, key+"/")
+				continue
+			}
+			configured[key] = true
+		}
+	}
+	repositories := make([]RestoreRepositoryView, len(scan.Repositories))
+	for i, repository := range scan.Repositories {
+		isConfigured := configured[repository.Key]
+		for _, prefix := range configuredPrefixes {
+			if strings.HasPrefix(repository.Key, prefix) {
+				isConfigured = true
+				break
+			}
+		}
+		repositories[i] = RestoreRepositoryView{
+			Repository: repository,
+			Configured: isConfigured,
+		}
+	}
+	c.JSON(http.StatusOK, Response{
+		Code: http.StatusOK,
+		Data: RestoreScanResponse{
+			Root:              scan.Root,
+			Repositories:      repositories,
+			TotalRepositories: scan.TotalRepositories,
+			TotalComponents:   scan.TotalComponents,
+			PresentComponents: scan.PresentComponents,
+			Warnings:          scan.Warnings,
+		},
+	})
+}
+
+func (a *API) StartRestore(c *gin.Context) {
+	var req RestoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid request: " + err.Error()})
+		return
+	}
+	source, err := a.resolveRestoreSource(req.StorageName)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+	if a.recovery == nil {
+		c.JSON(http.StatusServiceUnavailable, Response{Code: http.StatusServiceUnavailable, Message: "Restore service is unavailable"})
+		return
+	}
+	jobID, _, err := a.recovery.Start(c.Request.Context(), source)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, recovery.ErrNoRepositories), errors.Is(err, recovery.ErrFileStorageRequired):
+			status = http.StatusBadRequest
+		case errors.Is(err, recovery.ErrRestoreActive):
+			status = http.StatusConflict
+		case errors.Is(err, recovery.ErrClosed):
+			status = http.StatusServiceUnavailable
+		}
+		c.JSON(status, Response{Code: status, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, Response{
+		Code: http.StatusOK,
+		Data: CreateJobResponse{JobIDs: []string{jobID}, Status: string(executor.StatusPending)},
+	})
+}
+
+func (a *API) resolveRestoreSource(name string) (typedef.MultiStorage, error) {
+	cfg := a.configSnapshot()
+	if cfg == nil {
+		return typedef.MultiStorage{}, errors.New("configuration is unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		var onlyFile *typedef.MultiStorage
+		for i := range cfg.Storage {
+			if cfg.Storage[i].Type != "file" {
+				continue
+			}
+			if onlyFile != nil {
+				return typedef.MultiStorage{}, errors.New("multiple file storages configured; choose one")
+			}
+			onlyFile = &cfg.Storage[i]
+		}
+		if onlyFile == nil {
+			return typedef.MultiStorage{}, errors.New("no file storage configured")
+		}
+		return *onlyFile, nil
+	}
+	for _, source := range cfg.Storage {
+		if source.Name != name {
+			continue
+		}
+		if source.Type != "file" {
+			return typedef.MultiStorage{}, fmt.Errorf("storage %q is not a file storage", name)
+		}
+		return source, nil
+	}
+	return typedef.MultiStorage{}, fmt.Errorf("storage %q not found", name)
+}
+
+func (a *API) currentWorkingDir() string {
+	if a.recovery != nil {
+		return a.recovery.CurrentDir()
+	}
+	currentDir, _ := os.Getwd()
+	return currentDir
 }
 
 // BulkCreateJobs retries the current server-side eligible set selected by the
@@ -456,6 +610,25 @@ func (a *API) CancelJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, Response{
 			Code:    400,
 			Message: "Job ID is required",
+		})
+		return
+	}
+
+	var jobName, currentStatus string
+	lookupErr := a.db.QueryRow(
+		`SELECT job_name, status FROM executions WHERE id = ?`, jobID,
+	).Scan(&jobName, &currentStatus)
+	if lookupErr == nil && strings.HasPrefix(jobName, recovery.JobNamePrefix) {
+		if a.recovery != nil && a.recovery.Cancel(jobID) {
+			c.JSON(http.StatusOK, Response{
+				Code: http.StatusOK,
+				Data: CancelJobResponse{Status: string(executor.StatusCancelled)},
+			})
+			return
+		}
+		c.JSON(http.StatusOK, Response{
+			Code: http.StatusOK,
+			Data: CancelJobResponse{Status: currentStatus},
 		})
 		return
 	}

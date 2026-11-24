@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wnarutou/gitrieve/internal/archive"
 	"github.com/wnarutou/gitrieve/internal/lock"
 	"github.com/wnarutou/gitrieve/internal/scm"
 	"github.com/wnarutou/gitrieve/internal/typedef"
@@ -85,6 +87,24 @@ func TestSyncReusesCachedRepository(t *testing.T) {
 			require.NoError(t, err, "cached history must survive a failed sync")
 		})
 	}
+}
+
+func writeCodeBackup(t *testing.T, root, repoName string) {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), repoName)
+	_, err := git.PlainInit(source, false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(source, "README.md"), []byte("restored\n"), 0o644))
+	buf, err := archive.Create(context.Background(), source, repoName)
+	require.NoError(t, err)
+	defer buf.Close()
+	archivePath := filepath.Join(root, "github.com", "test", repoName, repoName+".tar.gz")
+	require.NoError(t, os.MkdirAll(filepath.Dir(archivePath), 0o755))
+	destination, err := os.Create(archivePath)
+	require.NoError(t, err)
+	_, err = io.Copy(destination, buf)
+	require.NoError(t, err)
+	require.NoError(t, destination.Close())
 }
 
 func TestSyncCancelledContextFailsPromptlyAndCleansUp(t *testing.T) {
@@ -213,4 +233,49 @@ func TestWikiCloneRepositoryNotFoundIsReportedByWikiLayer(t *testing.T) {
 	require.False(t, shouldLogCloneError(true, err))
 	require.True(t, shouldLogCloneError(false, err))
 	require.True(t, shouldLogCloneError(true, context.DeadlineExceeded))
+}
+
+func TestRestoreCacheForSyncRestoresCodeBeforeNetwork(t *testing.T) {
+	base := t.TempDir()
+	cwd := filepath.Join(base, "app")
+	storageRoot := filepath.Join(base, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o755))
+	writeCodeBackup(t, storageRoot, "cache-restore")
+
+	repo := typedef.Repository{Name: "cache-restore", URL: "github.com/test/cache-restore", UseCache: true}
+	r, err := scm.NewRepository(repo.URL)
+	require.NoError(t, err)
+	storages := []typedef.MultiStorage{{
+		Storage: typedef.Storage{Name: "local", Type: "file", Path: storageRoot},
+	}}
+
+	err = restoreCacheForSync(context.Background(), cwd, r, repo, false, storages)
+	require.NoError(t, err)
+
+	readme, err := os.ReadFile(filepath.Join(
+		cwd, ".gitrieve", "github.com", "test", "cache-restore", "code", "README.md",
+	))
+	require.NoError(t, err)
+	require.Equal(t, "restored\n", string(readme))
+}
+
+func TestRestoreCacheForSyncDoesNothingWithoutUseCache(t *testing.T) {
+	base := t.TempDir()
+	cwd := filepath.Join(base, "app")
+	storageRoot := filepath.Join(base, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o755))
+	writeCodeBackup(t, storageRoot, "no-cache")
+
+	repo := typedef.Repository{Name: "no-cache", URL: "github.com/test/no-cache"}
+	r, err := scm.NewRepository(repo.URL)
+	require.NoError(t, err)
+	storages := []typedef.MultiStorage{{
+		Storage: typedef.Storage{Name: "local", Type: "file", Path: storageRoot},
+	}}
+
+	err = restoreCacheForSync(context.Background(), cwd, r, repo, false, storages)
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(filepath.Join(cwd, ".gitrieve"))
+	require.True(t, os.IsNotExist(statErr), "disabled cache must not restore anything")
 }

@@ -440,6 +440,38 @@ select:focus, input:focus, textarea:focus {
     border-top: 1px solid var(--border);
 }
 
+.restore-toolbar { margin-top: 12px; }
+.restore-summary { margin-top: 12px; line-height: 1.5; }
+.restore-summary.error-text { color: var(--danger); }
+.restore-warning { margin-top: 8px; color: #92400e; font-size: 12px; }
+.restore-list {
+    margin-top: 12px;
+    max-height: 42vh;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fbfcfd;
+}
+.restore-row {
+    display: grid;
+    gap: 3px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+.restore-row:last-child { border-bottom: 0; }
+.restore-row strong { overflow-wrap: anywhere; }
+.restore-components { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.restore-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #4338ca;
+    font-size: 11px;
+}
+.restore-tag.warn { background: #fef3c7; color: #92400e; }
+
 .toast {
     position: fixed;
     right: 24px;

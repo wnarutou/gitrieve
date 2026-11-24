@@ -215,6 +215,7 @@ test('renders repository actions before the repository name', async () => {
         checked: false,
     });
     const controls = {
+        '#btn-restore-from-backup': control(),
         '#btn-add-repo': control(),
         '#btn-refresh-repos': control(),
         '#repos-search': control(),
